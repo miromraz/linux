@@ -18,6 +18,7 @@ description:
 properties:
   compatible:
     enum:
+      - marvell,sd8777
       - marvell,sd8787
       - marvell,sd8897
       - marvell,sd8978
