@@ -41,8 +41,8 @@ void mwifiex_process_sta_txpd(struct mwifiex_private *priv,
 
 	pkt_type = mwifiex_is_skb_mgmt_frame(skb) ? PKT_TYPE_MGMT : 0;
 
-	pad = ((uintptr_t)skb->data - (sizeof(*local_tx_pd) + hroom)) &
-	       (MWIFIEX_DMA_ALIGN_SZ - 1);
+	pad = (4 - (((void *)skb->data - NULL) & 0x3)) % 4;
+
 	skb_push(skb, sizeof(*local_tx_pd) + pad);
 
 	local_tx_pd = (struct txpd *) skb->data;
@@ -57,12 +57,6 @@ void mwifiex_process_sta_txpd(struct mwifiex_private *priv,
 	local_tx_pd->priority = (u8) skb->priority;
 	local_tx_pd->pkt_delay_2ms =
 				mwifiex_wmm_compute_drv_pkt_delay(priv, skb);
-
-	if (tx_info->flags & MWIFIEX_BUF_FLAG_EAPOL_TX_STATUS ||
-	    tx_info->flags & MWIFIEX_BUF_FLAG_ACTION_TX_STATUS) {
-		local_tx_pd->tx_token_id = tx_info->ack_frame_id;
-		local_tx_pd->flags |= MWIFIEX_TXPD_FLAGS_REQ_TX_STATUS;
-	}
 
 	if (local_tx_pd->priority <
 	    ARRAY_SIZE(priv->wmm.user_pri_pkt_tx_ctrl))

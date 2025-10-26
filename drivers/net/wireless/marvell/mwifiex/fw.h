@@ -690,9 +690,7 @@ struct txpd {
 	u8 priority;
 	u8 flags;
 	u8 pkt_delay_2ms;
-	u8 reserved1[2];
-	u8 tx_token_id;
-	u8 reserved[2];
+	u8 reserved1;
 } __packed;
 
 struct rxpd {
