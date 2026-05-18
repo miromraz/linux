@@ -911,14 +911,32 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 static int stmfts5_configure(struct stmfts_data *sdata)
 {
 	u8 event[STMFTS_EVENT_SIZE];
-	int ret;
+	int ret, retries;
 
-	/* Verify I2C communication */
-	ret = i2c_smbus_read_i2c_block_data(sdata->client,
-					    STMFTS_READ_ALL_EVENT,
-					    sizeof(event), event);
+	/*
+	 * After reset, wait for the chip to post the CONTROLLER_READY event.
+	 * FTM5 firmware boot includes internal CRC verification of flash
+	 * sections and can take a few hundred ms before the chip's I2C state
+	 * machine is up; a fixed post-reset sleep large enough to cover the
+	 * worst case would penalise every probe.  Poll the event FIFO at
+	 * 25ms intervals for up to ~500ms; bail out early once READY arrives.
+	 */
+	for (retries = 0; retries < 20; retries++) {
+		ret = i2c_smbus_read_i2c_block_data(sdata->client,
+						    STMFTS_READ_ALL_EVENT,
+						    sizeof(event), event);
+		if (ret >= 0 && event[0] == STMFTS5_EV_CONTROLLER_READY)
+			break;
+		msleep(25);
+	}
 	if (ret < 0)
 		return ret;
+	if (event[0] != STMFTS5_EV_CONTROLLER_READY) {
+		dev_err(&sdata->client->dev,
+			"timed out waiting for CONTROLLER_READY (last event 0x%02x)\n",
+			event[0]);
+		return -ETIMEDOUT;
+	}
 
 	enable_irq(sdata->client->irq);
 
