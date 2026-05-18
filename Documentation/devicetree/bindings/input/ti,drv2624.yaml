@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/ti,drv2624.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Texas Instruments DRV2624 haptic driver
+
+maintainers:
+  - postmarketOS Mainline <pmos-mainline@example.org>
+
+description:
+  The Texas Instruments DRV2624 is a haptic driver for linear resonant
+  actuators (LRAs) and eccentric rotating mass (ERM) motors with an I2C
+  control interface, an internal RAM waveform sequencer and a real-time
+  playback (RTP) input.
+
+allOf:
+  - $ref: /schemas/input/input.yaml#
+
+properties:
+  compatible:
+    const: ti,drv2624
+
+  reg:
+    maxItems: 1
+
+  enable-gpios:
+    description: Active-high enable pin. The chip enters ultra-low-power
+      shutdown when this pin is deasserted.
+    maxItems: 1
+
+  interrupts:
+    description: Optional. The DRV2624 IRQ pin is asserted on
+      diagnostic faults and waveform-completion events.
+    maxItems: 1
+
+  vdd-supply:
+    description: Optional power supply (1.8 V to 3.6 V).
+
+  ti,actuator:
+    description: Actuator type connected to the driver.
+    enum: [lra, erm]
+    default: lra
+
+  ti,rated-voltage-mv:
+    description: Rated RMS voltage of the actuator, in millivolts.
+    minimum: 100
+    maximum: 5500
+    default: 2100
+
+  ti,overdrive-voltage-mv:
+    description: Peak overdrive (clamp) voltage, in millivolts.
+    minimum: 100
+    maximum: 5500
+    default: 3000
+
+  ti,lra-frequency-hz:
+    description: Resonant frequency of the LRA, in Hz. Ignored for ERM.
+    minimum: 50
+    maximum: 500
+    default: 205
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        haptic@5a {
+            compatible = "ti,drv2624";
+            reg = <0x5a>;
+            enable-gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
+            ti,actuator = "lra";
+            ti,lra-frequency-hz = <205>;
+            ti,rated-voltage-mv = <2100>;
+            ti,overdrive-voltage-mv = <3000>;
+        };
+    };
