@@ -636,7 +636,22 @@
 	*/
 
 	/* st,m24c08 e2prom@50 */
-	/* ti,drv2624 haptic@5a */
+
+	haptic@5a {
+		compatible = "ti,drv2624";
+		reg = <0x5a>;
+
+		enable-gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
+
+		ti,actuator = "lra";
+		ti,lra-frequency-hz = <205>;
+		ti,rated-voltage-mv = <2100>;
+		ti,overdrive-voltage-mv = <3000>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&haptic_en_default>;
+	};
+
 	/* dlg,slg51000 pmic@75*/
 };
 
@@ -872,6 +887,13 @@
 
 &tlmm {
 	gpio-reserved-ranges = <59 4>;
+
+	haptic_en_default: haptic-en-default-state {
+		pins = "gpio11";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
 
 	mdp_vsync_p: mdp-vsync-p-state {
 		pins = "gpio10";
