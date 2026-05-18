@@ -705,6 +705,10 @@
 	status = "okay";
 };
 
+&pm6150_vib {
+	status = "okay";
+};
+
 &pm6150_rtc {
 	status = "okay";
 };
