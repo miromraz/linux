@@ -43,17 +43,22 @@ properties:
     enum: [lra, erm]
     default: lra
 
-  ti,rated-voltage-mv:
-    description: Rated RMS voltage of the actuator, in millivolts.
-    minimum: 100
-    maximum: 5500
-    default: 2100
+  ti,rated-voltage-reg:
+    description: |
+      Optional raw RATED_VOLT register value (0x1F). The chip's reset
+      default (0x3E) is safe for typical LRAs; only set this when the
+      board's downstream HAL uses a different value. The voltage
+      formula depends on f_LRA, playback interval, OD_CLAMP_LATCH and
+      chip revision, so the driver does not derive this from mV.
+    minimum: 1
+    maximum: 255
 
-  ti,overdrive-voltage-mv:
-    description: Peak overdrive (clamp) voltage, in millivolts.
-    minimum: 100
-    maximum: 5500
-    default: 3000
+  ti,od-clamp-reg:
+    description: |
+      Optional raw OD_CLAMP register value (0x20). Defaults to the
+      chip reset value (0x89) when omitted.
+    minimum: 1
+    maximum: 255
 
   ti,lra-frequency-hz:
     description: Resonant frequency of the LRA, in Hz. Ignored for ERM.
@@ -102,7 +107,5 @@ examples:
             enable-gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
             ti,actuator = "lra";
             ti,lra-frequency-hz = <205>;
-            ti,rated-voltage-mv = <2100>;
-            ti,overdrive-voltage-mv = <3000>;
         };
     };
