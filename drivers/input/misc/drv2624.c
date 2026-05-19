@@ -93,8 +93,6 @@
 #define DRV2624_FW_HEADER_SIZE		20
 
 /* Default rated/overdrive voltages for a generic LRA (Vrms) */
-#define DRV2624_DEF_RATED_MV		2100	/* ~2.1V rms */
-#define DRV2624_DEF_OD_MV		3000	/* ~3.0V peak */
 
 /* Default LRA resonant frequency, Hz */
 #define DRV2624_DEF_LRA_HZ		205
@@ -127,10 +125,10 @@ struct drv2624_data {
 	struct regulator *vdd;
 
 	enum drv2624_actuator actuator;
-	u32 rated_mv;
-	u32 od_mv;
 	u32 lra_freq_hz;
 	u32 ol_lra_period;	/* DT-supplied per-unit factory cal; 0 = derive from freq */
+	u8 rated_volt_raw;	/* raw register value; 0 = leave at chip default */
+	u8 od_clamp_raw;	/* raw register value; 0 = leave at chip default */
 	u8 autocal[3];
 	bool autocal_present;
 
@@ -147,18 +145,6 @@ static const struct regmap_config drv2624_regmap_config = {
 	.max_register = DRV2624_REG_MAX,
 };
 
-/*
- * RATED_VOLTAGE register encoding (from datasheet, LRA mode, OD_CLAMP_LATCH=0):
- *   reg_val = round( v_mv * sqrt(1 - 4*300us*lra_hz) / (5.3438 mV) )
- * For Pixel-class LRAs (~205 Hz) this collapses to roughly:
- *   reg_val ≈ v_mv * 100 / 575
- * Driver uses the simplified linear approximation since vendor parts vary
- * and the exact constant gets tuned via DT (ti,rated-voltage-mv).
- */
-static u8 drv2624_voltage_to_reg(u32 mv)
-{
-	return min_t(u32, (mv * 100U) / 575U, 0xFF);
-}
 
 /*
  * Park the chip in RAM Waveform Sequencer mode with effect 1 (CLICK)
@@ -410,16 +396,29 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	if (error)
 		return error;
 
-	/* Program rated and overdrive voltages */
-	error = regmap_write(h->regmap, DRV2624_REG_RATED_VOLT,
-			     drv2624_voltage_to_reg(h->rated_mv));
-	if (error)
-		return error;
-
-	error = regmap_write(h->regmap, DRV2624_REG_OD_CLAMP,
-			     drv2624_voltage_to_reg(h->od_mv));
-	if (error)
-		return error;
+	/*
+	 * Program rated and overdrive voltages if explicit raw register
+	 * values were supplied via DT. The chip reset defaults
+	 * (RATED_VOLT=0x3E ≈ 2 V_rms, OD_CLAMP=0x89 ≈ 4 V_peak) are safe
+	 * for the LRAs we've seen and match what the downstream Pixel HAL
+	 * ends up with after autocal. Writing computed values from a
+	 * voltage-in-mV formula is dangerous: the closed-form encoding
+	 * depends on f_LRA, playback interval, OD_CLAMP_LATCH, and the
+	 * chip revision, and easy approximations clamp to 0xFF for
+	 * normal LRAs — which immediately over-currents on the next play.
+	 */
+	if (h->rated_volt_raw) {
+		error = regmap_write(h->regmap, DRV2624_REG_RATED_VOLT,
+				     h->rated_volt_raw);
+		if (error)
+			return error;
+	}
+	if (h->od_clamp_raw) {
+		error = regmap_write(h->regmap, DRV2624_REG_OD_CLAMP,
+				     h->od_clamp_raw);
+		if (error)
+			return error;
+	}
 
 	/*
 	 * Apply factory autocal compensation if present. Pixel devices
@@ -523,12 +522,17 @@ static int drv2624_probe(struct i2c_client *client)
 				"ti,actuator must be 'lra' or 'erm'\n");
 	}
 
-	if (device_property_read_u32(dev, "ti,rated-voltage-mv", &h->rated_mv))
-		h->rated_mv = DRV2624_DEF_RATED_MV;
-	if (device_property_read_u32(dev, "ti,overdrive-voltage-mv", &h->od_mv))
-		h->od_mv = DRV2624_DEF_OD_MV;
 	if (device_property_read_u32(dev, "ti,lra-frequency-hz", &h->lra_freq_hz))
 		h->lra_freq_hz = DRV2624_DEF_LRA_HZ;
+
+	/*
+	 * Optional raw RATED_VOLT / OD_CLAMP register values. The chip's
+	 * reset defaults (0x3E / 0x89) are safe and usually correct, so
+	 * these are only needed when a board's downstream HAL set
+	 * different values (e.g. a stronger or weaker LRA). Skip if zero.
+	 */
+	device_property_read_u8(dev, "ti,rated-voltage-reg", &h->rated_volt_raw);
+	device_property_read_u8(dev, "ti,od-clamp-reg", &h->od_clamp_raw);
 
 	/*
 	 * Optional per-unit factory-calibrated open-loop LRA period (raw
