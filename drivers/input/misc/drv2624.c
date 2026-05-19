@@ -24,24 +24,28 @@
 
 #define DRV2624_REG_CHIP_ID		0x00
 #define DRV2624_REG_STATUS		0x01
+#define DRV2624_REG_LRA_PERIOD_H	0x05	/* measured closed-loop period */
+#define DRV2624_REG_LRA_PERIOD_L	0x06
 #define DRV2624_REG_MODE		0x07
 #define   DRV2624_MODE_STANDBY		BIT(6)
-#define   DRV2624_MODE_MASK		GENMASK(2, 0)
+#define   DRV2624_MODE_MASK		GENMASK(1, 0)
 #define   DRV2624_MODE_RAM_PLAYBACK	0x00
 #define   DRV2624_MODE_RAM_WAVE_SEQ	0x01
 #define   DRV2624_MODE_RTP		0x02
 #define   DRV2624_MODE_DIAGNOSTICS	0x03
-#define DRV2624_REG_RTP_INPUT		0x0E
+#define DRV2624_REG_CONTROL1		0x08
+#define   DRV2624_CTRL1_LRA		BIT(7)
+#define   DRV2624_CTRL1_AUTO_BRK_OL	BIT(3)
+#define   DRV2624_CTRL1_AUTO_BRK_INTO_STBY  BIT(2)
 #define DRV2624_REG_GO			0x0C
 #define   DRV2624_GO_BIT		BIT(0)
 #define DRV2624_REG_STOP		0x0D
 #define   DRV2624_STOP_BIT		BIT(0)
+#define DRV2624_REG_RTP_INPUT		0x0E
 #define DRV2624_REG_RATED_VOLT		0x1F
 #define DRV2624_REG_OD_CLAMP		0x20
-#define DRV2624_REG_LRA_PERIOD_H	0x2E
-#define DRV2624_REG_LRA_PERIOD_L	0x2F
-#define DRV2624_REG_CONTROL1		0x27
-#define   DRV2624_CTRL1_LRA		BIT(7)
+#define DRV2624_REG_OL_LRA_PERIOD_H	0x2E
+#define DRV2624_REG_OL_LRA_PERIOD_L	0x2F
 #define DRV2624_REG_MAX			0x30
 
 #define DRV2624_CHIP_ID_VAL		0x03
@@ -163,11 +167,23 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		return -ENODEV;
 	}
 
-	/* Set actuator type */
+	/*
+	 * CONTROL1: set actuator type (LRA), enable open-loop auto-brake (a
+	 * brake waveform played at end of drive in open loop) and auto-brake
+	 * into standby (decelerate the LRA when GO returns to 0 rather than
+	 * cutting drive cold and leaving the actuator to ring down at its
+	 * natural Q). Without AUTO_BRK_INTO_STBY a typical phone LRA rings
+	 * for ~700 ms after the kernel ends an effect, which is felt as a
+	 * long buzz instead of a crisp tap.
+	 */
 	error = regmap_update_bits(h->regmap, DRV2624_REG_CONTROL1,
-				   DRV2624_CTRL1_LRA,
-				   h->actuator == DRV2624_ACTUATOR_LRA ?
-					DRV2624_CTRL1_LRA : 0);
+				   DRV2624_CTRL1_LRA |
+				   DRV2624_CTRL1_AUTO_BRK_OL |
+				   DRV2624_CTRL1_AUTO_BRK_INTO_STBY,
+				   (h->actuator == DRV2624_ACTUATOR_LRA ?
+					DRV2624_CTRL1_LRA : 0) |
+				   DRV2624_CTRL1_AUTO_BRK_OL |
+				   DRV2624_CTRL1_AUTO_BRK_INTO_STBY);
 	if (error)
 		return error;
 
@@ -182,13 +198,16 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	if (error)
 		return error;
 
-	/* Program LRA resonant period (for LRA actuators) */
+	/*
+	 * Program open-loop LRA period. The chip uses this until the
+	 * closed-loop tracker locks on resonance. Period unit is 1.25us
+	 * (the chip's 800 kHz internal clock); period_ticks = 800000 / f_Hz.
+	 */
 	if (h->actuator == DRV2624_ACTUATOR_LRA && h->lra_freq_hz) {
-		/* period = 1 / (LRA_PERIOD_LSB * f_lra), LSB = 24.39us */
-		period = 1000000U / (h->lra_freq_hz * 24U + h->lra_freq_hz / 3U);
-		regmap_write(h->regmap, DRV2624_REG_LRA_PERIOD_H,
+		period = 800000U / h->lra_freq_hz;
+		regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_H,
 			     (period >> 8) & 0xFF);
-		regmap_write(h->regmap, DRV2624_REG_LRA_PERIOD_L,
+		regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_L,
 			     period & 0xFF);
 	}
 
