@@ -284,9 +284,8 @@ static void drv2624_fw_loaded(const struct firmware *fw, void *context)
 	int error, i;
 	u32 magic;
 
-	dev_err(dev, "drv2624_fw_loaded: callback fired, fw=%p\n", fw);
 	if (!fw) {
-		dev_err(dev, "no drv2624.bin; ROM effects unavailable, RTP-only\n");
+		dev_info(dev, "no drv2624.bin; ROM effects unavailable, RTP-only\n");
 		return;
 	}
 	if (fw->size <= DRV2624_FW_HEADER_SIZE) {
@@ -332,7 +331,6 @@ static int drv2624_upload_firmware(struct drv2624_data *h)
 	struct device *dev = &h->client->dev;
 	int error;
 
-	dev_err(dev, "drv2624_upload_firmware: requesting drv2624.bin\n");
 	/*
 	 * Async load: probe doesn't block on the user-mode firmware helper.
 	 * On success the callback uploads to chip RAM and parks in WAV_SEQ.
