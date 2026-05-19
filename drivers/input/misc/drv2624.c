@@ -159,7 +159,13 @@ struct drv2624_data {
 static const struct regmap_config drv2624_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.max_register = DRV2624_REG_MAX,
+	/*
+	 * RAM access registers (0xFD/0xFE/0xFF) live above the normal
+	 * control-register window, so the regmap window has to extend
+	 * to 0xFF — otherwise the ROM upload regmap_writes get rejected
+	 * as out-of-range and probe fails with -EIO.
+	 */
+	.max_register = DRV2624_REG_RAM_DATA,
 };
 
 
