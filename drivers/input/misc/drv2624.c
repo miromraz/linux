@@ -268,8 +268,9 @@ static void drv2624_close(struct input_dev *input)
 	struct drv2624_data *h = input_get_drvdata(input);
 
 	cancel_work_sync(&h->work);
-	regmap_write(h->regmap, DRV2624_REG_CONTROL2,
-		     DRV2624_CTRL2_INTERVAL_1MS | DRV2624_CTRL2_STOP_BIT);
+	/* Only pulse the STOP bit; LIB_LRA must survive close→open. */
+	regmap_update_bits(h->regmap, DRV2624_REG_CONTROL2,
+			   DRV2624_CTRL2_STOP_BIT, DRV2624_CTRL2_STOP_BIT);
 	if (h->fw_ram_size)
 		drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
 }
