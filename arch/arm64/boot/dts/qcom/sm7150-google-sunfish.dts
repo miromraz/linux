@@ -645,8 +645,7 @@
 
 		ti,actuator = "lra";
 		ti,lra-frequency-hz = <172>;
-		ti,rated-voltage-mv = <2100>;
-		ti,overdrive-voltage-mv = <3000>;
+		/* Omit ti,rated-voltage-reg / ti,od-clamp-reg → chip defaults. */
 
 		/*
 		 * Factory autocal compensation from
