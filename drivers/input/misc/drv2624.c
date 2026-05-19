@@ -199,21 +199,30 @@ static void drv2624_worker(struct work_struct *work)
 	}
 
 	/*
-	 * Short effect + firmware loaded → play ROM CLICK from RAM. The
-	 * chip is already parked in MODE=WAV_SEQ + WAV_FRM_SEQ1=CLICK by
-	 * hw_init / a prior end-of-effect, so we just toggle GO.
+	 * Short effect → trigger whatever's already parked. The chip will
+	 * be in WAV_SEQ + WAV_FRM_SEQ1=CLICK if either (a) the driver's
+	 * own firmware load callback succeeded, or (b) userspace put it
+	 * there out-of-band (e.g. /etc/local.d init script while the
+	 * driver's request_firmware path is being debugged). Either way,
+	 * GO triggers playback of whatever's currently selected.
 	 */
-	if (h->fw_ram_size && h->replay_length <= DRV2624_SHORT_PLAY_MS) {
-		error = regmap_write(h->regmap, DRV2624_REG_GO, DRV2624_GO_BIT);
-		if (error)
-			dev_err(dev, "GO write failed: %d\n", error);
-		return;
+	if (h->replay_length <= DRV2624_SHORT_PLAY_MS) {
+		unsigned int mode = 0;
+
+		regmap_read(h->regmap, DRV2624_REG_MODE, &mode);
+		if ((mode & DRV2624_MODE_MASK) == DRV2624_MODE_RAM_WAVE_SEQ) {
+			error = regmap_write(h->regmap, DRV2624_REG_GO,
+					     DRV2624_GO_BIT);
+			if (error)
+				dev_err(dev, "GO write failed: %d\n", error);
+			return;
+		}
+		/* Chip not parked in SEQ — fall through to RTP path. */
 	}
 
 	/*
-	 * Long effect (or no firmware) → fall back to RTP. End-of-effect
-	 * (magnitude=0 path above) re-parks in WAV_SEQ for the next short
-	 * call.
+	 * Long effect (or chip in RTP mode) → RTP path. End-of-effect
+	 * (magnitude=0 above) re-parks in WAV_SEQ if firmware is loaded.
 	 */
 	error = regmap_write(h->regmap, DRV2624_REG_MODE, DRV2624_MODE_RTP);
 	if (error) {
@@ -259,25 +268,26 @@ static void drv2624_close(struct input_dev *input)
 }
 
 /*
- * Upload the TI library blob (drv2624.bin) into the chip's 1 kB on-chip
- * RAM. The file is a 20-byte header (magic 0x2624, fw_size, build date,
- * checksum, effect count) followed by the RAM image — a per-effect
- * pointer table + voltage-time sample pairs. The chip's playback engine
- * resolves the layout itself; we just bulk-write the post-header bytes
- * into RAM starting at address 0.
+ * Async firmware-loaded callback. The TI library blob (drv2624.bin)
+ * is a 20-byte header (magic 0x2624, fw_size, build date, checksum,
+ * effect count) followed by the RAM image — a per-effect pointer
+ * table + voltage-time sample pairs. The chip's playback engine
+ * resolves the layout itself; we just bulk-write the post-header
+ * bytes into RAM starting at address 0, then park the chip in
+ * WAV_SEQ mode with effect 1 (CLICK) selected so future GO triggers
+ * play the ROM CLICK.
  */
-static int drv2624_upload_firmware(struct drv2624_data *h)
+static void drv2624_fw_loaded(const struct firmware *fw, void *context)
 {
+	struct drv2624_data *h = context;
 	struct device *dev = &h->client->dev;
-	const struct firmware *fw;
 	int error, i;
 	u32 magic;
 
-	error = request_firmware(&fw, "drv2624.bin", dev);
-	if (error) {
-		dev_info(dev, "no drv2624.bin (%d); ROM effects unavailable, RTP-only\n",
-			 error);
-		return 0;
+	dev_err(dev, "drv2624_fw_loaded: callback fired, fw=%p\n", fw);
+	if (!fw) {
+		dev_err(dev, "no drv2624.bin; ROM effects unavailable, RTP-only\n");
+		return;
 	}
 	if (fw->size <= DRV2624_FW_HEADER_SIZE) {
 		dev_warn(dev, "drv2624.bin truncated (%zu bytes)\n", fw->size);
@@ -305,9 +315,37 @@ static int drv2624_upload_firmware(struct drv2624_data *h)
 	h->fw_ram_size = fw->size - DRV2624_FW_HEADER_SIZE;
 	dev_info(dev, "drv2624.bin uploaded (%zu byte RAM image)\n", h->fw_ram_size);
 
+	/*
+	 * Park chip in WAV_SEQ + CLICK now that the library is loaded.
+	 * From here, drv2624_worker just toggles GO for short rumbles
+	 * and the chip plays ROM CLICK.
+	 */
+	if (drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK))
+		dev_warn(dev, "failed to park chip in WAV_SEQ\n");
+
 out_release:
 	release_firmware(fw);
-	return 0;	/* never fatal — driver falls back to RTP */
+}
+
+static int drv2624_upload_firmware(struct drv2624_data *h)
+{
+	struct device *dev = &h->client->dev;
+	int error;
+
+	dev_err(dev, "drv2624_upload_firmware: requesting drv2624.bin\n");
+	/*
+	 * Async load: probe doesn't block on the user-mode firmware helper.
+	 * On success the callback uploads to chip RAM and parks in WAV_SEQ.
+	 * On failure the kernel firmware loader prints "Direct firmware load
+	 * for drv2624.bin failed with error -N" automatically and the chip
+	 * stays in the RTP-only fallback from hw_init.
+	 */
+	error = request_firmware_nowait(THIS_MODULE, FW_ACTION_UEVENT,
+					"drv2624.bin", dev, GFP_KERNEL,
+					h, drv2624_fw_loaded);
+	if (error)
+		dev_warn(dev, "request_firmware_nowait failed: %d\n", error);
+	return 0;
 }
 
 static int drv2624_hw_init(struct drv2624_data *h)
