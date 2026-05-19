@@ -644,9 +644,18 @@
 		enable-gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
 
 		ti,actuator = "lra";
-		ti,lra-frequency-hz = <205>;
+		ti,lra-frequency-hz = <172>;
 		ti,rated-voltage-mv = <2100>;
 		ti,overdrive-voltage-mv = <3000>;
+
+		/*
+		 * Factory autocal compensation from
+		 * /persist/haptics/drv2624.cal on a real sunfish unit.
+		 * Variations between phones exist; this is a reasonable
+		 * shared default that still feels right on most Pixel 4a
+		 * LRAs we've seen.
+		 */
+		ti,autocal-comp = /bits/ 8 <18 150 0>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&haptic_en_default>;
@@ -720,9 +729,13 @@
 	status = "okay";
 };
 
-&pm6150_vib {
-	status = "okay";
-};
+/*
+ * pm6150_vib is intentionally left disabled: the PM6150's internal
+ * vibrator block exists in silicon but no motor is wired to it on
+ * sunfish — the LRA is driven by the external TI DRV2624 at i2c-9
+ * 0x5a. Enabling pm6150_vib creates a phantom input device that
+ * feedbackd would otherwise pick up and "drive" silently.
+ */
 
 &pm6150_rtc {
 	status = "okay";
