@@ -61,6 +61,17 @@ properties:
     maximum: 500
     default: 205
 
+  ti,autocal-comp:
+    description: |
+      Optional per-device factory autocal compensation bytes. The
+      driver writes these three values to the AUTOCAL_COMP register
+      bank (0x21..0x23) at init time. For Pixel devices this carries
+      the values from /persist/haptics/drv2624.cal's "autocal: X Y Z"
+      line. If omitted, the chip's internal autocal default is used.
+    $ref: /schemas/types.yaml#/definitions/uint8-array
+    minItems: 3
+    maxItems: 3
+
 required:
   - compatible
   - reg
