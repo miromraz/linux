@@ -27,15 +27,15 @@
  *     back to the Waveform Sequencer park state for the next short
  *     event.
  *
- * The driver loads `drv2624.bin` (TI library format: 20-byte header
- * + RAM image) via request_firmware() at probe; without it short
- * effects degrade to RTP. A `ti,autocal-comp` byte array DT property
- * can carry the device's factory autocal compensation; if absent the
- * chip's internal defaults are used.
+ * The driver embeds the 25-byte ROM waveform library at build time
+ * (effects 1=CLICK, 2=TICK, 3=DOUBLE_CLICK, 4=HEAVY_CLICK — verbatim
+ * from Google's drv2624.bin) and uploads it to chip RAM at probe.
+ * A `ti,autocal-comp` byte-array DT property can carry the device's
+ * factory autocal compensation; if absent the chip's internal
+ * defaults are used.
  */
 
 #include <linux/delay.h>
-#include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
@@ -88,14 +88,31 @@
 
 #define DRV2624_CHIP_ID_VAL		0x03
 
-/* Firmware (drv2624.bin) header layout, little-endian. */
-#define DRV2624_FW_MAGIC		0x2624
-#define DRV2624_FW_HEADER_SIZE		20
-
-/* Default rated/overdrive voltages for a generic LRA (Vrms) */
-
 /* Default LRA resonant frequency, Hz */
 #define DRV2624_DEF_LRA_HZ		205
+
+/*
+ * Pre-tuned ROM waveform library, lifted verbatim from the post-header
+ * RAM image of Google's drv2624.bin (the same library Pixel's downstream
+ * HAL uploads). 25 bytes: an effect pointer table followed by
+ * voltage/time sample pairs the chip's playback engine resolves on its
+ * own. Effects: 1=CLICK, 2=TICK, 3=DOUBLE_CLICK, 4=HEAVY_CLICK.
+ *
+ * Embedded rather than loaded via request_firmware because:
+ *   - request_firmware(_nowait) goes through firmware_class.path on this
+ *     SoC (msm-firmware-loader sets it to a path that does not fall
+ *     through to /lib/firmware in practice), and silently fails;
+ *   - the data is tiny, stable, and not vendor-secret;
+ *   - synchronous upload from probe removes the chip-state race where
+ *     a haptic event arrives before the async callback finishes and
+ *     leaves the chip stuck in RTP mode.
+ */
+static const u8 drv2624_rom_library[] = {
+	0x00, 0x00, 0x0d, 0x02, 0x00, 0x0f, 0x02, 0x00,
+	0x11, 0x06, 0x00, 0x17, 0x02, 0x3f, 0x06, 0x3f,
+	0x06, 0x3f, 0x08, 0x00, 0x8d, 0x3f, 0x0c, 0x3f,
+	0x06,
+};
 
 /*
  * Below this requested rumble length we use ROM CLICK from the loaded
@@ -192,12 +209,9 @@ static void drv2624_worker(struct work_struct *work)
 	}
 
 	/*
-	 * Short effect → trigger whatever's already parked. The chip will
-	 * be in WAV_SEQ + WAV_FRM_SEQ1=CLICK if either (a) the driver's
-	 * own firmware load callback succeeded, or (b) userspace put it
-	 * there out-of-band (e.g. /etc/local.d init script while the
-	 * driver's request_firmware path is being debugged). Either way,
-	 * GO triggers playback of whatever's currently selected.
+	 * Short effect → trigger whatever's already parked. Probe parks the
+	 * chip in WAV_SEQ + WAV_FRM_SEQ1=CLICK, so the GO write fires the
+	 * ROM CLICK from RAM.
 	 */
 	if (h->replay_length <= DRV2624_SHORT_PLAY_MS) {
 		unsigned int mode = 0;
@@ -262,81 +276,28 @@ static void drv2624_close(struct input_dev *input)
 }
 
 /*
- * Async firmware-loaded callback. The TI library blob (drv2624.bin)
- * is a 20-byte header (magic 0x2624, fw_size, build date, checksum,
- * effect count) followed by the RAM image — a per-effect pointer
- * table + voltage-time sample pairs. The chip's playback engine
- * resolves the layout itself; we just bulk-write the post-header
- * bytes into RAM starting at address 0, then park the chip in
- * WAV_SEQ mode with effect 1 (CLICK) selected so future GO triggers
- * play the ROM CLICK.
+ * Synchronously upload the embedded ROM library to chip RAM. The chip's
+ * playback engine resolves the per-effect pointer table + sample pairs
+ * itself; we just bulk-write the bytes starting at RAM address 0.
  */
-static void drv2624_fw_loaded(const struct firmware *fw, void *context)
+static int drv2624_upload_rom(struct drv2624_data *h)
 {
-	struct drv2624_data *h = context;
-	struct device *dev = &h->client->dev;
-	int error, i;
-	u32 magic;
-
-	if (!fw) {
-		dev_info(dev, "no drv2624.bin; ROM effects unavailable, RTP-only\n");
-		return;
-	}
-	if (fw->size <= DRV2624_FW_HEADER_SIZE) {
-		dev_warn(dev, "drv2624.bin truncated (%zu bytes)\n", fw->size);
-		goto out_release;
-	}
-	magic = le32_to_cpu(*(const __le32 *)fw->data);
-	if ((magic & 0xFFFF) != DRV2624_FW_MAGIC) {
-		dev_warn(dev, "drv2624.bin bad magic 0x%08x\n", magic);
-		goto out_release;
-	}
+	int error;
+	size_t i;
 
 	error = regmap_write(h->regmap, DRV2624_REG_RAM_ADDR_UPPER, 0);
 	if (error)
-		goto out_release;
+		return error;
 	error = regmap_write(h->regmap, DRV2624_REG_RAM_ADDR_LOWER, 0);
 	if (error)
-		goto out_release;
-	for (i = DRV2624_FW_HEADER_SIZE; i < fw->size; i++) {
-		error = regmap_write(h->regmap, DRV2624_REG_RAM_DATA, fw->data[i]);
-		if (error) {
-			dev_warn(dev, "RAM upload failed at byte %d: %d\n", i, error);
-			goto out_release;
-		}
+		return error;
+	for (i = 0; i < ARRAY_SIZE(drv2624_rom_library); i++) {
+		error = regmap_write(h->regmap, DRV2624_REG_RAM_DATA,
+				     drv2624_rom_library[i]);
+		if (error)
+			return error;
 	}
-	h->fw_ram_size = fw->size - DRV2624_FW_HEADER_SIZE;
-	dev_info(dev, "drv2624.bin uploaded (%zu byte RAM image)\n", h->fw_ram_size);
-
-	/*
-	 * Park chip in WAV_SEQ + CLICK now that the library is loaded.
-	 * From here, drv2624_worker just toggles GO for short rumbles
-	 * and the chip plays ROM CLICK.
-	 */
-	if (drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK))
-		dev_warn(dev, "failed to park chip in WAV_SEQ\n");
-
-out_release:
-	release_firmware(fw);
-}
-
-static int drv2624_upload_firmware(struct drv2624_data *h)
-{
-	struct device *dev = &h->client->dev;
-	int error;
-
-	/*
-	 * Async load: probe doesn't block on the user-mode firmware helper.
-	 * On success the callback uploads to chip RAM and parks in WAV_SEQ.
-	 * On failure the kernel firmware loader prints "Direct firmware load
-	 * for drv2624.bin failed with error -N" automatically and the chip
-	 * stays in the RTP-only fallback from hw_init.
-	 */
-	error = request_firmware_nowait(THIS_MODULE, FW_ACTION_UEVENT,
-					"drv2624.bin", dev, GFP_KERNEL,
-					h, drv2624_fw_loaded);
-	if (error)
-		dev_warn(dev, "request_firmware_nowait failed: %d\n", error);
+	h->fw_ram_size = ARRAY_SIZE(drv2624_rom_library);
 	return 0;
 }
 
@@ -475,26 +436,17 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		}
 	}
 
-	/* Upload the RAM waveform library (drv2624.bin). */
-	drv2624_upload_firmware(h);
+	/* Upload the embedded ROM waveform library to chip RAM. */
+	error = drv2624_upload_rom(h);
+	if (error)
+		return error;
 
 	/*
-	 * Park in WAV_SEQ with effect 1 (CLICK) selected. This is the
-	 * persistent state — the play() callback just toggles GO for
-	 * short effects, RTP gets switched in and back out for long ones.
+	 * Park in WAV_SEQ with effect 1 (CLICK) selected. From here, the
+	 * play() callback just toggles GO for short effects; RTP gets
+	 * switched in and back out for long ones.
 	 */
-	if (h->fw_ram_size) {
-		error = drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
-		if (error)
-			return error;
-	} else {
-		/* No firmware → default to RTP mode out of standby. */
-		error = regmap_write(h->regmap, DRV2624_REG_MODE, DRV2624_MODE_RTP);
-		if (error)
-			return error;
-	}
-
-	return 0;
+	return drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
 }
 
 static int drv2624_probe(struct i2c_client *client)
