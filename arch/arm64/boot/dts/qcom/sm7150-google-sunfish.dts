@@ -657,6 +657,13 @@
 		 */
 		ti,autocal-comp = /bits/ 8 <18 150 0>;
 
+		/*
+		 * Raw 9-bit open-loop period from the same cal file
+		 * ("lra_period: 241"). Overrides the freq-derived
+		 * approximation in the driver.
+		 */
+		ti,ol-lra-period = <241>;
+
 		pinctrl-names = "default";
 		pinctrl-0 = <&haptic_en_default>;
 	};
