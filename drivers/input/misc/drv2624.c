@@ -130,6 +130,7 @@ struct drv2624_data {
 	u32 rated_mv;
 	u32 od_mv;
 	u32 lra_freq_hz;
+	u32 ol_lra_period;	/* DT-supplied per-unit factory cal; 0 = derive from freq */
 	u8 autocal[3];
 	bool autocal_present;
 
@@ -191,8 +192,14 @@ static void drv2624_worker(struct work_struct *work)
 
 	/* Magnitude 0 means stop; the FF memless layer calls this at end-of-effect. */
 	if (!h->magnitude) {
-		regmap_write(h->regmap, DRV2624_REG_CONTROL2,
-			     DRV2624_CTRL2_INTERVAL_1MS | DRV2624_CTRL2_STOP_BIT);
+		/*
+		 * Pulse the STOP bit only — full writes here clear LIB_LRA and
+		 * route subsequent ROM playback through the ERM library, which
+		 * sounds buzzy on an LRA.
+		 */
+		regmap_update_bits(h->regmap, DRV2624_REG_CONTROL2,
+				   DRV2624_CTRL2_STOP_BIT,
+				   DRV2624_CTRL2_STOP_BIT);
 		if (h->fw_ram_size)
 			drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
 		return;
@@ -445,15 +452,27 @@ static int drv2624_hw_init(struct drv2624_data *h)
 
 	/*
 	 * Open-loop LRA period. The chip uses this until the closed-loop
-	 * tracker locks on resonance. Unit is 1.25 us (the chip's 800 kHz
-	 * internal clock); period_ticks = 800000 / f_Hz.
+	 * tracker locks on resonance. Register unit is 24.39 us (datasheet);
+	 * period_ticks ≈ 41000 / f_Hz, and the field is 9 bits wide
+	 * (bit 8 in PERIOD_H, bits 7:0 in PERIOD_L). The DT prop
+	 * ti,ol-lra-period overrides the computed value with the chip's
+	 * per-unit factory-calibrated period (Pixel devices ship this in
+	 * /persist/haptics/drv2624.cal as "lra_period: NNN").
 	 */
-	if (h->actuator == DRV2624_ACTUATOR_LRA && h->lra_freq_hz) {
-		period = 800000U / h->lra_freq_hz;
-		regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_H,
-			     (period >> 8) & 0xFF);
-		regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_L,
-			     period & 0xFF);
+	if (h->actuator == DRV2624_ACTUATOR_LRA) {
+		if (h->ol_lra_period)
+			period = h->ol_lra_period;
+		else if (h->lra_freq_hz)
+			period = 41000U / h->lra_freq_hz;
+		else
+			period = 0;
+		if (period) {
+			period = min_t(u32, period, 0x1FF);
+			regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_H,
+				     (period >> 8) & 0x01);
+			regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_L,
+				     period & 0xFF);
+		}
 	}
 
 	/* Upload the RAM waveform library (drv2624.bin). */
@@ -509,6 +528,14 @@ static int drv2624_probe(struct i2c_client *client)
 		h->od_mv = DRV2624_DEF_OD_MV;
 	if (device_property_read_u32(dev, "ti,lra-frequency-hz", &h->lra_freq_hz))
 		h->lra_freq_hz = DRV2624_DEF_LRA_HZ;
+
+	/*
+	 * Optional per-unit factory-calibrated open-loop LRA period (raw
+	 * 9-bit register value, ~24.39 us/tick). Overrides the formula
+	 * derived from ti,lra-frequency-hz. On Pixel sunfish this comes
+	 * from /persist/haptics/drv2624.cal "lra_period: 241".
+	 */
+	device_property_read_u32(dev, "ti,ol-lra-period", &h->ol_lra_period);
 
 	/*
 	 * Optional factory autocal compensation. The board's per-device
