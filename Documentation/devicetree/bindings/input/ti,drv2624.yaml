@@ -72,6 +72,15 @@ properties:
     minItems: 3
     maxItems: 3
 
+  ti,ol-lra-period:
+    description: |
+      Optional per-device factory-calibrated open-loop LRA period as
+      the raw 9-bit register value (~24.39 us/tick). Overrides the
+      value derived from ti,lra-frequency-hz. Carries the
+      "lra_period: NNN" line from Pixel's /persist/haptics/drv2624.cal.
+    minimum: 1
+    maximum: 511
+
 required:
   - compatible
   - reg
