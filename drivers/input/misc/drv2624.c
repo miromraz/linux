@@ -310,7 +310,7 @@ static int drv2624_upload_rom(struct drv2624_data *h)
 static int drv2624_hw_init(struct drv2624_data *h)
 {
 	struct device *dev = &h->client->dev;
-	unsigned int chip_id, period;
+	unsigned int chip_id, period, status;
 	int error;
 
 	error = regmap_read(h->regmap, DRV2624_REG_CHIP_ID, &chip_id);
@@ -452,7 +452,23 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	 * play() callback just toggles GO for short effects; RTP gets
 	 * switched in and back out for long ones.
 	 */
-	return drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
+	error = drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
+	if (error)
+		return error;
+
+	/*
+	 * Force the chip down into true low-power standby. The DRV2624
+	 * auto-enters standby when idle, but per datasheet section 7.3.10 it
+	 * can get stuck in a higher-current "pseudo-standby" state. Left
+	 * there from probe onward the extra current draw browns out the boot
+	 * window and the phone reboot-loops. The documented remedy is a
+	 * single I2C transaction after the settle time; the STATUS read also
+	 * clears any latched event bits.
+	 */
+	usleep_range(5000, 8000);
+	regmap_read(h->regmap, DRV2624_REG_STATUS, &status);
+
+	return 0;
 }
 
 static int drv2624_probe(struct i2c_client *client)
