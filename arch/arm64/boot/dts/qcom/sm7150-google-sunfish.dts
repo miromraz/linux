@@ -757,6 +757,7 @@
 
 		op-sink-microwatt = <10000000>;
 		power-role = "dual";
+		try-power-role = "sink";
 		data-role = "dual";
 		self-powered;
 
