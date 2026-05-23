@@ -581,6 +581,20 @@
 		reset-gpios = <&tlmm 8 GPIO_ACTIVE_LOW>;
 
 		/*
+		 * The FTM5 touch IC is in-cell — it physically lives inside
+		 * the OLED panel module and is powered through the panel's
+		 * own VSP/VSN rails. The driver therefore registers as a DRM
+		 * panel follower so that stmfts_power_on() / _off() are
+		 * driven by the panel's prepare / unprepare callbacks. When
+		 * the screen blanks, the panel cuts power to the chip; on
+		 * unblank the driver re-runs the SYSTEM_RESET / SLEEP_OUT /
+		 * tuning / calibration sequence so scan mode actually
+		 * resumes (without this hook, the chip silently halts after
+		 * the first display blank).
+		 */
+		panel = <&panel>;
+
+		/*
 		 * GPIO 72 routes the touch IRQ between the AP (active-low)
 		 * and SLPI (active-high). Mainline only services the AP path,
 		 * so the driver holds this deasserted (low) by default.
