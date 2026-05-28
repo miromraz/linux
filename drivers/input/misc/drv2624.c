@@ -2,7 +2,7 @@
 /*
  * Texas Instruments DRV2624 haptic driver
  *
- * Copyright (c) 2026
+ * Copyright (c) 2026 miromraz <mraz.miro@seznam.cz>
  *
  * Based on drv260x.c by Dan Murphy <dmurphy@ti.com>.
  *
@@ -674,4 +674,5 @@ static struct i2c_driver drv2624_driver = {
 module_i2c_driver(drv2624_driver);
 
 MODULE_DESCRIPTION("Texas Instruments DRV2624 haptic driver");
+MODULE_AUTHOR("miromraz <mraz.miro@seznam.cz>");
 MODULE_LICENSE("GPL");
