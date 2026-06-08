@@ -11,6 +11,7 @@
 #include <linux/soundwire/sdw.h>
 #include <sound/jack.h>
 #include <linux/input-event-codes.h>
+#include <sound/cs35l41.h>
 #include "qdsp6/q6afe.h"
 #include "common.h"
 #include "usb_offload_utils.h"
@@ -96,14 +97,35 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 		snd_soc_dai_set_fmt(cpu_dai, fmt);
 		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
 		break;
-	case TERTIARY_MI2S_RX:
-		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+	case TERTIARY_MI2S_RX: {
+		/* sunfish: stereo CS35L41 amps on tertiary MI2S */
+		int j;
+
 		snd_soc_dai_set_sysclk(cpu_dai,
 			Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
 			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
-		snd_soc_dai_set_fmt(cpu_dai, fmt);
-		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+		snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP |
+			SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF);
+
+		for_each_rtd_codec_dais(rtd, j, codec_dai) {
+			unsigned int slot[1];
+
+			snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_BC_FC |
+				SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF);
+			/* CS35L41 PLL refclk = SCLK (BCLK) so the amp powers up */
+			snd_soc_dai_set_sysclk(codec_dai, CS35L41_CLKID_SCLK,
+				MI2S_BCLK_RATE, SND_SOC_CLOCK_IN);
+			snd_soc_component_set_sysclk(codec_dai->component,
+				CS35L41_CLKID_SCLK, 0, MI2S_BCLK_RATE,
+				SND_SOC_CLOCK_IN);
+			/* EAR amp on left channel (0), SPK amp on right (1) */
+			slot[0] = (codec_dai->component->name_prefix &&
+				   !strcmp(codec_dai->component->name_prefix, "EAR"))
+				   ? 0 : 1;
+			snd_soc_dai_set_channel_map(codec_dai, 0, NULL, 1, slot);
+		}
 		break;
+	}
 	case QUINARY_MI2S_RX:
 		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
 		snd_soc_dai_set_sysclk(cpu_dai,
