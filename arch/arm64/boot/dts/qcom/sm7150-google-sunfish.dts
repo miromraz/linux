@@ -781,8 +781,7 @@
 };
 
 &remoteproc_cdsp {
-	firmware-name = "qcom/sm7150/google/sunfish/cdsp.mbn";
-	status = "okay";
+	status = "disabled";
 };
 
 &remoteproc_mpss {
