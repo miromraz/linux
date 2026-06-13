@@ -195,6 +195,17 @@ config SND_SOC_SM8250
 	  SM8250 SoC-based systems.
 	  Say Y if you want to use audio device on this SoCs.
 
+config SND_SOC_SM7150_SUNFISH
+	tristate "SoC Machine driver for SM7150 Google Pixel 4a (sunfish)"
+	depends on QCOM_APR && I2C
+	depends on COMMON_CLK
+	select SND_SOC_QDSP6
+	select SND_SOC_QCOM_COMMON
+	help
+	  To add support for audio on Google Pixel 4a (sunfish) which
+	  uses SM7150 SoC with CS35L41 speaker amplifiers over I2C.
+	  Say Y if you want to use audio on this device.
+
 config SND_SOC_SC8280XP
 	tristate "SoC Machine driver for SC8280XP boards"
 	depends on QCOM_APR && SOUNDWIRE

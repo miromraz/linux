@@ -27,6 +27,7 @@ snd-soc-sc7280-y := sc7280.o
 snd-soc-sdm845-y := sdm845.o
 snd-soc-sm8250-y := sm8250.o
 snd-soc-sc8280xp-y := sc8280xp.o
+snd-soc-sm7150-sunfish-y := sm7150-sunfish.o
 snd-soc-qcom-common-y := common.o
 snd-soc-qcom-sdw-y := sdw.o
 snd-soc-x1e80100-y := x1e80100.o
