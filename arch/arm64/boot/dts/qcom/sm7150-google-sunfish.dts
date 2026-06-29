@@ -913,8 +913,7 @@
 		pins = "gpio8";
 		function = "gpio";
 		drive-strength = <2>;
-		bias-pull-up;
-		output-high;
+		bias-disable;
 	};
 };
 
