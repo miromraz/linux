@@ -1,0 +1,55 @@
+From d918f7525fa5f28876ac734addb589ff2051f6f3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Miroslav=20Mr=C3=A1z?= <mraz.miro@seznam.cz>
+Date: Mon, 29 Jun 2026 22:27:13 +0200
+Subject: [PATCH 16/16] arm64: dts: qcom: sm7150-google-sunfish: link
+ touchscreen to panel
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Pixel 4a's FTM5 touch IC is bonded into the Samsung OLED panel
+module; the touch chip's analog power comes from the panel's own
+VSP/VSN rails, not from the regulators the stmfts driver itself votes
+on. Link the touchscreen node to the sofef00 panel via the standard
+"panel" phandle so stmfts can register as a drm_panel_follower and
+power-cycle the chip in lockstep with the display.
+
+Before this, the chip silently lost power on every screen blank and
+came back uninitialised on screen wake — touch was dead until an i2c
+rebind. With the follower link the framework's prepare/unprepare
+brackets the chip's lifecycle correctly and touch survives screen
+blank/wake cycles.
+
+Signed-off-by: Miroslav Mráz <mraz.miro@seznam.cz>
+---
+ arch/arm64/boot/dts/qcom/sm7150-google-sunfish.dts | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm7150-google-sunfish.dts b/arch/arm64/boot/dts/qcom/sm7150-google-sunfish.dts
+index cf3acf2b9010..5d67dd9b0dc7 100644
+--- a/arch/arm64/boot/dts/qcom/sm7150-google-sunfish.dts
++++ b/arch/arm64/boot/dts/qcom/sm7150-google-sunfish.dts
+@@ -580,6 +580,20 @@ touchscreen@49 {
+ 		interrupts-extended = <&tlmm 9 IRQ_TYPE_LEVEL_LOW>;
+ 		reset-gpios = <&tlmm 8 GPIO_ACTIVE_LOW>;
+ 
++		/*
++		 * The FTM5 touch IC is in-cell — it physically lives inside
++		 * the OLED panel module and is powered through the panel's
++		 * own VSP/VSN rails. The driver therefore registers as a DRM
++		 * panel follower so that stmfts_power_on() / _off() are
++		 * driven by the panel's prepare / unprepare callbacks. When
++		 * the screen blanks, the panel cuts power to the chip; on
++		 * unblank the driver re-runs the SYSTEM_RESET / SLEEP_OUT /
++		 * tuning / calibration sequence so scan mode actually
++		 * resumes (without this hook, the chip silently halts after
++		 * the first display blank).
++		 */
++		panel = <&panel>;
++
+ 		/*
+ 		 * GPIO 72 routes the touch IRQ between the AP (active-low)
+ 		 * and SLPI (active-high). Mainline only services the AP path,
+-- 
+2.54.0
+

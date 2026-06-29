@@ -1,0 +1,31 @@
+From b62df76d3c4e16eafc36df8ff8000df1cdfeda65 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Miroslav=20Mr=C3=A1z?= <mraz.miro@seznam.cz>
+Date: Mon, 29 Jun 2026 22:27:11 +0200
+Subject: [PATCH 12/16] Input: stmfts - add missing gpio/consumer.h include
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+FTS5 patches use gpiod_set_value_cansleep, devm_gpiod_get_optional,
+and GPIOD_OUT_HIGH without the corresponding header. Fix the build.
+
+Signed-off-by: Miroslav Mráz <mraz.miro@seznam.cz>
+---
+ drivers/input/touchscreen/stmfts.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/input/touchscreen/stmfts.c b/drivers/input/touchscreen/stmfts.c
+index e613299e3755..8090634e0954 100644
+--- a/drivers/input/touchscreen/stmfts.c
++++ b/drivers/input/touchscreen/stmfts.c
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include <linux/delay.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/input/mt.h>
+ #include <linux/input/touchscreen.h>
+-- 
+2.54.0
+

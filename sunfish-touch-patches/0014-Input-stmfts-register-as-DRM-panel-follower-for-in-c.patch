@@ -1,0 +1,250 @@
+From edca61a9b193b64faccf4cdf232a8ad5c6b0626c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Miroslav=20Mr=C3=A1z?= <mraz.miro@seznam.cz>
+Date: Mon, 29 Jun 2026 22:27:12 +0200
+Subject: [PATCH 14/16] Input: stmfts - register as DRM panel follower for
+ in-cell touch
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Google Pixel 4a (sunfish) carries an in-cell FTM5 touch IC bonded
+inside its Samsung OLED panel module. The chip's analog supply is
+provided by the panel's own VSP/VSN rails (the digital/IO rails the
+driver votes on are shared with the panel and stay up regardless), so
+when the DSI panel powers down on screen blank, it cuts power to the
+touch IC silently. The mainline driver has no DRM hooks, so it never
+re-initialises the chip when the panel powers back on — scan mode is
+lost and the chip silently emits no events until the next i2c rebind.
+
+Register the touchscreen as a drm_panel_follower of its parent panel
+when the DT has a "panel" phandle. The framework calls panel_prepared
+right after the panel's prepare succeeds (the sofef00 panel used by
+sunfish sets prepare_prev_first = true, ensuring panel hardware is up
+before our callback runs) and panel_unpreparing right before the panel
+unprepares.
+
+In panel-follower mode the system-sleep and runtime-PM hooks become
+no-ops: the chip's power state is owned by the panel framework. The
+chip's scan state is lost across panel-driven power cycles though, and
+userspace compositors keep the evdev fd open across screen blanks, so
+panel_prepared also re-issues STMFTS5_SET_SCAN_MODE when the input
+device is already open. Without that the chip would come back powered
+and IRQ-enabled but never start sensing.
+
+Runtime PM must remain enabled in follower mode so that
+pm_runtime_resume_and_get() in stmfts5_input_open() doesn't return
+-EACCES, which would block userspace from ever opening the touchscreen.
+The runtime-PM hooks short-circuit to no-ops, but the state machine
+itself has to be alive.
+
+Non-follower devices keep the existing power-on-in-probe behaviour.
+
+Signed-off-by: Miroslav Mráz <mraz.miro@seznam.cz>
+---
+ drivers/input/touchscreen/stmfts.c | 129 +++++++++++++++++++++++++++--
+ 1 file changed, 121 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/input/touchscreen/stmfts.c b/drivers/input/touchscreen/stmfts.c
+index 784bb5ed4448..6bda032ce701 100644
+--- a/drivers/input/touchscreen/stmfts.c
++++ b/drivers/input/touchscreen/stmfts.c
+@@ -20,6 +20,8 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/regulator/consumer.h>
+ 
++#include <drm/drm_panel.h>
++
+ /* I2C commands */
+ #define STMFTS_READ_INFO			0x80
+ #define STMFTS_READ_STATUS			0x84
+@@ -139,6 +141,16 @@ struct stmfts_data {
+ 	bool hover_enabled;
+ 	bool stylus_enabled;
+ 	bool running;
++
++	/*
++	 * Set when the chip is an in-cell module whose physical power is
++	 * sequenced by the DSI panel (e.g. Pixel 4a sunfish: the touch IC
++	 * sits inside the bonded OLED assembly and is powered through the
++	 * panel's own VSP/VSN rails). The DRM panel-follower framework
++	 * drives stmfts_power_on() / stmfts_power_off() in lockstep with
++	 * the panel's prepare/unprepare callbacks.
++	 */
++	struct drm_panel_follower panel_follower;
+ };
+ 
+ struct stmfts_chip_ops {
+@@ -1033,11 +1045,50 @@ static int stmfts_enable_led(struct stmfts_data *sdata)
+ 	return 0;
+ }
+ 
++static int stmfts_panel_prepared(struct drm_panel_follower *follower)
++{
++	struct stmfts_data *sdata =
++		container_of(follower, struct stmfts_data, panel_follower);
++	int err;
++
++	err = stmfts_power_on(sdata);
++	if (err)
++		return err;
++
++	/*
++	 * If userspace already has the input device open, the chip just
++	 * came back from a panel-driven power cycle and lost its scan
++	 * state (which input_open normally sets). Re-issue the start-scan
++	 * command so touch events resume without requiring a close+reopen
++	 * of the evdev — userspace compositors typically keep the fd open
++	 * across display blank/wake cycles.
++	 */
++	if (sdata->running)
++		stmfts5_set_scan_mode(sdata, 0xff);
++
++	return 0;
++}
++
++static int stmfts_panel_unpreparing(struct drm_panel_follower *follower)
++{
++	struct stmfts_data *sdata =
++		container_of(follower, struct stmfts_data, panel_follower);
++
++	stmfts_power_off(sdata);
++	return 0;
++}
++
++static const struct drm_panel_follower_funcs stmfts_panel_follower_funcs = {
++	.panel_prepared = stmfts_panel_prepared,
++	.panel_unpreparing = stmfts_panel_unpreparing,
++};
++
+ static int stmfts_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+ 	int err;
+ 	struct stmfts_data *sdata;
++	bool is_panel_follower = false;
+ 
+ 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C |
+ 						I2C_FUNC_SMBUS_BYTE_DATA |
+@@ -1108,14 +1159,13 @@ static int stmfts_probe(struct i2c_client *client)
+ 
+ 	dev_dbg(dev, "initializing ST-Microelectronics FTS...\n");
+ 
+-	err = stmfts_power_on(sdata);
+-	if (err)
+-		return err;
+-
+-	err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
+-	if (err)
+-		return err;
+-
++	/*
++	 * Input device + LEDs are registered up front because in
++	 * panel-follower mode the chip is brought up later, by the panel
++	 * framework calling stmfts_panel_prepared() — which enables the
++	 * IRQ. Userspace handlers therefore need a registered input device
++	 * to be present before the first event can be reported.
++	 */
+ 	err = input_register_device(sdata->input);
+ 	if (err)
+ 		return err;
+@@ -1134,6 +1184,44 @@ static int stmfts_probe(struct i2c_client *client)
+ 		}
+ 	}
+ 
++	if (drm_is_panel_follower(dev)) {
++		sdata->panel_follower.funcs = &stmfts_panel_follower_funcs;
++		err = devm_drm_panel_add_follower(dev, &sdata->panel_follower);
++		if (!err) {
++			is_panel_follower = true;
++		} else if (err != -ENODEV) {
++			/*
++			 * -EPROBE_DEFER: panel not registered yet, retry later.
++			 * Anything else: real failure.
++			 */
++			return err;
++		}
++		/*
++		 * -ENODEV: the framework determined we're not actually a
++		 * follower (e.g. DRM_PANEL not built). Fall back to the
++		 * legacy in-place power-on path below.
++		 */
++	}
++
++	if (!is_panel_follower) {
++		err = stmfts_power_on(sdata);
++		if (err)
++			return err;
++
++		err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
++		if (err)
++			return err;
++	}
++
++	/*
++	 * Runtime PM must be enabled in both modes. In legacy mode it
++	 * drives the chip's SLEEP_IN / SLEEP_OUT cycle. In panel-follower
++	 * mode the PM ops short-circuit (the panel framework owns the
++	 * chip's power state), but input_open() still calls
++	 * pm_runtime_resume_and_get() — without an enabled runtime-PM
++	 * state machine that returns -EACCES, blocking userspace from
++	 * ever opening the touchscreen.
++	 */
+ 	pm_runtime_enable(dev);
+ 	device_enable_async_suspend(dev);
+ 
+@@ -1150,6 +1238,16 @@ static int stmfts_runtime_suspend(struct device *dev)
+ 	struct stmfts_data *sdata = dev_get_drvdata(dev);
+ 	int ret;
+ 
++	/*
++	 * Panel-follower mode: the chip's power state is owned by the
++	 * panel framework, so runtime-PM transitions must not poke the
++	 * chip via i2c. (Runtime PM itself is enabled in both modes so
++	 * that pm_runtime_resume_and_get() from input_open() doesn't
++	 * return -EACCES; the no-ops here keep the state machine harmless.)
++	 */
++	if (drm_is_panel_follower(dev))
++		return 0;
++
+ 	ret = i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
+ 	if (ret)
+ 		dev_warn(dev, "failed to suspend device: %d\n", ret);
+@@ -1212,6 +1310,9 @@ static int stmfts_runtime_resume(struct device *dev)
+ 	struct stmfts_data *sdata = dev_get_drvdata(dev);
+ 	int ret;
+ 
++	if (drm_is_panel_follower(dev))
++		return 0;
++
+ 	ret = sdata->ops->runtime_resume(sdata);
+ 	if (ret)
+ 		dev_err(dev, "failed to resume device: %d\n", ret);
+@@ -1223,6 +1324,15 @@ static int stmfts_suspend(struct device *dev)
+ {
+ 	struct stmfts_data *sdata = dev_get_drvdata(dev);
+ 
++	/*
++	 * Panel-follower mode: the DRM panel framework calls our
++	 * panel_unpreparing() right before the panel itself is
++	 * unprepared, which is the correct moment to power off an
++	 * in-cell touch. System-sleep ops therefore have nothing to do.
++	 */
++	if (drm_is_panel_follower(dev))
++		return 0;
++
+ 	stmfts_power_off(sdata);
+ 
+ 	return 0;
+@@ -1232,6 +1342,9 @@ static int stmfts_resume(struct device *dev)
+ {
+ 	struct stmfts_data *sdata = dev_get_drvdata(dev);
+ 
++	if (drm_is_panel_follower(dev))
++		return 0;
++
+ 	return stmfts_power_on(sdata);
+ }
+ 
+-- 
+2.54.0
+
