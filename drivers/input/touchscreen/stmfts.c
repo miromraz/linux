@@ -59,7 +59,7 @@
 
 /* events FTS5 */
 #define STMFTS5_EV_CONTROLLER_READY		0x03
-/* FTM5 event IDs (full byte, not masked) */
+/* FTM5 event IDs (event[0] bits [3:2] carry touch-major; mask with STMFTS5_MASK_EVENT_ID) */
 #define STMFTS5_EV_MULTI_TOUCH_ENTER		0x13
 #define STMFTS5_EV_MULTI_TOUCH_MOTION		0x23
 #define STMFTS5_EV_MULTI_TOUCH_LEAVE		0x33
@@ -75,6 +75,7 @@
 #define STMFTS_MASK_X_MSB			0x0f
 #define STMFTS_MASK_Y_LSB			0xf0
 #define STMFTS5_MASK_TOUCH_TYPE			0x0f
+#define STMFTS5_MASK_EVENT_ID			0xf3
 
 /* touch type classifications */
 #define STMFTS_TOUCH_TYPE_INVALID		0x00
@@ -497,7 +498,7 @@ static void stmfts5_parse_events(struct stmfts_data *sdata)
 	for (int i = 0; i < STMFTS_STACK_DEPTH; i++) {
 		u8 *event = &sdata->data[i * STMFTS_EVENT_SIZE];
 
-		switch (event[0]) {
+		switch (event[0] & STMFTS5_MASK_EVENT_ID) {
 		case STMFTS5_EV_CONTROLLER_READY:
 			complete(&sdata->cmd_done);
 			fallthrough;
