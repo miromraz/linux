@@ -1118,3 +1118,7 @@
 		mediatek,accdet = <&accdet>;
 	};
 };
+
+&watchdog {
+	interrupts = <GIC_SPI 137 IRQ_TYPE_LEVEL_LOW>;
+};
