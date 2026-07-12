@@ -82,6 +82,7 @@ enum clk_id {
 	CLK_NONE,
 	CLK_MM,
 	CLK_MFG,
+	CLK_MFG_52M,
 	CLK_VENC,
 	CLK_VENC_LT,
 	CLK_ETHIF,
@@ -89,6 +90,7 @@ enum clk_id {
 	CLK_HIFSEL,
 	CLK_JPGDEC,
 	CLK_AUDIO,
+	CLK_MFG_VCG,
 	CLK_MAX,
 };
 
@@ -96,6 +98,7 @@ static const char * const clk_names[] = {
 	NULL,
 	"mm",
 	"mfg",
+	"mfg_52m",
 	"venc",
 	"venc_lt",
 	"ethif",
@@ -103,6 +106,7 @@ static const char * const clk_names[] = {
 	"hif_sel",
 	"jpgdec",
 	"audio",
+	"mfg_vcg",
 	NULL,
 };
 
@@ -429,8 +433,14 @@ static void init_clks(struct platform_device *pdev, struct clk **clk)
 {
 	int i;
 
+	/*
+	 * Fetch each clock optionally: a domain may name a clock that a given
+	 * board's device tree does not describe (e.g. an mt6797 DTB predating
+	 * the MFG 52 MHz preclock), and such a DTB must still probe instead of
+	 * failing the whole power controller.
+	 */
 	for (i = CLK_NONE + 1; i < CLK_MAX; i++)
-		clk[i] = devm_clk_get(&pdev->dev, clk_names[i]);
+		clk[i] = devm_clk_get_optional(&pdev->dev, clk_names[i]);
 }
 
 static struct scp *init_scp(struct platform_device *pdev,
@@ -816,7 +826,7 @@ static const struct scp_domain_data scp_domain_data_mt6797[] = {
 		.ctl_offs = 0x334,
 		.sram_pdn_bits = 0,
 		.sram_pdn_ack_bits = 0,
-		.clk_id = {CLK_MFG},
+		.clk_id = {CLK_MFG_52M, CLK_MFG_VCG},
 	},
 	[MT6797_POWER_DOMAIN_MFG] = {
 		.name = "mfg",
@@ -828,7 +838,7 @@ static const struct scp_domain_data scp_domain_data_mt6797[] = {
 		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
 		.sram_pdn_bits = GENMASK(1, 0),
 		.sram_pdn_ack_bits = GENMASK(17, 16),
-		.clk_id = {CLK_NONE},
+		.clk_id = {CLK_MFG_52M},
 	},
 	[MT6797_POWER_DOMAIN_MFG_CORE0] = {
 		.name = "mfg_core0",
@@ -838,7 +848,7 @@ static const struct scp_domain_data scp_domain_data_mt6797[] = {
 		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
 		.sram_pdn_bits = BIT(8),
 		.sram_pdn_ack_bits = BIT(20),
-		.clk_id = {CLK_NONE},
+		.clk_id = {CLK_MFG_52M},
 	},
 	[MT6797_POWER_DOMAIN_MFG_CORE1] = {
 		.name = "mfg_core1",
@@ -848,7 +858,7 @@ static const struct scp_domain_data scp_domain_data_mt6797[] = {
 		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
 		.sram_pdn_bits = BIT(8),
 		.sram_pdn_ack_bits = BIT(21),
-		.clk_id = {CLK_NONE},
+		.clk_id = {CLK_MFG_52M},
 	},
 	[MT6797_POWER_DOMAIN_MFG_CORE2] = {
 		.name = "mfg_core2",
@@ -858,7 +868,7 @@ static const struct scp_domain_data scp_domain_data_mt6797[] = {
 		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
 		.sram_pdn_bits = BIT(8),
 		.sram_pdn_ack_bits = BIT(22),
-		.clk_id = {CLK_NONE},
+		.clk_id = {CLK_MFG_52M},
 	},
 	[MT6797_POWER_DOMAIN_MFG_CORE3] = {
 		.name = "mfg_core3",
@@ -868,7 +878,7 @@ static const struct scp_domain_data scp_domain_data_mt6797[] = {
 		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
 		.sram_pdn_bits = BIT(8),
 		.sram_pdn_ack_bits = BIT(23),
-		.clk_id = {CLK_NONE},
+		.clk_id = {CLK_MFG_52M},
 	},
 	[MT6797_POWER_DOMAIN_MJC] = {
 		.name = "mjc",
