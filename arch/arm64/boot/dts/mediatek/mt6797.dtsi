@@ -529,6 +529,28 @@
 		status = "disabled";
 	};
 
+	auxadc: adc@11001000 {
+		compatible = "mediatek,mt6797-auxadc";
+		reg = <0 0x11001000 0 0x1000>;
+		clocks = <&infrasys CLK_INFRA_AUXADC>;
+		clock-names = "main";
+		#io-channel-cells = <1>;
+		status = "disabled";
+	};
+
+	thermal: thermal@1100b000 {
+		compatible = "mediatek,mt6797-thermal";
+		reg = <0 0x1100b000 0 0x1000>;
+		interrupts = <GIC_SPI 78 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&infrasys CLK_INFRA_THERM>,
+			 <&infrasys CLK_INFRA_AUXADC>;
+		clock-names = "therm", "auxadc";
+		mediatek,auxadc = <&auxadc>;
+		mediatek,apmixedsys = <&apmixedsys>;
+		#thermal-sensor-cells = <0>;
+		status = "disabled";
+	};
+
 	i2c5: i2c@1101c000 {
 		compatible = "mediatek,mt6797-i2c",
 			     "mediatek,mt6577-i2c";
