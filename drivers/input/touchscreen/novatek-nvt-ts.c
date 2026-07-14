@@ -318,9 +318,21 @@ static const struct nvt_ts_i2c_chip_data nvt_nt36672a_ts_data = {
 	.chip_id = 0x08,
 };
 
+/*
+ * NT36772 (Planet Gemini PDA). It uses the same 6-byte touch record and the
+ * parameter block at 0x78 as the NT36672A, served at the FW I2C address 0x01.
+ * The FW-info chip-id byte (parameters + 0x0e) is not exposed by the vendor
+ * sources; confirm it against the probe-time "Unsupported touchscreen
+ * parameters" dump before enabling the (currently disabled) board node.
+ */
+static const struct nvt_ts_i2c_chip_data nvt_nt36772_ts_data = {
+	.chip_id = 0x0c,
+};
+
 static const struct of_device_id nvt_ts_of_match[] = {
 	{ .compatible = "novatek,nt11205-ts", .data = &nvt_nt11205_ts_data },
 	{ .compatible = "novatek,nt36672a-ts", .data = &nvt_nt36672a_ts_data },
+	{ .compatible = "novatek,nt36772-ts", .data = &nvt_nt36772_ts_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, nvt_ts_of_match);
@@ -328,6 +340,7 @@ MODULE_DEVICE_TABLE(of, nvt_ts_of_match);
 static const struct i2c_device_id nvt_ts_i2c_id[] = {
 	{ .name = "nt11205-ts", .driver_data = (unsigned long)&nvt_nt11205_ts_data },
 	{ .name = "nt36672a-ts", .driver_data = (unsigned long)&nvt_nt36672a_ts_data },
+	{ .name = "nt36772-ts", .driver_data = (unsigned long)&nvt_nt36772_ts_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, nvt_ts_i2c_id);
