@@ -508,6 +508,23 @@
 	};
 };
 
+/*
+ * The left USB-C connector is wired to the MTU3 device controller. Keep the
+ * controller disabled until device-mode operation has been validated on
+ * this board.
+ */
+&u2port0 {
+	clocks = <&clk26m>;
+};
+
+&ssusb {
+	assigned-clocks = <&topckgen CLK_TOP_MUX_SSUSB_TOP_SYS>;
+	assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL3_D2>;
+	phys = <&u2port0 PHY_TYPE_USB2>;
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+};
+
 &i2c0 {
 	/* FAN49101 is populated, but keep the regulator and consumer disabled. */
 	fan49101: regulator@70 {
