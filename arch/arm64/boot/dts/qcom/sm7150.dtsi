@@ -851,6 +851,11 @@
 			interrupt-controller;
 			#interrupt-cells = <2>;
 		};
+
+		smp2p_sleepstate_out: sleepstate-out {
+			qcom,entry-name = "sleepstate";
+			#qcom,smem-state-cells = <1>;
+		};
 	};
 
 	smp2p-cdsp {
