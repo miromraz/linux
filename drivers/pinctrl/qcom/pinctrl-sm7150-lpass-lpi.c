@@ -105,7 +105,7 @@ static const char * const slimbus_data_groups[] = { "gpio20", "gpio21", "gpio22"
 static const char * const swr_rx_clk_groups[] = { "gpio21" };
 static const char * const swr_rx_data_groups[] = { "gpio22", "gpio23" };
 static const char * const swr_tx_clk_groups[] = { "gpio18" };
-static const char * const swr_tx_data_groups[] = { "gpio19", "gpio20", "gpio23" };
+static const char * const swr_tx_data_groups[] = { "gpio19", "gpio20" };
 
 static const struct lpi_pingroup sm7150_groups[] = {
 	LPI_PINGROUP(0, LPI_NO_SLEW, _, _, _, _),
@@ -127,17 +127,17 @@ static const struct lpi_pingroup sm7150_groups[] = {
 	LPI_PINGROUP(16, LPI_NO_SLEW, _, _, _, _),
 	LPI_PINGROUP(17, LPI_NO_SLEW, _, _, _, _),
 	LPI_PINGROUP(18, 0, slimbus_clk, swr_tx_clk, _, _),
-	LPI_PINGROUP(19, 2, swr_tx_data, audio_ref, _, _),
+	LPI_PINGROUP(19, 2, _, audio_ref, swr_tx_data, _),
 	LPI_PINGROUP(20, 4, slimbus_data, swr_tx_data, _, _),
 	LPI_PINGROUP(21, 8, slimbus_data, swr_rx_clk, _, _),
 	LPI_PINGROUP(22, 10, slimbus_data, swr_rx_data, prim_mclk_a, _),
-	LPI_PINGROUP(23, 6, qua_mi2s_sclk, _, swr_rx_data, swr_tx_data),
+	LPI_PINGROUP(23, 6, qua_mi2s_sclk, swr_rx_data, _, _),
 	LPI_PINGROUP(24, LPI_NO_SLEW, qua_mi2s_ws, cdc_pdm_rx, _, _),
 	LPI_PINGROUP(25, LPI_NO_SLEW, qua_mi2s_data, _, _, _),
-	LPI_PINGROUP(26, LPI_NO_SLEW, qua_mi2s_data, dmic1_clk, _, _),
-	LPI_PINGROUP(27, LPI_NO_SLEW, qua_mi2s_data, dmic1_data, qdss_cti, _),
-	LPI_PINGROUP(28, LPI_NO_SLEW, qua_mi2s_data, dmic2_clk, gp_pdm, qdss_cti),
-	LPI_PINGROUP(29, LPI_NO_SLEW, prim_mclk_b, dmic2_data, _, _),
+	LPI_PINGROUP(26, LPI_NO_SLEW, dmic1_clk, qua_mi2s_data, _, _),
+	LPI_PINGROUP(27, LPI_NO_SLEW, dmic1_data, qua_mi2s_data, qdss_cti, _),
+	LPI_PINGROUP(28, LPI_NO_SLEW, dmic2_clk, qua_mi2s_data, gp_pdm, qdss_cti),
+	LPI_PINGROUP(29, LPI_NO_SLEW, dmic2_data, prim_mclk_b, _, _),
 	LPI_PINGROUP(30, LPI_NO_SLEW, qca_sb_data, _, _, _),
 	LPI_PINGROUP(31, LPI_NO_SLEW, qca_sb_clk, _, _, _),
 };
