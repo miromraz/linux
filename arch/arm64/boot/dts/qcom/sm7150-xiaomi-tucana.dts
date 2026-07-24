@@ -222,7 +222,25 @@
 };
 
 &lpass_tlmm {
-	gpio-line-names = "SWR_TX_CLK", /* GPIO_0 */
+	gpio-line-names = "NC", /* GPIO_0 */
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC", /* GPIO_10 */
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "NC",
+			  "SWR_TX_CLK", /* GPIO_18 */
 			  "SWR_TX_DATA1",
 			  "SWR_TX_DATA2",
 			  "SWR_RX_CLK",
