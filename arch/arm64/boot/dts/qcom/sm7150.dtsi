@@ -23,6 +23,7 @@
 #include <dt-bindings/soc/qcom,rpmh-rsc.h>
 #include <dt-bindings/soc/qcom,apr.h>
 #include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
 #include <dt-bindings/thermal/thermal.h>
 
 / {
@@ -2615,6 +2616,38 @@
 							#address-cells = <1>;
 							#size-cells = <0>;
 							#sound-dai-cells = <1>;
+
+							dai@0 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
+							};
+
+							dai@1 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
+							};
+
+							dai@2 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
+							};
+
+							dai@3 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA4>;
+							};
+
+							dai@4 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA5>;
+							};
+
+							dai@5 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA6>;
+							};
+
+							dai@6 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA7>;
+							};
+
+							dai@7 {
+								reg = <MSM_FRONTEND_DAI_MULTIMEDIA8>;
+							};
 						};
 					};
 
@@ -4669,35 +4702,42 @@
 			status = "disabled";
 		};
 
-		lpass_tlmm: pinctrl@62b52000 {
+		lpass_tlmm: pinctrl@62b40000 {
 			compatible = "qcom,sm7150-lpass-lpi-pinctrl";
-			/* SSC range: <0 0x62b40000 0 0x12000> */
-			reg = <0 0x62b52000 0 0xe000>;
+			reg = <0 0x62b40000 0 0x20000>;
+
+			/*
+			 * Pads 0-7 and 12-17 are fenced from the AP (pad 0 read
+			 * hard-hangs the NoC; empirically verified). Downstream
+			 * skips the same set via goog,ignored-gpios. Only the
+			 * sec MI2S/TDM pads 8-11 in this range are AP-accessible.
+			 */
+			gpio-reserved-ranges = <0 8>, <12 6>;
 
 			clocks = <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
 			clock-names = "core";
 
 			gpio-controller;
 			#gpio-cells = <2>;
-			gpio-ranges = <&lpass_tlmm 0 0 14>;
+			gpio-ranges = <&lpass_tlmm 0 0 32>;
 
 			tx_swr_active: tx-swr-active-state {
 				clk-pins {
-					pins = "gpio0";
+					pins = "gpio18";
 					function = "swr_tx_clk";
 					drive-strength = <8>;
 					bias-bus-hold;
 				};
 
 				data1-pins {
-					pins = "gpio1";
+					pins = "gpio19";
 					function = "swr_tx_data";
 					drive-strength = <8>;
 					bias-bus-hold;
 				};
 
 				data2-pins {
-					pins = "gpio2";
+					pins = "gpio20";
 					function = "swr_tx_data";
 					drive-strength = <8>;
 					bias-bus-hold;
@@ -4706,21 +4746,21 @@
 
 			tx_swr_sleep: tx-swr-sleep-state {
 				clk-pins {
-					pins = "gpio0";
+					pins = "gpio18";
 					function = "swr_tx_clk";
 					drive-strength = <2>;
 					bias-bus-hold;
 				};
 
 				data1-pins {
-					pins = "gpio1";
+					pins = "gpio19";
 					function = "swr_tx_data";
 					drive-strength = <2>;
 					bias-bus-hold;
 				};
 
 				data2-pins {
-					pins = "gpio2";
+					pins = "gpio20";
 					function = "swr_tx_data";
 					drive-strength = <2>;
 					bias-bus-hold;
@@ -4729,14 +4769,14 @@
 
 			rx_swr_active: rx-swr-active-state {
 				clk-pins {
-					pins = "gpio3";
+					pins = "gpio21";
 					function = "swr_rx_clk";
 					drive-strength = <8>;
 					bias-bus-hold;
 				};
 
 				data-pins {
-					pins = "gpio4", "gpio5";
+					pins = "gpio22", "gpio23";
 					function = "swr_rx_data";
 					drive-strength = <8>;
 					bias-bus-hold;
@@ -4746,14 +4786,14 @@
 
 			rx_swr_sleep: rx-swr-sleep-state {
 				clk-pins {
-					pins = "gpio3";
+					pins = "gpio21";
 					function = "swr_rx_clk";
 					drive-strength = <2>;
 					bias-bus-hold;
 				};
 
 				data-pins {
-					pins = "gpio4", "gpio5";
+					pins = "gpio22", "gpio23";
 					function = "swr_rx_data";
 					drive-strength = <2>;
 					bias-bus-hold;
@@ -4761,14 +4801,14 @@
 			};
 
 			wcd9375_reset_active: wcd9375-reset-active-state {
-				pins = "gpio6";
+				pins = "gpio24";
 				function = "cdc_pdm_rx";
 				drive-strength = <16>;
 				output-high;
 			};
 
 			wcd9375_reset_sleep: wcd9375-reset-sleep-state {
-				pins = "gpio6";
+				pins = "gpio24";
 				function = "cdc_pdm_rx";
 				drive-strength = <16>;
 				bias-disable;
@@ -4777,14 +4817,14 @@
 
 			dmic01_active: dmic01-active-state {
 				clk-pins {
-					pins = "gpio8";
+					pins = "gpio26";
 					function = "dmic1_clk";
 					drive-strength = <8>;
 					output-high;
 				};
 
 				data-pins {
-					pins = "gpio9";
+					pins = "gpio27";
 					function = "dmic1_data";
 					drive-strength = <8>;
 					input-enable;
@@ -4793,14 +4833,14 @@
 
 			dmic01_sleep: dmic01-sleep-state {
 				clk-pins {
-					pins = "gpio8";
+					pins = "gpio26";
 					function = "dmic1_clk";
 					drive-strength = <2>;
 					bias-disable;
 				};
 
 				data-pins {
-					pins = "gpio9";
+					pins = "gpio27";
 					function = "dmic1_data";
 					drive-strength = <2>;
 					pull-down;
@@ -4810,14 +4850,14 @@
 
 			dmic23_active: dmic23-active-state {
 				clk-pins {
-					pins = "gpio10";
+					pins = "gpio28";
 					function = "dmic2_clk";
 					drive-strength = <8>;
 					output-high;
 				};
 
 				data-pins {
-					pins = "gpio11";
+					pins = "gpio29";
 					function = "dmic2_data";
 					drive-strength = <8>;
 					input-enable;
@@ -4826,7 +4866,7 @@
 
 			dmic23_sleep: dmic23-sleep-state {
 				clk-pins {
-					pins = "gpio10";
+					pins = "gpio28";
 					function = "dmic2_clk";
 					drive-strength = <2>;
 					bias-disable;
@@ -4834,11 +4874,34 @@
 				};
 
 				data-pins {
-					pins = "gpio11";
+					pins = "gpio29";
 					function = "dmic2_data";
 					drive-strength = <2>;
 					pull-down;
 					input-enable;
+				};
+			};
+
+			lpi_sec_mi2s_active: sec-mi2s-active-state {
+				sck-pins {
+					pins = "gpio8";
+					function = "sec_mi2s";
+					drive-strength = <8>;
+					bias-disable;
+				};
+
+				ws-pins {
+					pins = "gpio9";
+					function = "sec_mi2s";
+					drive-strength = <8>;
+					bias-disable;
+				};
+
+				data-pins {
+					pins = "gpio10", "gpio11";
+					function = "sec_mi2s";
+					drive-strength = <8>;
+					bias-disable;
 				};
 			};
 		};
