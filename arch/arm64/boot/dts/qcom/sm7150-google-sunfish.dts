@@ -958,17 +958,104 @@
 	};
 };
 
+&rxmacro {
+	status = "okay";
+};
+
+&txmacro {
+	status = "okay";
+};
+
+&vamacro {
+	status = "okay";
+};
+
+&swr1 {
+	status = "okay";
+
+	wcd937x_rx: codec@0,4 {
+		compatible = "sdw20217010a00";
+		reg = <0 4>;
+
+		/*
+		 * WCD9375 RX Port 1 (HPH_L/R)      <==>    SWR1 Port 1 (HPH_L/R)
+		 * WCD9375 RX Port 2 (CLSH)         <==>    SWR1 Port 2 (CLSH)
+		 * WCD9375 RX Port 3 (COMP_L/R)     <==>    SWR1 Port 3 (COMP_L/R)
+		 * WCD9375 RX Port 4 (LO)           <==>    SWR1 Port 4 (LO)
+		 * WCD9375 RX Port 5 (DSD_L/R)      <==>    SWR1 Port 5 (DSD)
+		 */
+		qcom,rx-port-mapping = <1 2 3 4 5>;
+	};
+};
+
+&swr2 {
+	status = "okay";
+
+	wcd937x_tx: codec@0,3 {
+		compatible = "sdw20217010a00";
+		reg = <0 3>;
+
+		/*
+		 * WCD9375 TX Port 1 (ADC1)               <=> SWR2 Port 2
+		 * WCD9375 TX Port 2 (ADC2, 3)            <=> SWR2 Port 2
+		 * WCD9375 TX Port 3 (DMIC0,1,2,3 & MBHC) <=> SWR2 Port 3
+		 * WCD9375 TX Port 4 (DMIC4,5,6,7)        <=> SWR2 Port 4
+		 */
+		qcom,tx-port-mapping = <2 3 4 5>;
+	};
+};
+
 / {
+	wcd9375: audio-codec {
+		compatible = "qcom,wcd9375-codec", "qcom,wcd9370-codec";
+
+		reset-gpios = <&lpass_tlmm 24 GPIO_ACTIVE_LOW>;
+
+		vdd-buck-supply = <&vreg_l15a_1p8>;
+		vdd-rxtx-supply = <&vreg_l10a_1p8>;
+		vdd-px-supply = <&vreg_l10a_1p8>;
+		vdd-mic-bias-supply = <&vreg_bob>;
+
+		qcom,micbias1-microvolt = <1800000>;
+		qcom,micbias2-microvolt = <2700000>;
+		qcom,micbias3-microvolt = <1800000>;
+		qcom,micbias4-microvolt = <1800000>;
+
+		qcom,hphl-jack-type-normally-closed;
+		qcom,ground-jack-type-normally-closed;
+
+		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
+		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
+		qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
+
+		qcom,rx-device = <&wcd937x_rx>;
+		qcom,tx-device = <&wcd937x_tx>;
+
+		#sound-dai-cells = <1>;
+	};
+
 	sound {
 		compatible = "qcom,sm8250-sndcard";
 		pinctrl-0 = <&lpi_sec_mi2s_active>;
 		pinctrl-names = "default";
 		model = "Google Pixel 4a";
 
+		audio-routing = "IN1_HPHL", "HPHL_OUT",
+				"IN2_HPHR", "HPHR_OUT",
+				"AMIC2", "MIC BIAS2",
+				"TX SWR_ADC1", "ADC2_OUTPUT";
+
 		mm1-dai-link {
 			link-name = "MultiMedia1";
 			cpu {
 				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+			};
+		};
+
+		mm2-dai-link {
+			link-name = "MultiMedia2";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
 			};
 		};
 
@@ -984,6 +1071,32 @@
 
 			codec {
 				sound-dai = <&cs35l41_l 0>, <&cs35l41_r 0>;
+			};
+		};
+
+		wcd-playback-dai-link {
+			link-name = "WCD Playback";
+			cpu {
+				sound-dai = <&q6afedai RX_CODEC_DMA_RX_0>;
+			};
+			codec {
+				sound-dai = <&wcd9375 0>, <&swr1 0>, <&rxmacro 0>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+		};
+
+		wcd-capture-dai-link {
+			link-name = "WCD Capture";
+			cpu {
+				sound-dai = <&q6afedai TX_CODEC_DMA_TX_3>;
+			};
+			codec {
+				sound-dai = <&wcd9375 1>, <&swr2 0>, <&txmacro 0>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
 			};
 		};
 	};
