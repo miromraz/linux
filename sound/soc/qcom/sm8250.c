@@ -11,12 +11,14 @@
 #include <linux/soundwire/sdw.h>
 #include <sound/jack.h>
 #include <linux/input-event-codes.h>
+#include <sound/cs35l41.h>
 #include "qdsp6/q6afe.h"
 #include "common.h"
 #include "usb_offload_utils.h"
 #include "sdw.h"
 
 #define MI2S_BCLK_RATE		1536000
+#define SEC_TDM_BCLK_RATE	1536000	/* 2 slots x 16 bit @ 48 kHz */
 
 struct sm8250_snd_data {
 	bool stream_prepared[AFE_PORT_MAX];
@@ -96,14 +98,35 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 		snd_soc_dai_set_fmt(cpu_dai, fmt);
 		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
 		break;
-	case TERTIARY_MI2S_RX:
-		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+	case SECONDARY_TDM_RX_0: {
+		/* sunfish: stereo CS35L41 amps on secondary TDM, 2 slots x 16 bit
+		 * @ 48 kHz (matches the stock sec TDM config: internal sync,
+		 * inverted fsync, 1 bit clock data delay). */
+		int j;
+
 		snd_soc_dai_set_sysclk(cpu_dai,
-			Q6AFE_LPASS_CLK_ID_TER_MI2S_IBIT,
-			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
-		snd_soc_dai_set_fmt(cpu_dai, fmt);
-		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+			Q6AFE_LPASS_CLK_ID_SEC_TDM_IBIT,
+			SEC_TDM_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+
+		for_each_rtd_codec_dais(rtd, j, codec_dai) {
+			unsigned int slot[1];
+
+			snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_BC_FC |
+				SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_NB_IF);
+			/* CS35L41 PLL refclk = SCLK (BCLK) so the amp powers up */
+			snd_soc_dai_set_sysclk(codec_dai, CS35L41_CLKID_SCLK,
+				SEC_TDM_BCLK_RATE, SND_SOC_CLOCK_IN);
+			snd_soc_component_set_sysclk(codec_dai->component,
+				CS35L41_CLKID_SCLK, 0, SEC_TDM_BCLK_RATE,
+				SND_SOC_CLOCK_IN);
+			/* EAR amp on slot 0, SPK amp on slot 1 */
+			slot[0] = (codec_dai->component->name_prefix &&
+				   !strcmp(codec_dai->component->name_prefix, "EAR"))
+				   ? 0 : 1;
+			snd_soc_dai_set_channel_map(codec_dai, 0, NULL, 1, slot);
+		}
 		break;
+	}
 	case QUINARY_MI2S_RX:
 		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
 		snd_soc_dai_set_sysclk(cpu_dai,
@@ -137,9 +160,41 @@ static int sm8250_snd_hw_free(struct snd_pcm_substream *substream)
 	return qcom_snd_sdw_hw_free(substream, &data->stream_prepared[cpu_dai->id]);
 }
 
+static int sm8250_snd_hw_params(struct snd_pcm_substream *substream,
+				struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	unsigned int tdm_offset[2] = { 0, 2 };
+	int ret;
+
+	switch (cpu_dai->id) {
+	case SECONDARY_TDM_RX_0:
+		ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0, 0x3, 2, 16);
+		if (ret < 0) {
+			dev_err(rtd->dev, "failed to set tdm slots: %d\n", ret);
+			return ret;
+		}
+
+		ret = snd_soc_dai_set_channel_map(cpu_dai, 0, NULL, 2,
+						  tdm_offset);
+		if (ret < 0) {
+			dev_err(rtd->dev, "failed to set channel map: %d\n",
+				ret);
+			return ret;
+		}
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 static const struct snd_soc_ops sm8250_be_ops = {
 	.startup = sm8250_snd_startup,
 	.shutdown = qcom_snd_sdw_shutdown,
+	.hw_params = sm8250_snd_hw_params,
 	.hw_free = sm8250_snd_hw_free,
 	.prepare = sm8250_snd_prepare,
 };
