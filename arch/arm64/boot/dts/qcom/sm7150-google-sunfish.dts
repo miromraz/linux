@@ -1001,7 +1001,7 @@
 		 * WCD9375 TX Port 3 (DMIC0,1,2,3 & MBHC) <=> SWR2 Port 3
 		 * WCD9375 TX Port 4 (DMIC4,5,6,7)        <=> SWR2 Port 4
 		 */
-		qcom,tx-port-mapping = <2 3 4 5>;
+		qcom,tx-port-mapping = <1 1 2 3>;
 	};
 };
 
