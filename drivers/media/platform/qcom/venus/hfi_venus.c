@@ -130,7 +130,7 @@ struct venus_hfi_device {
 };
 
 static bool venus_pkt_debug;
-int venus_fw_debug = HFI_DEBUG_MSG_ERROR | HFI_DEBUG_MSG_FATAL;
+int venus_fw_debug = 0xff;	/* TEST: full fw debug */
 static bool venus_fw_low_power_mode = true;
 static int venus_hw_rsp_timeout = 1000;
 static bool venus_fw_coverage;
@@ -996,7 +996,7 @@ static void venus_flush_debug_queue(struct venus_hfi_device *hdev)
 		if (pkt->hdr.pkt_type != HFI_MSG_SYS_COV) {
 			struct hfi_msg_sys_debug_pkt *pkt = packet;
 
-			dev_dbg(dev, VDBGFW "%s", pkt->msg_data);
+			dev_info(dev, VDBGFW "%s", pkt->msg_data);	/* TEST */
 		}
 	}
 }
@@ -1615,8 +1615,25 @@ static int venus_suspend_3xx(struct venus_core *core)
 	ret = readx_poll_timeout(venus_cpu_and_video_core_idle, hdev, val, val,
 				 1500, 100 * 1500);
 	if (ret) {
-		dev_err(dev, "wait for cpu and video core idle fail (%d)\n", ret);
-		return ret;
+		dev_err(dev, "wait for cpu and video core idle fail (%d), cpu_status %#x ctrl_status %#x\n",
+			ret,
+			readl(hdev->core->wrapper_base + WRAPPER_CPU_STATUS),
+			readl(cpu_cs_base + CPU_CS_SCIACMDARG0));
+		/* TEST: IRIS1 fw doesn't WFI unprompted; try PC_PREP anyway */
+		ret = venus_prepare_power_collapse(hdev, true);
+		if (ret) {
+			dev_err(dev, "TEST: pc_prep w/o wfi failed (%d)\n", ret);
+			return -ETIMEDOUT;
+		}
+		ret = readx_poll_timeout(venus_cpu_idle_and_pc_ready, hdev,
+					 val, val, 1500, 100 * 1500);
+		dev_err(dev, "TEST: post pc_prep: ret=%d cpu_status %#x ctrl_status %#x\n",
+			ret,
+			readl(hdev->core->wrapper_base + WRAPPER_CPU_STATUS),
+			readl(cpu_cs_base + CPU_CS_SCIACMDARG0));
+		if (ret)
+			return -ETIMEDOUT;
+		goto power_off;
 	}
 
 	ret = venus_prepare_power_collapse(hdev, false);

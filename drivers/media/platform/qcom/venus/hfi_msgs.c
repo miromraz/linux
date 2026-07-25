@@ -321,7 +321,8 @@ sys_get_prop_image_version(struct venus_core *core,
 	if (ret)
 		goto done;
 
-	dev_err(dev, VDBGL "error reading F/W version\n");
+	dev_err(dev, VDBGL "error reading F/W version (str: %.*s)\n",
+		VER_STR_SZ, img_ver);
 	return;
 
 done:

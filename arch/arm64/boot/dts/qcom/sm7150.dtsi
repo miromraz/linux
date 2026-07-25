@@ -3607,6 +3607,9 @@
 
 			memory-region = <&venus_mem>;
 
+			resets = <&gcc GCC_VIDEO_AXI_CLK_BCR>;
+			reset-names = "bus";
+
 			iommus = <&apps_smmu 0x1080 0x60>;
 
 			status = "disabled";
@@ -3635,16 +3638,6 @@
 				opp-365000000 {
 					opp-hz = /bits/ 64 <365000000>;
 					required-opps = <&rpmhpd_opp_svs_l1>;
-				};
-
-				opp-444000000 {
-					opp-hz = /bits/ 64 <444000000>;
-					required-opps = <&rpmhpd_opp_nom>;
-				};
-
-				opp-533000000 {
-					opp-hz = /bits/ 64 <533000000>;
-					required-opps = <&rpmhpd_opp_turbo>;
 				};
 			};
 		};

@@ -1045,7 +1045,29 @@ static int core_power_v4(struct venus_core *core, int on)
 		ret = core_clks_enable(core);
 		if (ret < 0 && pmctrl)
 			pm_runtime_put_sync(pmctrl);
+
+		/* TEST: hand vcodec+CVP GDSCs to fw hardware control (downstream
+		 * __enable_hw_power_collapse) before fw boot */
+		if (core->res->resets_num && core->res->vcodec_pmdomains_num == 3) {
+			pm_runtime_get_sync(core->pmdomains->pd_devs[1]);
+			pm_runtime_get_sync(core->pmdomains->pd_devs[2]);
+			ret = dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[1], true);
+			if (ret)
+				dev_err(dev, "TEST: hwmode vcodec0 fail %d\n", ret);
+			ret = dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[2], true);
+			if (ret)
+				dev_err(dev, "TEST: hwmode vcodec1 fail %d\n", ret);
+			ret = 0;
+		}
 	} else {
+		/* TEST: reclaim vcodec+CVP GDSC control from fw */
+		if (core->res->resets_num && core->res->vcodec_pmdomains_num == 3) {
+			dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[1], false);
+			dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[2], false);
+			pm_runtime_put_sync(core->pmdomains->pd_devs[2]);
+			pm_runtime_put_sync(core->pmdomains->pd_devs[1]);
+		}
+
 		/* Drop the performance state vote */
 		if (core->opp_pmdomain)
 			dev_pm_opp_set_rate(dev, 0);
