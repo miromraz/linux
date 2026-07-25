@@ -1326,6 +1326,11 @@
 	remote-endpoint = <&pm6150_typec_mux_in>;
 };
 
+&venus {
+	firmware-name = "qcom/sm7150/google/sunfish/venus.mbn";
+	status = "okay";
+};
+
 &wifi {
 	vdd-0.8-cx-mx-supply = <&vdd_wcss_cx>;
 	vdd-1.8-xo-supply = <&vreg_l1c_1p8>;
