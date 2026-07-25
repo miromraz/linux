@@ -967,6 +967,74 @@ static const struct venus_resources sc7180_res = {
 	.enc_nodename = "video-encoder",
 };
 
+static const struct freq_tbl sm7150_freq_table[] = {
+	{ 0, 365000000 },
+	{ 0, 338000000 },
+	{ 0, 240000000 },
+};
+
+static const struct reg_val sm7150_reg_preset[] = {
+	{ 0xe2000, 0 },	/* WRAPPER_CPU_CLOCK_CONFIG */
+	{ 0xe2010, 0 },	/* WRAPPER_CPU_CGC_DIS */
+};
+
+static const struct bw_tbl sm7150_bw_table_enc[] = {
+	{  972000,  750000, 0, 0, 0 },	/* 3840x2160@30 */
+	{  489600,  451000, 0, 0, 0 },	/* 1920x1080@60 */
+	{  244800,  234000, 0, 0, 0 },	/* 1920x1080@30 */
+};
+
+static const struct bw_tbl sm7150_bw_table_dec[] = {
+	{ 1036800, 1386000, 0, 1875000, 0 },	/* 4096x2160@30 */
+	{  489600,  865000, 0, 1146000, 0 },	/* 1920x1080@60 */
+	{  244800,  530000, 0,  583000, 0 },	/* 1920x1080@30 */
+};
+
+static const struct venus_resources sm7150_res = {
+	.freq_tbl = sm7150_freq_table,
+	.freq_tbl_size = ARRAY_SIZE(sm7150_freq_table),
+	.reg_tbl = sm7150_reg_preset,
+	.reg_tbl_size = ARRAY_SIZE(sm7150_reg_preset),
+	.bw_tbl_enc = sm7150_bw_table_enc,
+	.bw_tbl_enc_size = ARRAY_SIZE(sm7150_bw_table_enc),
+	.bw_tbl_dec = sm7150_bw_table_dec,
+	.bw_tbl_dec_size = ARRAY_SIZE(sm7150_bw_table_dec),
+	.clks = {"core", "iface", "bus" },
+	.clks_num = 3,
+	.vcodec0_clks = { "vcodec0_core", "vcodec0_bus" },
+	.vcodec1_clks = { "cvp_core", "cvp_bus" },
+	.vcodec_clks_num = 2,
+	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0", "cvp" },
+	.vcodec_pmdomains_num = 3,
+	.opp_pmdomain = (const char *[]) { "cx" },
+	/*
+	 * The second core (MVS1) is the CVP co-processor, not a video codec,
+	 * so only a single decode/encode core is exposed. Its power domain and
+	 * clocks are still required by the firmware at boot (fw_ctrl_pds).
+	 */
+	.vcodec_num = 1,
+	.fw_ctrl_pds = true,
+	/*
+	 * The firmware advertises MPEG2 but MPEG2 decode sessions fail on
+	 * "14:VIDEO.IR.1.2" (session errors right after initialization).
+	 */
+	.dec_codec_blacklist = HFI_VIDEO_CODEC_MPEG2,
+	.max_load = 2073600,	/* 4096x2160@30 */
+	.hfi_version = HFI_VERSION_4XX,
+	.vpu_version = VPU_VERSION_AR50,
+	.vmem_id = VIDC_RESOURCE_NONE,
+	.vmem_size = 0,
+	.vmem_addr = 0,
+	.dma_mask = 0xe0000000 - 1,
+	.cp_start = 0,
+	.cp_size = 0x70800000,
+	.cp_nonpixel_start = 0x1000000,
+	.cp_nonpixel_size = 0x24800000,
+	.fwname = "qcom/venus-5.4/venus.mbn",
+	.dec_nodename = "video-decoder",
+	.enc_nodename = "video-encoder",
+};
+
 static const struct freq_tbl sm8250_freq_table[] = {
 	{ 0, 444000000 },
 	{ 0, 366000000 },
@@ -1147,6 +1215,7 @@ static const struct of_device_id venus_dt_match[] = {
 	{ .compatible = "qcom,sdm660-venus", .data = &sdm660_res, },
 	{ .compatible = "qcom,sdm845-venus", .data = &sdm845_res, },
 	{ .compatible = "qcom,sdm845-venus-v2", .data = &sdm845_res_v2, },
+	{ .compatible = "qcom,sm7150-venus", .data = &sm7150_res, },
 	{ .compatible = "qcom,sm8250-venus", .data = &sm8250_res, },
 	{ }
 };
