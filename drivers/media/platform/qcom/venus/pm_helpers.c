@@ -1020,6 +1020,79 @@ static void core_put_v4(struct venus_core *core)
 {
 }
 
+/*
+ * The IRIS1 firmware takes hardware control of the vcodec and CVP power
+ * domains during boot. It requires them powered, clocked and their clock
+ * source running at a valid rate before it starts, and then handed over to
+ * firmware (hardware) control. This mirrors the downstream __venus_power_on()
+ * plus __enable_hw_power_collapse() sequence; without it the firmware faults
+ * on the bus during boot (SFR exception FA=0xe000c510) or never reaches WFI,
+ * so power collapse later times out.
+ */
+static int venus_fw_ctrl_pds_on(struct venus_core *core)
+{
+	const struct venus_resources *res = core->res;
+	struct device **pds = core->pmdomains->pd_devs;
+	struct device *dev = core->dev;
+	int ret;
+
+	ret = dev_pm_opp_set_rate(dev, res->freq_tbl[res->freq_tbl_size - 1].freq);
+	if (ret)
+		return ret;
+
+	ret = pm_runtime_get_sync(pds[1]);
+	if (ret < 0)
+		goto err_put_vcodec0;
+
+	ret = pm_runtime_get_sync(pds[2]);
+	if (ret < 0)
+		goto err_put_cvp;
+
+	ret = vcodec_clks_enable(core, core->vcodec0_clks);
+	if (ret)
+		goto err_put_cvp;
+
+	ret = vcodec_clks_enable(core, core->vcodec1_clks);
+	if (ret)
+		goto err_disable_vcodec0_clks;
+
+	ret = dev_pm_genpd_set_hwmode(pds[1], true);
+	if (ret)
+		goto err_disable_vcodec1_clks;
+
+	ret = dev_pm_genpd_set_hwmode(pds[2], true);
+	if (ret)
+		goto err_hwmode_vcodec0_off;
+
+	return 0;
+
+err_hwmode_vcodec0_off:
+	dev_pm_genpd_set_hwmode(pds[1], false);
+err_disable_vcodec1_clks:
+	vcodec_clks_disable(core, core->vcodec1_clks);
+err_disable_vcodec0_clks:
+	vcodec_clks_disable(core, core->vcodec0_clks);
+err_put_cvp:
+	pm_runtime_put_sync(pds[2]);
+err_put_vcodec0:
+	pm_runtime_put_sync(pds[1]);
+
+	return ret;
+}
+
+static void venus_fw_ctrl_pds_off(struct venus_core *core)
+{
+	struct device **pds = core->pmdomains->pd_devs;
+
+	/* Poll failure is expected if the firmware left a domain off; ignore. */
+	dev_pm_genpd_set_hwmode(pds[1], false);
+	dev_pm_genpd_set_hwmode(pds[2], false);
+	vcodec_clks_disable(core, core->vcodec1_clks);
+	vcodec_clks_disable(core, core->vcodec0_clks);
+	pm_runtime_put_sync(pds[2]);
+	pm_runtime_put_sync(pds[1]);
+}
+
 static int core_power_v4(struct venus_core *core, int on)
 {
 	struct device *dev = core->dev;
@@ -1045,7 +1118,19 @@ static int core_power_v4(struct venus_core *core, int on)
 		ret = core_clks_enable(core);
 		if (ret < 0 && pmctrl)
 			pm_runtime_put_sync(pmctrl);
+
+		if (!ret && core->res->fw_ctrl_pds) {
+			ret = venus_fw_ctrl_pds_on(core);
+			if (ret) {
+				core_clks_disable(core);
+				if (pmctrl)
+					pm_runtime_put_sync(pmctrl);
+			}
+		}
 	} else {
+		if (core->res->fw_ctrl_pds)
+			venus_fw_ctrl_pds_off(core);
+
 		/* Drop the performance state vote */
 		if (core->opp_pmdomain)
 			dev_pm_opp_set_rate(dev, 0);
