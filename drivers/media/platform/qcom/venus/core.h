@@ -90,6 +90,11 @@ struct venus_resources {
 	unsigned int vcodec_num;
 	const u32 dec_codec_blacklist;
 	const u32 enc_codec_blacklist;
+	/*
+	 * hand vcodec/CVP power domains to firmware hardware control across
+	 * fw boot; the fw requires them powered and clocked when it boots
+	 */
+	bool fw_ctrl_pds;
 	const char * const resets[VIDC_RESETS_NUM_MAX];
 	unsigned int resets_num;
 	enum hfi_version hfi_version;
