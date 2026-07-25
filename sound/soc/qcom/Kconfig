@@ -190,6 +190,7 @@ config SND_SOC_SM8250
 	select SND_SOC_QDSP6
 	select SND_SOC_QCOM_COMMON
 	select SND_SOC_QCOM_SDW
+	select SND_SOC_RT5514 if I2C
 	help
 	  To add support for audio on Qualcomm Technologies Inc.
 	  SM8250 SoC-based systems.
