@@ -998,8 +998,9 @@ static const struct venus_resources sm7150_res = {
 	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0", "vcodec1" },
 	.vcodec_pmdomains_num = 3,
 	.opp_pmdomain = (const char *[]) { "cx" },
-	/* MVS1/vcodec1 is the CVP core, not a second video codec */
-	.vcodec_num = 2,
+	/* MVS1/vcodec1 is the CVP core, not a second video codec - pin all
+	 * sessions to vcodec0 (encode on "core 2" = CVP hard-hangs the SoC) */
+	.vcodec_num = 1,
 	.max_load = 2073600,	/* 4096x2160@30 */
 	.hfi_version = HFI_VERSION_4XX,
 	.vpu_version = VPU_VERSION_AR50,
