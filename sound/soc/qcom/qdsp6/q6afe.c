@@ -1385,6 +1385,9 @@ void q6afe_tdm_port_prepare(struct q6afe_port *port,
 	pcfg->tdm_cfg.sync_mode = cfg->sync_mode;
 	pcfg->tdm_cfg.sync_src = cfg->sync_src;
 	pcfg->tdm_cfg.nslots_per_frame = cfg->nslots_per_frame;
+	pcfg->tdm_cfg.ctrl_data_out_enable = cfg->ctrl_data_out_enable;
+	pcfg->tdm_cfg.ctrl_invert_sync_pulse = cfg->ctrl_invert_sync_pulse;
+	pcfg->tdm_cfg.ctrl_sync_data_delay = cfg->ctrl_sync_data_delay;
 
 	pcfg->tdm_cfg.slot_width = cfg->slot_width;
 	pcfg->tdm_cfg.slot_mask = cfg->slot_mask;
