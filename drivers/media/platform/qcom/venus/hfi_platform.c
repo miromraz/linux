@@ -92,6 +92,9 @@ hfi_platform_get_codecs(struct venus_core *core, u32 *enc_codecs,
 		*dec_codecs &= ~HFI_VIDEO_CODEC_VP8;
 	}
 
+	*dec_codecs &= ~core->res->dec_codec_blacklist;
+	*enc_codecs &= ~core->res->enc_codec_blacklist;
+
 	return 0;
 }
 
