@@ -278,6 +278,9 @@ static int q6tdm_hw_params(struct snd_pcm_substream *substream,
 	tdm->data_align_type = dai_data->priv[dai->id].data_align;
 	tdm->sync_src = dai_data->priv[dai->id].sync_src;
 	tdm->sync_mode = dai_data->priv[dai->id].sync_mode;
+	tdm->ctrl_data_out_enable = dai_data->priv[dai->id].data_out_enable;
+	tdm->ctrl_invert_sync_pulse = dai_data->priv[dai->id].invert_sync;
+	tdm->ctrl_sync_data_delay = dai_data->priv[dai->id].data_delay;
 
 	return 0;
 }
