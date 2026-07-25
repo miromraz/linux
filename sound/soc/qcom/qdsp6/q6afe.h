@@ -194,6 +194,9 @@ struct q6afe_tdm_cfg {
 	u16	slot_width;
 	u16	slot_mask;
 	u32	data_align_type;
+	u16	ctrl_data_out_enable;
+	u16	ctrl_invert_sync_pulse;
+	u16	ctrl_sync_data_delay;
 	u16	ch_mapping[AFE_MAX_CHAN_COUNT];
 };
 
