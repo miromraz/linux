@@ -3584,8 +3584,8 @@
 				      "bus",
 				      "vcodec0_core",
 				      "vcodec0_bus",
-				      "vcodec1_core",
-				      "vcodec1_bus";
+				      "cvp_core",
+				      "cvp_bus";
 
 			interconnects = <&gem_noc MASTER_AMPSS_M0 QCOM_ICC_TAG_ALWAYS
 					 &config_noc SLAVE_VENUS_CFG QCOM_ICC_TAG_ALWAYS>,
@@ -3600,7 +3600,7 @@
 					<&rpmhpd RPMHPD_CX>;
 			power-domain-names = "venus",
 					     "vcodec0",
-					     "vcodec1",
+					     "cvp",
 					     "cx";
 
 			operating-points-v2 = <&venus_opp_table>;
@@ -3635,16 +3635,6 @@
 				opp-365000000 {
 					opp-hz = /bits/ 64 <365000000>;
 					required-opps = <&rpmhpd_opp_svs_l1>;
-				};
-
-				opp-444000000 {
-					opp-hz = /bits/ 64 <444000000>;
-					required-opps = <&rpmhpd_opp_nom>;
-				};
-
-				opp-533000000 {
-					opp-hz = /bits/ 64 <533000000>;
-					required-opps = <&rpmhpd_opp_turbo>;
 				};
 			};
 		};
