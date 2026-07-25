@@ -1105,7 +1105,7 @@ reconfigure:
 	return 0;
 
 free_dpb_bufs:
-	venus_helper_free_dpb_bufs(inst);
+	venus_helper_free_dpb_bufs(inst, false);
 err:
 	return ret;
 }
@@ -1248,7 +1248,7 @@ static int vdec_stop_capture(struct venus_inst *inst)
 	case VENUS_DEC_STATE_DRC:
 		ret = hfi_session_flush(inst, HFI_FLUSH_OUTPUT, true);
 		inst->codec_state = VENUS_DEC_STATE_CAPTURE_SETUP;
-		venus_helper_free_dpb_bufs(inst);
+		venus_helper_free_dpb_bufs(inst, false);
 		break;
 	default:
 		break;
@@ -1337,7 +1337,7 @@ static void vdec_session_release(struct venus_inst *inst)
 	if (abort)
 		hfi_session_abort(inst);
 
-	venus_helper_free_dpb_bufs(inst);
+	venus_helper_free_dpb_bufs(inst, true);
 	venus_pm_load_scale(inst);
 	INIT_LIST_HEAD(&inst->registeredbufs);
 	mutex_unlock(&inst->lock);
