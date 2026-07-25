@@ -644,6 +644,7 @@
 		reset-gpios = <&pm6150l_gpios 8 GPIO_ACTIVE_HIGH>;
 
 		sound-name-prefix = "EAR";
+		cirrus,subsystem-id = "google-sunfish";
 
 		cirrus,boost-peak-milliamp = <3700>;
 		cirrus,boost-ind-nanohenry = <1000>;
@@ -663,6 +664,7 @@
 		reset-gpios = <&pm6150l_gpios 11 GPIO_ACTIVE_HIGH>;
 
 		sound-name-prefix = "SPK";
+		cirrus,subsystem-id = "google-sunfish";
 
 		cirrus,boost-peak-milliamp = <3700>;
 		cirrus,boost-ind-nanohenry = <1000>;
