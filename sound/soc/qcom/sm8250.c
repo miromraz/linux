@@ -19,6 +19,18 @@
 
 #define MI2S_BCLK_RATE		1536000
 #define SEC_TDM_BCLK_RATE	1536000	/* 2 slots x 16 bit @ 48 kHz */
+#define TER_TDM_BCLK_RATE	1536000	/* 2 slots x 16 bit @ 48 kHz */
+
+/*
+ * RT5514 clocking. Values mirror the codec enums/rate in
+ * sound/soc/codecs/rt5514.h (RT5514_SCLK_S_PLL1, RT5514_PLL1_S_BCLK); that
+ * codec header is not exported, so define them locally. The board wires no
+ * MCLK to the RT5514, so its 12.288 MHz sysclk is derived from the TDM BCLK
+ * via the codec PLL.
+ */
+#define RT5514_PLL1_S_BCLK	1
+#define RT5514_SCLK_S_PLL1	1
+#define RT5514_SYSCLK_RATE	12288000
 
 struct sm8250_snd_data {
 	bool stream_prepared[AFE_PORT_MAX];
@@ -127,6 +139,13 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 		}
 		break;
 	}
+	case TERTIARY_TDM_TX_0:
+		/* sunfish: RT5514 mic on tertiary TDM, capture, 2 slots x
+		 * 16 bit @ 48 kHz (same stock TDM config as the sec TDM). */
+		snd_soc_dai_set_sysclk(cpu_dai,
+			Q6AFE_LPASS_CLK_ID_TER_TDM_IBIT,
+			TER_TDM_BCLK_RATE, SNDRV_PCM_STREAM_CAPTURE);
+		break;
 	case QUINARY_MI2S_RX:
 		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
 		snd_soc_dai_set_sysclk(cpu_dai,
@@ -184,6 +203,41 @@ static int sm8250_snd_hw_params(struct snd_pcm_substream *substream,
 			return ret;
 		}
 		break;
+	case TERTIARY_TDM_TX_0: {
+		/* tert TDM TX id is odd -> q6afe uses the tx mask/slots.
+		 * RT5514 drives 2 x 16 bit slots into the SoC; the AFE slot
+		 * mapping wants per-channel BYTE offsets in the frame (0 and
+		 * 2 for 16-bit slots), same as the sec TDM speaker path. */
+		unsigned int slot[2] = { 0, 2 };
+		struct snd_soc_dai *codec_dai;
+		int j;
+
+		ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0x3, 0, 2, 16);
+		if (ret < 0) {
+			dev_err(rtd->dev, "failed to set tdm slots: %d\n", ret);
+			return ret;
+		}
+
+		ret = snd_soc_dai_set_channel_map(cpu_dai, 2, slot, 0, NULL);
+		if (ret < 0) {
+			dev_err(rtd->dev, "failed to set channel map: %d\n",
+				ret);
+			return ret;
+		}
+
+		for_each_rtd_codec_dais(rtd, j, codec_dai) {
+			/* No MCLK on this board: lock the RT5514 PLL to the
+			 * TDM bit clock and use it as the 12.288 MHz sysclk. */
+			snd_soc_dai_set_pll(codec_dai, 0, RT5514_PLL1_S_BCLK,
+				TER_TDM_BCLK_RATE, RT5514_SYSCLK_RATE);
+			snd_soc_dai_set_sysclk(codec_dai, RT5514_SCLK_S_PLL1,
+				RT5514_SYSCLK_RATE, SND_SOC_CLOCK_IN);
+			snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_BC_FC |
+				SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_NB_IF);
+			snd_soc_dai_set_tdm_slot(codec_dai, 0x3, 0, 2, 16);
+		}
+		break;
+	}
 	default:
 		break;
 	}
