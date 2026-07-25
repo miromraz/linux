@@ -29,6 +29,9 @@
 #include "pm_helpers.h"
 #include "hfi_venus_io.h"
 
+/* Give up sys_error recovery after this many consecutive failed attempts. */
+#define VENUS_MAX_SYS_ERR_RETRIES	4
+
 static void venus_coredump(struct venus_core *core)
 {
 	struct device *dev;
@@ -164,9 +167,19 @@ static void venus_sys_error_handler(struct work_struct *work)
 		dev_warn_ratelimited(core->dev,
 				     "System error has occurred, recovery failed to %s\n",
 				     err_msg);
-		schedule_delayed_work(&core->work, msecs_to_jiffies(10));
+
+		if (++core->sys_err_retries > VENUS_MAX_SYS_ERR_RETRIES) {
+			dev_err(core->dev,
+				"system error recovery failed, giving up after %u attempts\n",
+				core->sys_err_retries);
+			return;
+		}
+
+		schedule_delayed_work(&core->work, msecs_to_jiffies(500));
 		return;
 	}
+
+	core->sys_err_retries = 0;
 
 	dev_warn(core->dev, "system error has occurred (recovered)\n");
 
