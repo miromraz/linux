@@ -159,11 +159,19 @@ static void venus_sys_error_handler(struct work_struct *work)
 	pm_runtime_put_sync(core->dev);
 
 	if (failed) {
+		static int recovery_attempts;	/* TEST: bounded recovery */
+
 		disable_irq_nosync(core->irq);
 		dev_warn_ratelimited(core->dev,
 				     "System error has occurred, recovery failed to %s\n",
 				     err_msg);
-		schedule_delayed_work(&core->work, msecs_to_jiffies(10));
+		if (++recovery_attempts > 4) {
+			dev_err(core->dev,
+				"TEST: giving up recovery after %d attempts\n",
+				recovery_attempts);
+			return;
+		}
+		schedule_delayed_work(&core->work, msecs_to_jiffies(500));
 		return;
 	}
 
@@ -808,7 +816,7 @@ static const struct venus_resources sdm660_res = {
 	.vcodec0_clks = { "vcodec0_core" },
 	.vcodec1_clks = { "vcodec0_core" },
 	.vcodec_clks_num = 1,
-	.vcodec_num = 1,
+	.vcodec_num = 2,
 	.max_load = 1036800,
 	.hfi_version = HFI_VERSION_3XX,
 	.vmem_id = VIDC_RESOURCE_NONE,
@@ -933,7 +941,7 @@ static const struct venus_resources sc7180_res = {
 	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0" },
 	.vcodec_pmdomains_num = 2,
 	.opp_pmdomain = (const char *[]) { "cx" },
-	.vcodec_num = 1,
+	.vcodec_num = 2,
 	.hfi_version = HFI_VERSION_4XX,
 	.vpu_version = VPU_VERSION_AR50,
 	.vmem_id = VIDC_RESOURCE_NONE,
@@ -983,8 +991,7 @@ static const struct venus_resources sm7150_res = {
 	.bw_tbl_dec_size = ARRAY_SIZE(sm7150_bw_table_dec),
 	.clks = {"core", "iface", "bus" },
 	.clks_num = 3,
-	.resets = { "bus" },
-	.resets_num = 1,
+	/* TEST: bridge reset disabled - suspect in cold-boot fw exception */
 	.vcodec0_clks = { "vcodec0_core", "vcodec0_bus" },
 	.vcodec1_clks = { "vcodec1_core", "vcodec1_bus" },
 	.vcodec_clks_num = 2,
@@ -992,7 +999,7 @@ static const struct venus_resources sm7150_res = {
 	.vcodec_pmdomains_num = 3,
 	.opp_pmdomain = (const char *[]) { "cx" },
 	/* MVS1/vcodec1 is the CVP core, not a second video codec */
-	.vcodec_num = 1,
+	.vcodec_num = 2,
 	.max_load = 2073600,	/* 4096x2160@30 */
 	.hfi_version = HFI_VERSION_4XX,
 	.vpu_version = VPU_VERSION_AR50,
@@ -1052,7 +1059,7 @@ static const struct venus_resources sm8250_res = {
 	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0" },
 	.vcodec_pmdomains_num = 2,
 	.opp_pmdomain = (const char *[]) { "mx" },
-	.vcodec_num = 1,
+	.vcodec_num = 2,
 	.max_load = 7833600,
 	.hfi_version = HFI_VERSION_6XX,
 	.vpu_version = VPU_VERSION_IRIS2,
@@ -1113,7 +1120,7 @@ static const struct venus_resources sc7280_res = {
 	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0" },
 	.vcodec_pmdomains_num = 2,
 	.opp_pmdomain = (const char *[]) { "cx" },
-	.vcodec_num = 1,
+	.vcodec_num = 2,
 	.hfi_version = HFI_VERSION_6XX,
 	.vpu_version = VPU_VERSION_IRIS2_1,
 	.num_vpp_pipes = 1,
@@ -1160,7 +1167,7 @@ static const struct venus_resources qcm2290_res = {
 	.vcodec_pmdomains = (const char *[]) { "venus", "vcodec0" },
 	.vcodec_pmdomains_num = 2,
 	.opp_pmdomain = (const char *[]) { "cx" },
-	.vcodec_num = 1,
+	.vcodec_num = 2,
 	.hfi_version = HFI_VERSION_4XX,
 	.vpu_version = VPU_VERSION_AR50_LITE,
 	.max_load = 352800,

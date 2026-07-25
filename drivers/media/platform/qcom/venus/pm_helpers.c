@@ -1046,11 +1046,29 @@ static int core_power_v4(struct venus_core *core, int on)
 		if (ret < 0 && pmctrl)
 			pm_runtime_put_sync(pmctrl);
 
-		/* TEST: hand vcodec+CVP GDSCs to fw hardware control (downstream
-		 * __enable_hw_power_collapse) before fw boot */
-		if (core->res->resets_num && core->res->vcodec_pmdomains_num == 3) {
-			pm_runtime_get_sync(core->pmdomains->pd_devs[1]);
-			pm_runtime_get_sync(core->pmdomains->pd_devs[2]);
+		/* TEST: replicate downstream __venus_power_on contract before fw
+		 * boot: iris_clk_src at a valid rate, vcodec+CVP GDSCs SW-enabled
+		 * with their core/axi branch clocks running, and only then armed
+		 * for fw hardware control (__enable_hw_power_collapse). Handing
+		 * the GDSCs to hw control while OFF makes the IRIS1.2 fw bus-
+		 * fault on cold boot (SFR Exception FA=0xe000c510). */
+		if (core->res->vcodec_pmdomains_num == 3) {
+			ret = dev_pm_opp_set_rate(dev,
+				core->res->freq_tbl[core->res->freq_tbl_size - 1].freq);
+			if (ret)
+				dev_err(dev, "TEST: boot opp set rate fail %d\n", ret);
+			ret = pm_runtime_get_sync(core->pmdomains->pd_devs[1]);
+			if (ret < 0)
+				dev_err(dev, "TEST: vcodec0 pd on fail %d\n", ret);
+			ret = pm_runtime_get_sync(core->pmdomains->pd_devs[2]);
+			if (ret < 0)
+				dev_err(dev, "TEST: vcodec1 pd on fail %d\n", ret);
+			ret = vcodec_clks_enable(core, core->vcodec0_clks);
+			if (ret)
+				dev_err(dev, "TEST: vcodec0 clks fail %d\n", ret);
+			ret = vcodec_clks_enable(core, core->vcodec1_clks);
+			if (ret)
+				dev_err(dev, "TEST: vcodec1 clks fail %d\n", ret);
 			ret = dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[1], true);
 			if (ret)
 				dev_err(dev, "TEST: hwmode vcodec0 fail %d\n", ret);
@@ -1060,10 +1078,13 @@ static int core_power_v4(struct venus_core *core, int on)
 			ret = 0;
 		}
 	} else {
-		/* TEST: reclaim vcodec+CVP GDSC control from fw */
-		if (core->res->resets_num && core->res->vcodec_pmdomains_num == 3) {
+		/* TEST: reclaim vcodec+CVP GDSC control from fw; poll failure is
+		 * expected if fw left them off - ignore */
+		if (core->res->vcodec_pmdomains_num == 3) {
 			dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[1], false);
 			dev_pm_genpd_set_hwmode(core->pmdomains->pd_devs[2], false);
+			vcodec_clks_disable(core, core->vcodec1_clks);
+			vcodec_clks_disable(core, core->vcodec0_clks);
 			pm_runtime_put_sync(core->pmdomains->pd_devs[2]);
 			pm_runtime_put_sync(core->pmdomains->pd_devs[1]);
 		}
