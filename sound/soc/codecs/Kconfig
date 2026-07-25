@@ -1824,6 +1824,7 @@ config SND_SOC_RT1320_SDW
 config SND_SOC_RT5514
 	tristate
 	depends on I2C
+	select SND_SOC_RL6231
 
 config SND_SOC_RT5514_SPI
 	tristate

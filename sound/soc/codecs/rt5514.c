@@ -53,14 +53,35 @@ static const struct reg_sequence rt5514_i2c_patch[] = {
 	{0xfafafafa, 0x00000000},
 };
 
+/* RT5514P variant low-level init (from the downstream Pixel 4a driver) */
+static const struct reg_sequence rt5514p_i2c_patch[] = {
+	{0xfafafafa, 0x00000001},
+	{0x18002000, 0x000010ec},
+	{0x18002004, 0x00808f81},
+	{0x18002008, 0x00770000},
+	{0x18002f08, 0x00000006},
+	{0x18002f10, 0x00000000},
+	{0x18002f10, 0x00000001},
+	{0xfafafafa, 0x00000000},
+	{0x18001104, 0x00000007},
+	{0x18001108, 0x00000000},
+	{0x1800110c, 0x00000000},
+	{0x18001100, 0x0000031f},
+	{0x18002000, 0x000010ec},
+};
+
 static const struct reg_sequence rt5514_patch[] = {
 	{RT5514_DIG_IO_CTRL,		0x00000040},
-	{RT5514_CLK_CTRL1,		0x38020041},
+	{RT5514_CLK_CTRL1,		0x380200c1},
 	{RT5514_SRC_CTRL,		0x44000eee},
-	{RT5514_ANA_CTRL_LDO10,		0x00028604},
+	{RT5514_ANA_CTRL_LDO10,		0x00028704},
 	{RT5514_ANA_CTRL_ADCFED,	0x00000800},
 	{RT5514_ASRC_IN_CTRL1,		0x00000003},
+	{RT5514_DOWNFILTER0_CTRL1,	0x0002042f},
+	{RT5514_DOWNFILTER0_CTRL2,	0x0002042f},
 	{RT5514_DOWNFILTER0_CTRL3,	0x10000342},
+	{RT5514_DOWNFILTER1_CTRL1,	0x0002042f},
+	{RT5514_DOWNFILTER1_CTRL2,	0x0002042f},
 	{RT5514_DOWNFILTER1_CTRL3,	0x10000342},
 };
 
@@ -79,20 +100,20 @@ static const struct reg_default rt5514_reg[] = {
 	{RT5514_SRC_CTRL,		0x44000eee},
 	{RT5514_DOWNFILTER2_CTRL1,	0x0000882f},
 	{RT5514_PLL_SOURCE_CTRL,	0x00000004},
-	{RT5514_CLK_CTRL1,		0x38020041},
+	{RT5514_CLK_CTRL1,		0x380200c1},
 	{RT5514_CLK_CTRL2,		0x00000000},
 	{RT5514_PLL3_CALIB_CTRL1,	0x00400200},
 	{RT5514_PLL3_CALIB_CTRL5,	0x40220012},
 	{RT5514_DELAY_BUF_CTRL1,	0x7fff006a},
 	{RT5514_DELAY_BUF_CTRL3,	0x00000000},
 	{RT5514_ASRC_IN_CTRL1,		0x00000003},
-	{RT5514_DOWNFILTER0_CTRL1,	0x00020c2f},
-	{RT5514_DOWNFILTER0_CTRL2,	0x00020c2f},
+	{RT5514_DOWNFILTER0_CTRL1,	0x0002042f},
+	{RT5514_DOWNFILTER0_CTRL2,	0x0002042f},
 	{RT5514_DOWNFILTER0_CTRL3,	0x10000342},
-	{RT5514_DOWNFILTER1_CTRL1,	0x00020c2f},
-	{RT5514_DOWNFILTER1_CTRL2,	0x00020c2f},
+	{RT5514_DOWNFILTER1_CTRL1,	0x0002042f},
+	{RT5514_DOWNFILTER1_CTRL2,	0x0002042f},
 	{RT5514_DOWNFILTER1_CTRL3,	0x10000342},
-	{RT5514_ANA_CTRL_LDO10,		0x00028604},
+	{RT5514_ANA_CTRL_LDO10,		0x00028704},
 	{RT5514_ANA_CTRL_LDO18_16,	0x02000345},
 	{RT5514_ANA_CTRL_ADC12,		0x0000a2a8},
 	{RT5514_ANA_CTRL_ADC21,		0x00001180},
@@ -196,6 +217,8 @@ static bool rt5514_readable_register(struct device *dev, unsigned int reg)
 	case RT5514_ANA_CTRL_INBUF:
 	case RT5514_ANA_CTRL_VREF:
 	case RT5514_ANA_CTRL_PLL3:
+	case RT5514_ANA_CTRL_PLL2_1:
+	case RT5514_ANA_CTRL_PLL2_2:
 	case RT5514_ANA_CTRL_PLL1_1:
 	case RT5514_ANA_CTRL_PLL1_2:
 	case RT5514_DMIC_LP_CTRL:
@@ -254,6 +277,8 @@ static bool rt5514_i2c_readable_register(struct device *dev,
 	case RT5514_DSP_MAPPING | RT5514_ANA_CTRL_INBUF:
 	case RT5514_DSP_MAPPING | RT5514_ANA_CTRL_VREF:
 	case RT5514_DSP_MAPPING | RT5514_ANA_CTRL_PLL3:
+	case RT5514_DSP_MAPPING | RT5514_ANA_CTRL_PLL2_1:
+	case RT5514_DSP_MAPPING | RT5514_ANA_CTRL_PLL2_2:
 	case RT5514_DSP_MAPPING | RT5514_ANA_CTRL_PLL1_1:
 	case RT5514_DSP_MAPPING | RT5514_ANA_CTRL_PLL1_2:
 	case RT5514_DSP_MAPPING | RT5514_DMIC_LP_CTRL:
@@ -533,13 +558,25 @@ static int rt5514_set_dmic_clk(struct snd_soc_dapm_widget *w,
 	return idx;
 }
 
-static int rt5514_is_sys_clk_from_pll(struct snd_soc_dapm_widget *source,
+static int rt5514_is_sys_clk_from_pll1(struct snd_soc_dapm_widget *source,
 			 struct snd_soc_dapm_widget *sink)
 {
 	struct snd_soc_component *component = snd_soc_dapm_to_component(source->dapm);
 	struct rt5514_priv *rt5514 = snd_soc_component_get_drvdata(component);
 
-	if (rt5514->sysclk_src == RT5514_SCLK_S_PLL1)
+	if (rt5514->sysclk_src == RT5514_SCLK_S_PLL1 && !rt5514->v_p)
+		return 1;
+	else
+		return 0;
+}
+
+static int rt5514_is_sys_clk_from_pll2(struct snd_soc_dapm_widget *source,
+			 struct snd_soc_dapm_widget *sink)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(source->dapm);
+	struct rt5514_priv *rt5514 = snd_soc_component_get_drvdata(component);
+
+	if (rt5514->sysclk_src == RT5514_SCLK_S_PLL1 && rt5514->v_p)
 		return 1;
 	else
 		return 0;
@@ -623,6 +660,12 @@ static const struct snd_soc_dapm_widget rt5514_dapm_widgets[] = {
 	SND_SOC_DAPM_SUPPLY("PLL1 LDO", RT5514_PWR_ANA2,
 		RT5514_POW_PLL1_LDO_BIT, 0, NULL, 0),
 	SND_SOC_DAPM_SUPPLY("PLL1", RT5514_PWR_ANA2, RT5514_POW_PLL1_BIT, 0,
+		NULL, 0),
+	SND_SOC_DAPM_SUPPLY("PLL2 LDO ENABLE", RT5514_ANA_CTRL_PLL2_2,
+		RT5514_EN_LDO_PLL2_BIT, 0, NULL, 0),
+	SND_SOC_DAPM_SUPPLY("PLL2 LDO", RT5514_PWR_ANA2,
+		RT5514_POW_PLL2_LDO_BIT, 0, NULL, 0),
+	SND_SOC_DAPM_SUPPLY("PLL2", RT5514_PWR_ANA2, RT5514_POW_PLL2_BIT, 0,
 		NULL, 0),
 	SND_SOC_DAPM_SUPPLY_S("ASRC AD1", 1, RT5514_CLK_CTRL2,
 		RT5514_CLK_AD0_ASRC_EN_BIT, 0, NULL, 0),
@@ -718,13 +761,17 @@ static const struct snd_soc_dapm_route rt5514_dapm_routes[] = {
 	{ "PLL1 LDO", NULL, "PLL1 LDO ENABLE" },
 	{ "PLL1", NULL, "PLL1 LDO" },
 
+	{ "PLL2 LDO", NULL, "PLL2 LDO ENABLE" },
+	{ "PLL2", NULL, "PLL2 LDO" },
+
 	{ "Stereo1 ADC MIXL", NULL, "Sto1 ADC MIXL" },
 	{ "Stereo1 ADC MIXR", NULL, "Sto1 ADC MIXR" },
 
 	{ "Stereo1 ADC MIX", NULL, "Stereo1 ADC MIXL" },
 	{ "Stereo1 ADC MIX", NULL, "Stereo1 ADC MIXR" },
 	{ "Stereo1 ADC MIX", NULL, "adc stereo1 filter" },
-	{ "adc stereo1 filter", NULL, "PLL1", rt5514_is_sys_clk_from_pll },
+	{ "adc stereo1 filter", NULL, "PLL1", rt5514_is_sys_clk_from_pll1 },
+	{ "adc stereo1 filter", NULL, "PLL2", rt5514_is_sys_clk_from_pll2 },
 	{ "adc stereo1 filter", NULL, "ASRC AD1", rt5514_i2s_use_asrc },
 
 	{ "Stereo2 DMIC Mux", "DMIC1", "DMIC1" },
@@ -741,7 +788,8 @@ static const struct snd_soc_dapm_route rt5514_dapm_routes[] = {
 	{ "Stereo2 ADC MIX", NULL, "Stereo2 ADC MIXL" },
 	{ "Stereo2 ADC MIX", NULL, "Stereo2 ADC MIXR" },
 	{ "Stereo2 ADC MIX", NULL, "adc stereo2 filter" },
-	{ "adc stereo2 filter", NULL, "PLL1", rt5514_is_sys_clk_from_pll },
+	{ "adc stereo2 filter", NULL, "PLL1", rt5514_is_sys_clk_from_pll1 },
+	{ "adc stereo2 filter", NULL, "PLL2", rt5514_is_sys_clk_from_pll2 },
 	{ "adc stereo2 filter", NULL, "ASRC AD2", rt5514_i2s_use_asrc },
 
 	{ "AIF1TX", NULL, "Stereo1 ADC MIX"},
@@ -920,13 +968,25 @@ static int rt5514_set_dai_pll(struct snd_soc_dai *dai, int pll_id, int source,
 
 	switch (source) {
 	case RT5514_PLL1_S_MCLK:
-		regmap_update_bits(rt5514->regmap, RT5514_PLL_SOURCE_CTRL,
-			RT5514_PLL_1_SEL_MASK, RT5514_PLL_1_SEL_MCLK);
+		if (rt5514->v_p)
+			regmap_update_bits(rt5514->regmap,
+				RT5514_PLL_SOURCE_CTRL,
+				RT5514_PLL_2_SEL_MASK, RT5514_PLL_2_SEL_MCLK);
+		else
+			regmap_update_bits(rt5514->regmap,
+				RT5514_PLL_SOURCE_CTRL,
+				RT5514_PLL_1_SEL_MASK, RT5514_PLL_1_SEL_MCLK);
 		break;
 
 	case RT5514_PLL1_S_BCLK:
-		regmap_update_bits(rt5514->regmap, RT5514_PLL_SOURCE_CTRL,
-			RT5514_PLL_1_SEL_MASK, RT5514_PLL_1_SEL_SCLK);
+		if (rt5514->v_p)
+			regmap_update_bits(rt5514->regmap,
+				RT5514_PLL_SOURCE_CTRL,
+				RT5514_PLL_2_SEL_MASK, RT5514_PLL_2_SEL_SCLK);
+		else
+			regmap_update_bits(rt5514->regmap,
+				RT5514_PLL_SOURCE_CTRL,
+				RT5514_PLL_1_SEL_MASK, RT5514_PLL_1_SEL_SCLK);
 		break;
 
 	default:
@@ -944,12 +1004,21 @@ static int rt5514_set_dai_pll(struct snd_soc_dai *dai, int pll_id, int source,
 		pll_code.m_bp, (pll_code.m_bp ? 0 : pll_code.m_code),
 		pll_code.n_code, pll_code.k_code);
 
-	regmap_write(rt5514->regmap, RT5514_ANA_CTRL_PLL1_1,
-		pll_code.k_code << RT5514_PLL_K_SFT |
-		pll_code.n_code << RT5514_PLL_N_SFT |
-		(pll_code.m_bp ? 0 : pll_code.m_code) << RT5514_PLL_M_SFT);
-	regmap_update_bits(rt5514->regmap, RT5514_ANA_CTRL_PLL1_2,
-		RT5514_PLL_M_BP, pll_code.m_bp << RT5514_PLL_M_BP_SFT);
+	if (rt5514->v_p) {
+		regmap_write(rt5514->regmap, RT5514_ANA_CTRL_PLL2_1,
+			pll_code.k_code << RT5514_PLL_K_SFT |
+			pll_code.n_code << RT5514_PLL_N_SFT |
+			(pll_code.m_bp ? 0 : pll_code.m_code) << RT5514_PLL_M_SFT);
+		regmap_update_bits(rt5514->regmap, RT5514_ANA_CTRL_PLL2_2,
+			RT5514_PLL_M_BP, pll_code.m_bp << RT5514_PLL_M_BP_SFT);
+	} else {
+		regmap_write(rt5514->regmap, RT5514_ANA_CTRL_PLL1_1,
+			pll_code.k_code << RT5514_PLL_K_SFT |
+			pll_code.n_code << RT5514_PLL_N_SFT |
+			(pll_code.m_bp ? 0 : pll_code.m_code) << RT5514_PLL_M_SFT);
+		regmap_update_bits(rt5514->regmap, RT5514_ANA_CTRL_PLL1_2,
+			RT5514_PLL_M_BP, pll_code.m_bp << RT5514_PLL_M_BP_SFT);
+	}
 
 	rt5514->pll_in = freq_in;
 	rt5514->pll_out = freq_out;
@@ -1074,9 +1143,16 @@ static int rt5514_set_bias_level(struct snd_soc_component *component,
 			 */
 			if (rt5514->dsp_enabled) {
 				rt5514->dsp_enabled = 0;
-				regmap_multi_reg_write(rt5514->i2c_regmap,
-					rt5514_i2c_patch,
-					ARRAY_SIZE(rt5514_i2c_patch));
+				if (rt5514->v_p)
+					regmap_multi_reg_write(
+						rt5514->i2c_regmap,
+						rt5514p_i2c_patch,
+						ARRAY_SIZE(rt5514p_i2c_patch));
+				else
+					regmap_multi_reg_write(
+						rt5514->i2c_regmap,
+						rt5514_i2c_patch,
+						ARRAY_SIZE(rt5514_i2c_patch));
 				regcache_mark_dirty(rt5514->regmap);
 				regcache_sync(rt5514->regmap);
 			}
@@ -1298,8 +1374,18 @@ static int rt5514_i2c_probe(struct i2c_client *i2c)
 		return -ENODEV;
 	}
 
-	ret = regmap_multi_reg_write(rt5514->i2c_regmap, rt5514_i2c_patch,
-				    ARRAY_SIZE(rt5514_i2c_patch));
+	regmap_read(rt5514->regmap, RT5514_VENDOR_ID1, &val);
+	rt5514->v_p = (val == 0x80);
+	dev_info(&i2c->dev, "Detected %s\n", rt5514->v_p ? "RT5514P" : "RT5514");
+
+	if (rt5514->v_p)
+		ret = regmap_multi_reg_write(rt5514->i2c_regmap,
+					     rt5514p_i2c_patch,
+					     ARRAY_SIZE(rt5514p_i2c_patch));
+	else
+		ret = regmap_multi_reg_write(rt5514->i2c_regmap,
+					     rt5514_i2c_patch,
+					     ARRAY_SIZE(rt5514_i2c_patch));
 	if (ret != 0)
 		dev_warn(&i2c->dev, "Failed to apply i2c_regmap patch: %d\n",
 			ret);
