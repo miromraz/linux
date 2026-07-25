@@ -142,12 +142,20 @@ fail:
 }
 EXPORT_SYMBOL_GPL(venus_helper_queue_dpb_bufs);
 
-int venus_helper_free_dpb_bufs(struct venus_inst *inst)
+int venus_helper_free_dpb_bufs(struct venus_inst *inst, bool force)
 {
 	struct intbuf *buf, *n;
 
 	list_for_each_entry_safe(buf, n, &inst->dpbbufs, list) {
-		if (buf->owned_by == FIRMWARE)
+		/*
+		 * During final session teardown the firmware is stopped or
+		 * aborted and will never hand its DPB buffers back, so free
+		 * them unconditionally to avoid leaking CMA memory. Mid-session
+		 * (e.g. dynamic resolution change) firmware-owned buffers must
+		 * still be kept as they are returned later via a buffer-release
+		 * reference event.
+		 */
+		if (!force && buf->owned_by == FIRMWARE)
 			continue;
 		free_dpb_buf(inst, buf);
 	}
@@ -225,7 +233,7 @@ int venus_helper_alloc_dpb_bufs(struct venus_inst *inst)
 
 fail:
 	kfree(buf);
-	venus_helper_free_dpb_bufs(inst);
+	venus_helper_free_dpb_bufs(inst, false);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(venus_helper_alloc_dpb_bufs);
@@ -1562,7 +1570,7 @@ void venus_helper_vb2_stop_streaming(struct vb2_queue *q)
 		if (ret)
 			hfi_session_abort(inst);
 
-		venus_helper_free_dpb_bufs(inst);
+		venus_helper_free_dpb_bufs(inst, true);
 
 		venus_pm_load_scale(inst);
 		INIT_LIST_HEAD(&inst->registeredbufs);
