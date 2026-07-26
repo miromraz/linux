@@ -51,6 +51,7 @@ config SOUNDWIRE_QCOM
 	tristate "Qualcomm SoundWire Master driver"
 	imply SLIMBUS
 	depends on SND_SOC
+	depends on QCOM_RPROC_COMMON || (COMPILE_TEST && !QCOM_RPROC_COMMON)
 	help
 	  SoundWire Qualcomm Master driver.
 	  If you have an Qualcomm platform which has a SoundWire Master then
