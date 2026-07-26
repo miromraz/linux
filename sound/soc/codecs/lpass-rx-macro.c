@@ -3933,11 +3933,21 @@ err_dcodec:
 
 static void rx_macro_remove(struct platform_device *pdev)
 {
-	struct rx_macro *rx = dev_get_drvdata(&pdev->dev);
+	struct device *dev = &pdev->dev;
+	struct rx_macro *rx = dev_get_drvdata(dev);
 
-	clk_disable_unprepare(rx->mclk);
-	clk_disable_unprepare(rx->npl);
-	clk_disable_unprepare(rx->fsgen);
+	/*
+	 * mclk, npl and fsgen are handed back to runtime PM, so they are
+	 * already unprepared if the device is suspended.  Stop runtime PM
+	 * first so that the autosuspend timer cannot fire in between.
+	 */
+	pm_runtime_disable(dev);
+	if (!pm_runtime_status_suspended(dev)) {
+		clk_disable_unprepare(rx->fsgen);
+		clk_disable_unprepare(rx->npl);
+		clk_disable_unprepare(rx->mclk);
+	}
+
 	clk_disable_unprepare(rx->macro);
 	clk_disable_unprepare(rx->dcodec);
 }
