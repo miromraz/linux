@@ -8,10 +8,12 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/debugfs.h>
+#include <linux/notifier.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
+#include <linux/remoteproc/qcom_rproc.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
 #include <linux/pm_wakeirq.h>
@@ -222,6 +224,17 @@ struct qcom_swrm_ctrl {
 	u32 slave_status;
 	u32 wr_fifo_depth;
 	bool clock_stop_not_supported;
+	struct notifier_block ssr_nb;
+	void *ssr_notifier;
+	/*
+	 * Set from the SSR notifier once the ADSP goes down, never cleared.
+	 * This controller lives inside LPASS and its register space is only
+	 * accessible while the LPASS clocks voted for by the q6afe clock
+	 * provider are on.  Those clocks are unregistered when the ADSP dies
+	 * and the votes are not re-acquired when it comes back, so from that
+	 * point on any MMIO access takes a synchronous external abort.
+	 */
+	bool adsp_down;
 };
 
 struct qcom_swrm_data {
@@ -371,6 +384,11 @@ static int qcom_swrm_ahb_reg_write(struct qcom_swrm_ctrl *ctrl,
 static int qcom_swrm_cpu_reg_read(struct qcom_swrm_ctrl *ctrl, int reg,
 				  u32 *val)
 {
+	if (ctrl->adsp_down) {
+		*val = 0;
+		return SDW_CMD_FAIL;
+	}
+
 	*val = readl(ctrl->mmio + reg);
 	return SDW_CMD_OK;
 }
@@ -378,6 +396,9 @@ static int qcom_swrm_cpu_reg_read(struct qcom_swrm_ctrl *ctrl, int reg,
 static int qcom_swrm_cpu_reg_write(struct qcom_swrm_ctrl *ctrl, int reg,
 				   int val)
 {
+	if (ctrl->adsp_down)
+		return SDW_CMD_FAIL;
+
 	writel(val, ctrl->mmio + reg);
 	return SDW_CMD_OK;
 }
@@ -720,6 +741,17 @@ static irqreturn_t qcom_swrm_irq_handler(int irq, void *dev_id)
 	u32 i;
 	int devnum;
 	int ret = IRQ_HANDLED;
+
+	if (ctrl->adsp_down) {
+		/*
+		 * The block that raises this interrupt is unclocked, so it
+		 * cannot deassert the line anymore.  Keep it masked instead of
+		 * spinning in the handler.
+		 */
+		disable_irq_nosync(ctrl->irq);
+		return IRQ_HANDLED;
+	}
+
 	clk_prepare_enable(ctrl->hclk);
 
 	ctrl->reg_read(ctrl, ctrl->reg_layout[SWRM_REG_INTERRUPT_STATUS],
@@ -975,6 +1007,13 @@ static enum sdw_command_response qcom_swrm_xfer_msg(struct sdw_bus *bus,
 {
 	struct qcom_swrm_ctrl *ctrl = to_qcom_sdw(bus);
 	int ret, i, len;
+
+	/*
+	 * Fail the whole message instead of letting every single command run
+	 * into the fifo timeouts below.
+	 */
+	if (ctrl->adsp_down)
+		return SDW_CMD_FAIL;
 
 	if (msg->flags == SDW_MSG_FLAG_READ) {
 		for (i = 0; i < msg->len;) {
@@ -1530,6 +1569,34 @@ static int swrm_reg_show(struct seq_file *s_file, void *data)
 DEFINE_SHOW_ATTRIBUTE(swrm_reg);
 #endif
 
+static int qcom_swrm_ssr_notify(struct notifier_block *nb, unsigned long action,
+				void *data)
+{
+	struct qcom_swrm_ctrl *ctrl = container_of(nb, struct qcom_swrm_ctrl,
+						   ssr_nb);
+
+	if (action != QCOM_SSR_BEFORE_SHUTDOWN || ctrl->adsp_down)
+		return NOTIFY_DONE;
+
+	/*
+	 * The LPASS clock votes this controller depends on are owned by the
+	 * q6afe clock provider, which goes away with the ADSP and does not
+	 * hand them back on restart.  There is no way to recover the link, so
+	 * shut it down for good rather than fault on dead registers.
+	 */
+	dev_warn(ctrl->dev, "ADSP is going down, SoundWire link is now dead\n");
+	ctrl->adsp_down = true;
+
+	return NOTIFY_DONE;
+}
+
+static void qcom_swrm_ssr_unregister(void *data)
+{
+	struct qcom_swrm_ctrl *ctrl = data;
+
+	qcom_unregister_ssr_notifier(ctrl->ssr_notifier, &ctrl->ssr_nb);
+}
+
 static int qcom_swrm_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1600,6 +1667,17 @@ static int qcom_swrm_probe(struct platform_device *pdev)
 	ctrl->bus.port_ops = &qcom_swrm_port_ops;
 	ctrl->bus.compute_params = &qcom_swrm_compute_params;
 	ctrl->bus.clk_stop_timeout = 300;
+
+	ctrl->ssr_nb.notifier_call = qcom_swrm_ssr_notify;
+	ctrl->ssr_notifier = qcom_register_ssr_notifier("lpass", &ctrl->ssr_nb);
+	if (IS_ERR(ctrl->ssr_notifier)) {
+		ret = PTR_ERR(ctrl->ssr_notifier);
+		goto err_clk;
+	}
+
+	ret = devm_add_action_or_reset(dev, qcom_swrm_ssr_unregister, ctrl);
+	if (ret)
+		goto err_clk;
 
 	ret = qcom_swrm_get_port_config(ctrl);
 	if (ret)
@@ -1706,6 +1784,15 @@ static int __maybe_unused swrm_runtime_resume(struct device *dev)
 	struct qcom_swrm_ctrl *ctrl = dev_get_drvdata(dev);
 	int ret;
 
+	/*
+	 * Leave the hardware alone, including the iface clock: enabling it
+	 * runs the LPASS macro gate ops, which poke the same dead register
+	 * space.  swrm_runtime_suspend() bails out the same way, so the clock
+	 * enable count stays balanced.
+	 */
+	if (ctrl->adsp_down)
+		return 0;
+
 	if (ctrl->wake_irq > 0) {
 		if (!irqd_irq_disabled(irq_get_irq_data(ctrl->wake_irq)))
 			disable_irq_nosync(ctrl->wake_irq);
@@ -1770,6 +1857,9 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
 {
 	struct qcom_swrm_ctrl *ctrl = dev_get_drvdata(dev);
 	int ret;
+
+	if (ctrl->adsp_down)
+		return 0;
 
 	swrm_wait_for_wr_fifo_done(ctrl);
 	if (!ctrl->clock_stop_not_supported) {
