@@ -1277,7 +1277,17 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
 		if (!wait_for_completion_timeout(&ctx->work, 10 * HZ))
 			err = -ETIMEDOUT;
 	} else {
-		err = wait_for_completion_interruptible(&ctx->work);
+		/*
+		 * Freeze in place rather than abort. A reverse RPC listener
+		 * thread parks here for as long as the DSP takes to hand it
+		 * work, so it is still blocked when the freezer runs on
+		 * suspend. Without TASK_FREEZABLE the freezer's fake signal
+		 * breaks the wait with -ERESTARTSYS and the automatically
+		 * restarted ioctl re-sends the very same invocation, which
+		 * the DSP side of the listener treats as a protocol error.
+		 */
+		err = wait_for_completion_state(&ctx->work,
+						TASK_INTERRUPTIBLE | TASK_FREEZABLE);
 	}
 
 	if (err)
