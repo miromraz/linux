@@ -1696,12 +1696,22 @@ err:
 
 static void va_macro_remove(struct platform_device *pdev)
 {
-	struct va_macro *va = dev_get_drvdata(&pdev->dev);
+	struct device *dev = &pdev->dev;
+	struct va_macro *va = dev_get_drvdata(dev);
 
-	if (va->has_npl_clk)
-		clk_disable_unprepare(va->npl);
+	/*
+	 * mclk and npl are handed back to runtime PM, so they are already
+	 * unprepared if the device is suspended.  Stop runtime PM first so
+	 * that the autosuspend timer cannot fire in between.
+	 */
+	pm_runtime_disable(dev);
+	if (!pm_runtime_status_suspended(dev)) {
+		if (va->has_npl_clk)
+			clk_disable_unprepare(va->npl);
 
-	clk_disable_unprepare(va->mclk);
+		clk_disable_unprepare(va->mclk);
+	}
+
 	clk_disable_unprepare(va->dcodec);
 	clk_disable_unprepare(va->macro);
 

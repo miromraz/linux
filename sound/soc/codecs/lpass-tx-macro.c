@@ -2388,13 +2388,23 @@ err:
 
 static void tx_macro_remove(struct platform_device *pdev)
 {
-	struct tx_macro *tx = dev_get_drvdata(&pdev->dev);
+	struct device *dev = &pdev->dev;
+	struct tx_macro *tx = dev_get_drvdata(dev);
+
+	/*
+	 * mclk, npl and fsgen are handed back to runtime PM, so they are
+	 * already unprepared if the device is suspended.  Stop runtime PM
+	 * first so that the autosuspend timer cannot fire in between.
+	 */
+	pm_runtime_disable(dev);
+	if (!pm_runtime_status_suspended(dev)) {
+		clk_disable_unprepare(tx->fsgen);
+		clk_disable_unprepare(tx->npl);
+		clk_disable_unprepare(tx->mclk);
+	}
 
 	clk_disable_unprepare(tx->macro);
 	clk_disable_unprepare(tx->dcodec);
-	clk_disable_unprepare(tx->mclk);
-	clk_disable_unprepare(tx->npl);
-	clk_disable_unprepare(tx->fsgen);
 
 	lpass_macro_pds_exit(tx->pds);
 }
