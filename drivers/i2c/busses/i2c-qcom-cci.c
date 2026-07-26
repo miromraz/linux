@@ -631,6 +631,18 @@ static int cci_probe(struct platform_device *pdev)
 		}
 	}
 
+	/*
+	 * probe leaves the device runtime-active with the clocks it enabled, and
+	 * nothing here holds a usage reference, so without arming the
+	 * autosuspend timer the runtime PM core is never asked whether the
+	 * device is idle. On a board where nothing ever uses the camera that
+	 * means the CCI and camnoc clocks stay on forever - which on SM7150
+	 * keeps the RPMh XO vote up and stops the SoC reaching its low power
+	 * modes at all.
+	 */
+	pm_runtime_mark_last_busy(dev);
+	pm_request_autosuspend(dev);
+
 	return 0;
 
 error_i2c:
