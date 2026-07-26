@@ -8,6 +8,7 @@
 
 #include <linux/atomic.h>
 #include <linux/cpu_pm.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -23,6 +24,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
@@ -957,6 +959,28 @@ static int rpmh_rsc_pd_attach(struct rsc_drv *drv, struct device *dev)
 	return ret;
 }
 
+#ifdef CONFIG_DEBUG_FS
+static int rpmh_rsc_sleep_cache_show(struct seq_file *s, void *unused)
+{
+	struct rsc_drv *drv = s->private;
+
+	rpmh_dump_cache(s, &drv->client);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(rpmh_rsc_sleep_cache);
+
+static void rpmh_rsc_debugfs_init(struct rsc_drv *drv)
+{
+	struct dentry *dir = debugfs_create_dir(drv->name, NULL);
+
+	debugfs_create_file("sleep_cache", 0400, dir, drv,
+			    &rpmh_rsc_sleep_cache_fops);
+}
+#else
+static void rpmh_rsc_debugfs_init(struct rsc_drv *drv) { }
+#endif
+
 static int rpmh_probe_tcs_config(struct platform_device *pdev, struct rsc_drv *drv)
 {
 	struct tcs_type_config {
@@ -1121,6 +1145,8 @@ static int rpmh_rsc_probe(struct platform_device *pdev)
 
 	dev_set_drvdata(&pdev->dev, drv);
 	drv->dev = &pdev->dev;
+
+	rpmh_rsc_debugfs_init(drv);
 
 	ret = devm_of_platform_populate(&pdev->dev);
 	if (ret && pdev->dev.pm_domain) {

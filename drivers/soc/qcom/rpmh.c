@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -402,6 +403,35 @@ static int is_req_valid(struct cache_req *req)
 		req->wake_val != UINT_MAX &&
 		req->sleep_val != req->wake_val);
 }
+
+#ifdef CONFIG_DEBUG_FS
+/*
+ * Debug aid for "the SoC never reaches its low power modes". These are the
+ * votes rpmh_flush() programs into the SLEEP and WAKE TCSes, i.e. what the
+ * hardware replays as the application processor goes down. A resource with a
+ * non-zero sleep_val is one something has asked the SoC to keep alive while we
+ * are asleep. "programmed" is is_req_valid(): a request whose sleep and wake
+ * votes are equal is deliberately never written, since there is no state
+ * change to make. Resolve the addresses with /sys/kernel/debug/cmd-db.
+ */
+void rpmh_dump_cache(struct seq_file *s, struct rpmh_ctrlr *ctrlr)
+{
+	struct cache_req *p;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ctrlr->cache_lock, flags);
+
+	seq_printf(s, "dirty: %s\n", ctrlr->dirty ? "yes" : "no");
+	seq_printf(s, "%-10s %-10s %-10s %s\n",
+		   "addr", "sleep_val", "wake_val", "programmed");
+	list_for_each_entry(p, &ctrlr->cache, list)
+		seq_printf(s, "%#010x %#010x %#010x %s\n",
+			   p->addr, p->sleep_val, p->wake_val,
+			   is_req_valid(p) ? "yes" : "no");
+
+	spin_unlock_irqrestore(&ctrlr->cache_lock, flags);
+}
+#endif
 
 static int send_single(struct rpmh_ctrlr *ctrlr, enum rpmh_state state,
 		       u32 addr, u32 data)
