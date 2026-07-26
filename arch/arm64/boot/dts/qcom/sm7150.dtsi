@@ -859,6 +859,15 @@
 		};
 	};
 
+	smp2p-sleepstate {
+		compatible = "qcom,smp2p-sleepstate";
+		/*
+		 * Bit 12 is what the DSP firmware watches - the vendor driver
+		 * hardcodes it rather than taking it from the device tree.
+		 */
+		qcom,smem-states = <&smp2p_sleepstate_out 12>;
+	};
+
 	smp2p-cdsp {
 		compatible = "qcom,smp2p";
 		qcom,smem = <94>, <432>;
