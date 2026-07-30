@@ -59,6 +59,11 @@
 #define UC_REGION_ADDR				0x64
 #define UC_REGION_SIZE				0x68
 
+/* DSP-side (CVP) interface queue, 4-byte / 1MB aligned respectively */
+#define DSP_QTBL_ADDR				0x34
+#define DSP_UC_REGION_ADDR			0x38
+#define DSP_UC_REGION_SIZE			0x3c
+
 #define CPU_CS_H2XSOFTINTEN_V6			0x148
 
 #define CPU_CS_X2RPMH_V6			0x168

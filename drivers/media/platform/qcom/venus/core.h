@@ -95,6 +95,8 @@ struct venus_resources {
 	 * fw boot; the fw requires them powered and clocked when it boots
 	 */
 	bool fw_ctrl_pds;
+	/* firmware has an internal CVP block and needs the DSP queue programmed */
+	bool dsp_ifaceq;
 	const char * const resets[VIDC_RESETS_NUM_MAX];
 	unsigned int resets_num;
 	enum hfi_version hfi_version;
