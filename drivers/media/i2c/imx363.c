@@ -1149,12 +1149,12 @@ static int imx363_init_controls(struct imx363 *imx363)
 		imx363->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
 	imx363->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops,
-					  V4L2_CID_HFLIP, 0, 1, 1, 1);
+					  V4L2_CID_HFLIP, 0, 1, 1, 0);
 	if (imx363->hflip)
 		imx363->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 
 	imx363->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops,
-					  V4L2_CID_VFLIP, 0, 1, 1, 1);
+					  V4L2_CID_VFLIP, 0, 1, 1, 0);
 	if (imx363->vflip)
 		imx363->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 
