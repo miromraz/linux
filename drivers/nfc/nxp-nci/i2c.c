@@ -356,6 +356,20 @@ MODULE_DEVICE_TABLE(i2c, nxp_nci_i2c_id_table);
 
 static const struct of_device_id of_nxp_nci_i2c_match[] = {
 	{ .compatible = "nxp,nxp-nci-i2c", },
+	/*
+	 * The ST54J (marketed as "st21nfc", as in Pixel 4a) is not an NXP part,
+	 * but this driver's core is protocol-generic despite its name: it is a
+	 * plain NCI transport that reads a 3-byte NCI control header followed by
+	 * plen payload bytes, which is exactly what the ST54J speaks. Probed on
+	 * sunfish, the chip answers CORE_RESET_NTF with manufacturer ID 0x02
+	 * (STMicroelectronics) and NCI version 0x20.
+	 *
+	 * Note the mainline ST drivers do NOT fit: st-nci wraps every frame in an
+	 * NDLC PCB byte (ST21NFCB generation) and st21nfca speaks HCI over HDLC.
+	 * The NXP-specific parts here are confined to the firmware-download mode,
+	 * which is only reachable through an NXP vendor command.
+	 */
+	{ .compatible = "st,st21nfc", },
 	{}
 };
 MODULE_DEVICE_TABLE(of, of_nxp_nci_i2c_match);
