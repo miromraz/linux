@@ -257,6 +257,16 @@ config VIDEO_IMX335
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx335.
 
+config VIDEO_IMX363
+	tristate "Sony IMX363 sensor support"
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the Sony
+	  IMX363 camera.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called imx363.
+
 config VIDEO_IMX355
 	tristate "Sony IMX355 sensor support"
 	help
