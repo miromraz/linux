@@ -123,11 +123,30 @@ static const struct nci_driver_ops nxp_nci_core_ops[] = {
 	},
 };
 
+/*
+ * NCI leaves RF protocol values 0x80-0xff to the controller vendor, so the core
+ * hands them back to us. The ST54J reports MIFARE Classic as 0x90: a card that
+ * activates with it answers ATQA 0x0004 / SAK 0x08, which is MIFARE Classic 1K.
+ * Without this mapping the core has no protocol to offer and drops the target
+ * with "the target found does not have the desired protocol", even though the
+ * controller activated it and granted a data connection.
+ */
+#define ST54J_RF_PROTOCOL_MIFARE_CLASSIC 0x90
+
+static __u32 nxp_nci_get_rfprotocol(struct nci_dev *ndev, __u8 rf_protocol)
+{
+	if (rf_protocol == ST54J_RF_PROTOCOL_MIFARE_CLASSIC)
+		return NFC_PROTO_MIFARE_MASK;
+
+	return 0;
+}
+
 static const struct nci_ops nxp_nci_ops = {
 	.open = nxp_nci_open,
 	.close = nxp_nci_close,
 	.send = nxp_nci_send,
 	.fw_download = nxp_nci_fw_download,
+	.get_rfprotocol = nxp_nci_get_rfprotocol,
 	.core_ops = nxp_nci_core_ops,
 	.n_core_ops = ARRAY_SIZE(nxp_nci_core_ops),
 };
