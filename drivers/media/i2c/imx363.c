@@ -28,6 +28,8 @@
 #define IMX363_VTS_30FPS		3136 //0c40
 // #define IMX363_VTS_30FPS_2K		0x0638
 #define IMX363_VTS_30FPS_HD		1296
+/* 2x2 binned readout is half the lines, so half the minimum frame length */
+#define IMX363_VTS_MIN_BINNED		1568
 #define IMX363_VTS_MAX			65525
 
 /* HBLANK control - read only */
@@ -422,6 +424,94 @@ static const struct cci_reg_sequence mode_4032x3024_regs[] = {
 };
 
 /*
+ * 2x2 binned readout of the full pixel array. Identical to the full
+ * resolution list except for the binning enable (0x0900/0x0901) and the halved
+ * output/digital-crop sizes. The analog window (0x0344..0x034b) still covers
+ * the whole array, and the PLL and line length are unchanged, so the link
+ * frequency and the frame rate stay the same. Derived from the 2x2 binned mode
+ * of imx355, which shares this register layout; no vendor register dump for a
+ * binned imx363 mode exists.
+ */
+static const struct cci_reg_sequence mode_2016x1512_regs[] = {
+	{CCI_REG8(0x0112), 0x0A},
+	{CCI_REG8(0x0113), 0x0A},
+	{CCI_REG8(0x0114), 0x03},
+	{CCI_REG8(0x0220), 0x00},
+	{CCI_REG8(0x0221), 0x11},
+	{CCI_REG8(0x0340), 0x0C},
+	{CCI_REG8(0x0341), 0x40},
+	{CCI_REG8(0x0342), 0x22},
+	{CCI_REG8(0x0343), 0x80},
+	{CCI_REG8(0x0381), 0x01},
+	{CCI_REG8(0x0383), 0x01},
+	{CCI_REG8(0x0385), 0x01},
+	{CCI_REG8(0x0387), 0x01},
+	{CCI_REG8(0x0900), 0x01},
+	{CCI_REG8(0x0901), 0x22},
+	{CCI_REG8(0x30F4), 0x02},
+	{CCI_REG8(0x30F5), 0x80},
+	{CCI_REG8(0x30F6), 0x00},
+	{CCI_REG8(0x30F7), 0xc8},
+	{CCI_REG8(0x31A0), 0x00},
+	{CCI_REG8(0x31A5), 0x00},
+	{CCI_REG8(0x31A6), 0x00},
+	{CCI_REG8(0x560F), 0xbe},
+	{CCI_REG8(0x5856), 0x08},
+	{CCI_REG8(0x58D0), 0x10},
+	{CCI_REG8(0x734A), 0x01},
+	{CCI_REG8(0x734F), 0x2b},
+	{CCI_REG8(0x7441), 0x55},
+	{CCI_REG8(0x7914), 0x03},
+	{CCI_REG8(0x7928), 0x04},
+	{CCI_REG8(0x7929), 0x04},
+	{CCI_REG8(0x793F), 0x03},
+	{CCI_REG8(0xBC7B), 0x18},
+	{CCI_REG8(0x0344), 0x00},
+	{CCI_REG8(0x0345), 0x00},
+	{CCI_REG8(0x0346), 0x00},
+	{CCI_REG8(0x0347), 0x00},
+	{CCI_REG8(0x0348), 0x0F},
+	{CCI_REG8(0x0349), 0xBF},
+	{CCI_REG8(0x034A), 0x0B},
+	{CCI_REG8(0x034B), 0xCF},
+	{CCI_REG8(0x034C), 0x07},
+	{CCI_REG8(0x034D), 0xE0},
+	{CCI_REG8(0x034E), 0x05},
+	{CCI_REG8(0x034F), 0xE8},
+	{CCI_REG8(0x0408), 0x00},
+	{CCI_REG8(0x0409), 0x00},
+	{CCI_REG8(0x040A), 0x00},
+	{CCI_REG8(0x040B), 0x00},
+	{CCI_REG8(0x040C), 0x07},
+	{CCI_REG8(0x040D), 0xE0},
+	{CCI_REG8(0x040E), 0x05},
+	{CCI_REG8(0x040F), 0xE8},
+	{CCI_REG8(0x0301), 0x03},
+	{CCI_REG8(0x0303), 0x02},
+	{CCI_REG8(0x0305), 0x04},
+	{CCI_REG8(0x0306), 0x00},
+	{CCI_REG8(0x0307), 0xd2},
+	{CCI_REG8(0x0309), 0x0A},
+	{CCI_REG8(0x030B), 0x01},
+	{CCI_REG8(0x030D), 0x04},
+	{CCI_REG8(0x030E), 0x00},
+	{CCI_REG8(0x030F), 0xdf},
+	{CCI_REG8(0x0310), 0x01},
+	{CCI_REG8(0x0202), 0x06},
+	{CCI_REG8(0x0203), 0x00},
+	{CCI_REG8(0x0224), 0x03},
+	{CCI_REG8(0x0225), 0x00},
+	{CCI_REG8(0x0204), 0x00},
+	{CCI_REG8(0x0205), 0x00},
+	{CCI_REG8(0x0216), 0x00},
+	{CCI_REG8(0x0217), 0x00},
+	{CCI_REG8(0x020E), 0x01},
+	{CCI_REG8(0x020F), 0x00},
+	{CCI_REG8(0x0226), 0x01},
+	{CCI_REG8(0x0227), 0x00},
+};
+
+/*
  * The supported formats.
  * This table MUST contain 4 entries per format, to cover the various flip
  * combinations in the order
@@ -536,6 +626,29 @@ static const struct imx363_mode supported_modes[] = {
 		.reg_list = {
 			.num_of_regs = ARRAY_SIZE(mode_4032x3024_regs),
 			.regs = mode_4032x3024_regs,
+		},
+		.link_freq_index = IMX363_LINK_FREQ_2300MBPS,
+		.crop = {
+			.left = IMX363_PIXEL_ARRAY_LEFT,
+			.top = IMX363_PIXEL_ARRAY_TOP,
+			.width = IMX363_PIXEL_ARRAY_WIDTH,
+			.height = IMX363_PIXEL_ARRAY_HEIGHT,
+		},
+	},
+	{
+		.width = 2016,
+		.height = 1512,
+		/*
+		 * Default to the same frame length as full resolution, so a
+		 * quarter of the pixels arrive at the same 30fps rather than
+		 * twice as many frames at the same cost. Userspace can still
+		 * shorten VBLANK down to vts_min for ~56fps.
+		 */
+		.vts_def = IMX363_VTS_30FPS,
+		.vts_min = IMX363_VTS_MIN_BINNED,
+		.reg_list = {
+			.num_of_regs = ARRAY_SIZE(mode_2016x1512_regs),
+			.regs = mode_2016x1512_regs,
 		},
 		.link_freq_index = IMX363_LINK_FREQ_2300MBPS,
 		.crop = {
