@@ -6,6 +6,7 @@
 
 /dts-v1/;
 
+#include <dt-bindings/clock/qcom,sm7150-camcc.h>
 #include <dt-bindings/firmware/qcom,scm.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/irq.h>
@@ -533,8 +534,66 @@
 	};
 };
 
+&camss {
+	/*
+	 * The vendor tree gives the CSIPHYs a single 1.2 V rail, pm6150l L3, as
+	 * mipi-csi-vdd. This driver asks for two supplies, so both name it.
+	 */
+	vdda-phy-supply = <&vreg_l3c_1p23>;
+	vdda-pll-supply = <&vreg_l3c_1p23>;
+
+	status = "okay";
+
+	ports {
+		port@2 {
+			csiphy2_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&imx355_ep>;
+			};
+		};
+	};
+};
+
 &cci0 {
 	status = "okay";
+};
+
+&cci0_i2c1 {
+	/* 8 MP front camera, behind the punch hole. */
+	camera@1a {
+		compatible = "sony,imx355";
+		reg = <0x1a>;
+
+		clocks = <&camcc CAMCC_MCLK2_CLK>;
+		assigned-clocks = <&camcc CAMCC_MCLK2_CLK>;
+		/*
+		 * The vendor tree clocks this at 24 MHz, but the mainline
+		 * driver only accepts 19.2 MHz -- its register tables assume
+		 * it -- and mclk2 can divide the 19.2 MHz XO down to that
+		 * exactly.
+		 */
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 68 GPIO_ACTIVE_LOW>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_front_default>;
+
+		avdd-supply = <&slg51000_ldo2>;
+		dvdd-supply = <&slg51000_ldo5>;
+		dovdd-supply = <&slg51000_ldo7>;
+
+		orientation = <0>;
+		rotation = <270>;
+
+		port {
+			imx355_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <360000000>;
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
 };
 
 &cci1 {
@@ -740,7 +799,83 @@
 		pinctrl-0 = <&haptic_en_default>;
 	};
 
-	/* dlg,slg51000 pmic@75*/
+	/*
+	 * Dialog SLG51000 7-channel camera PMIC. Every camera rail on this
+	 * board hangs off it, so nothing camera-related can work until it
+	 * probes.
+	 *
+	 * It does not answer on i2c out of reset. The vendor tree lists two chip
+	 * selects (pm6150l gpio4 and gpio6) and two enables (gpio1 and gpio5) as
+	 * flat lists with no indication of which does what; the vendor driver
+	 * shows that cs-gpios[1] is the enable of the buck feeding the chip and
+	 * has to go high 5 ms before cs-gpios[0], the actual chip select. Both
+	 * high in that order makes 0x75 answer; either one alone is not enough.
+	 * Keep the vendor's order here, the driver relies on it.
+	 *
+	 * Careful when re-testing: the chip stays latched on once it has
+	 * answered, so every later combination appears to work. Only the first
+	 * success in a sequence means anything, and a real power cycle is needed
+	 * between attempts.
+	 *
+	 * The two enables are left out. The vendor driver only drives them low,
+	 * which is where they already sit, and the rails come up over i2c
+	 * without them.
+	 *
+	 * Voltage ranges are the vendor tree's, except that the three rails the
+	 * front sensor uses are pinned to the single voltage the vendor asks for
+	 * so the core applies it: cam_vio = ldo7 at 1.8 V, cam_vana = ldo2 at
+	 * 2.8 V, cam_vdig = ldo5 at 1.2 V.
+	 */
+	pmic@75 {
+		compatible = "dlg,slg51000";
+		reg = <0x75>;
+		dlg,cs-gpios = <&pm6150l_gpios 4 GPIO_ACTIVE_HIGH>,
+			       <&pm6150l_gpios 6 GPIO_ACTIVE_HIGH>;
+
+		regulators {
+			slg51000_ldo1: ldo1 {
+				regulator-name = "slg51000_ldo1";
+				regulator-min-microvolt = <2250000>;
+				regulator-max-microvolt = <3300000>;
+			};
+
+			slg51000_ldo2: ldo2 {
+				regulator-name = "slg51000_ldo2";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+			};
+
+			slg51000_ldo3: ldo3 {
+				regulator-name = "slg51000_ldo3";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <3750000>;
+			};
+
+			slg51000_ldo4: ldo4 {
+				regulator-name = "slg51000_ldo4";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <3750000>;
+			};
+
+			slg51000_ldo5: ldo5 {
+				regulator-name = "slg51000_ldo5";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+			};
+
+			slg51000_ldo6: ldo6 {
+				regulator-name = "slg51000_ldo6";
+				regulator-min-microvolt = <500000>;
+				regulator-max-microvolt = <1200000>;
+			};
+
+			slg51000_ldo7: ldo7 {
+				regulator-name = "slg51000_ldo7";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+			};
+		};
+	};
 };
 
 &ipa {
@@ -1184,6 +1319,22 @@
 
 &tlmm {
 	gpio-reserved-ranges = <59 4>;
+
+	cam_front_default: cam-front-default-state {
+		mclk-pins {
+			pins = "gpio15";
+			function = "cam_mclk";
+			drive-strength = <4>;
+			bias-disable;
+		};
+
+		reset-pins {
+			pins = "gpio68";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
 
 	ter_mi2s_active: ter-mi2s-active-state {
 		pins = "gpio53", "gpio54", "gpio55", "gpio56";
