@@ -568,7 +568,19 @@
 		reg = <0x08>;
 		interrupt-parent = <&tlmm>;
 		interrupts = <37 IRQ_TYPE_LEVEL_HIGH>;
-		reset-gpios = <&tlmm 67 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * gpio67 is the controller's VEN pin, i.e. it gates power, not
+		 * an active-low reset -- driving it high is what boots the NCI
+		 * core. Named enable-gpios because that is the lookup the
+		 * driver does, and because it is what the pin actually is.
+		 *
+		 * Stock also wires pidle (gpio94) and clkreq (gpio31). Neither
+		 * is needed: the controller talks NCI on its internal
+		 * oscillator, verified by reading CORE_RESET_NTF with only VEN
+		 * asserted.
+		 */
+		enable-gpios = <&tlmm 67 GPIO_ACTIVE_HIGH>;
 	};
 
 	codec: rt5514@57 {
