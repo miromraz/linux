@@ -1055,6 +1055,7 @@ static const struct venus_resources sm7150_res = {
 	 */
 	.vcodec_num = 1,
 	.fw_ctrl_pds = true,
+	.dsp_ifaceq = true,
 	/*
 	 * The firmware advertises MPEG2 but MPEG2 decode sessions fail on
 	 * "14:VIDEO.IR.1.2" (session errors right after initialization).
