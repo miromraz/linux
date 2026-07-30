@@ -439,15 +439,29 @@ static int slg51000_i2c_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct slg51000 *chip;
-	struct gpio_desc *cs_gpiod;
+	struct gpio_desc *cs_gpiod, *buck_gpiod;
 	int error, ret;
 
 	chip = devm_kzalloc(dev, sizeof(struct slg51000), GFP_KERNEL);
 	if (!chip)
 		return -ENOMEM;
 
-	cs_gpiod = devm_gpiod_get_optional(dev, "dlg,cs",
-					   GPIOD_OUT_HIGH |
+	/*
+	 * Some boards gate the buck feeding the chip with a second GPIO, listed
+	 * after the chip select. The chip does not answer on i2c until that one
+	 * is high, and it needs 5ms to come up before the chip select follows.
+	 */
+	buck_gpiod = devm_gpiod_get_index_optional(dev, "dlg,cs", 1,
+						   GPIOD_OUT_HIGH |
+						GPIOD_FLAGS_BIT_NONEXCLUSIVE);
+	if (IS_ERR(buck_gpiod))
+		return PTR_ERR(buck_gpiod);
+
+	if (buck_gpiod)
+		usleep_range(5000, 6000);
+
+	cs_gpiod = devm_gpiod_get_index_optional(dev, "dlg,cs", 0,
+						 GPIOD_OUT_HIGH |
 						GPIOD_FLAGS_BIT_NONEXCLUSIVE);
 	if (IS_ERR(cs_gpiod))
 		return PTR_ERR(cs_gpiod);
@@ -502,9 +516,16 @@ static const struct i2c_device_id slg51000_i2c_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, slg51000_i2c_id);
 
+static const struct of_device_id slg51000_of_match[] = {
+	{ .compatible = "dlg,slg51000" },
+	{}
+};
+MODULE_DEVICE_TABLE(of, slg51000_of_match);
+
 static struct i2c_driver slg51000_regulator_driver = {
 	.driver = {
 		.name = "slg51000-regulator",
+		.of_match_table = slg51000_of_match,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = slg51000_i2c_probe,
