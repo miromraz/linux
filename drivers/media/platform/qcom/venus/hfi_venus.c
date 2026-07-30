@@ -546,6 +546,17 @@ static int venus_run(struct venus_hfi_device *hdev)
 	writel(SHARED_QSIZE, cpu_cs_base + UC_REGION_SIZE);
 	writel(hdev->ifaceq_table.da, cpu_cs_base + CPU_CS_SCIACMDARG2);
 	writel(0x01, cpu_cs_base + CPU_CS_SCIACMDARG1);
+	/*
+	 * Firmware built with an internal CVP block dereferences the DSP-side
+	 * queue registers even when no CVP session is opened. Point them at the
+	 * CPU interface queue so the access lands in a mapped region instead of
+	 * faulting the video NoC.
+	 */
+	if (hdev->core->res->dsp_ifaceq) {
+		writel(hdev->ifaceq_table.da, cpu_cs_base + DSP_QTBL_ADDR);
+		writel(hdev->ifaceq_table.da, cpu_cs_base + DSP_UC_REGION_ADDR);
+		writel(SHARED_QSIZE, cpu_cs_base + DSP_UC_REGION_SIZE);
+	}
 	if (hdev->sfr.da)
 		writel(hdev->sfr.da, cpu_cs_base + SFR_ADDR);
 
