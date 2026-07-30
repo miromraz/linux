@@ -545,6 +545,13 @@
 	status = "okay";
 
 	ports {
+		port@0 {
+			csiphy0_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&imx363_ep>;
+			};
+		};
+
 		port@2 {
 			csiphy2_ep: endpoint {
 				data-lanes = <0 1 2 3>;
@@ -556,6 +563,40 @@
 
 &cci0 {
 	status = "okay";
+};
+
+&cci0_i2c0 {
+	/* 12 MP rear camera. */
+	camera@1a {
+		compatible = "sony,imx363";
+		reg = <0x1a>;
+
+		clocks = <&camcc CAMCC_MCLK0_CLK>;
+		assigned-clocks = <&camcc CAMCC_MCLK0_CLK>;
+		assigned-clock-rates = <24000000>;
+		/* The driver picks its register tables off this, not the clock. */
+		clock-frequency = <24000000>;
+
+		reset-gpios = <&tlmm 43 GPIO_ACTIVE_LOW>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_rear_default>;
+
+		vana-supply = <&slg51000_ldo3>;
+		vdig-supply = <&slg51000_ldo6>;
+		vif-supply = <&slg51000_ldo7>;
+
+		orientation = <1>;
+		rotation = <90>;
+
+		port {
+			imx363_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <636000000>;
+				remote-endpoint = <&csiphy0_ep>;
+			};
+		};
+	};
 };
 
 &cci0_i2c1 {
@@ -821,10 +862,11 @@
 	 * which is where they already sit, and the rails come up over i2c
 	 * without them.
 	 *
-	 * Voltage ranges are the vendor tree's, except that the three rails the
-	 * front sensor uses are pinned to the single voltage the vendor asks for
-	 * so the core applies it: cam_vio = ldo7 at 1.8 V, cam_vana = ldo2 at
-	 * 2.8 V, cam_vdig = ldo5 at 1.2 V.
+	 * Voltage ranges are the vendor tree's, except that the rails the two
+	 * sensors use are pinned to the single voltage the vendor asks for so
+	 * the core applies it. Front: cam_vio = ldo7 at 1.8 V, cam_vana = ldo2
+	 * at 2.8 V, cam_vdig = ldo5 at 1.2 V. Rear: ldo7 again, cam_vana =
+	 * ldo3 at 2.85 V, and the two rails below.
 	 */
 	pmic@75 {
 		compatible = "dlg,slg51000";
@@ -833,10 +875,18 @@
 			       <&pm6150l_gpios 6 GPIO_ACTIVE_HIGH>;
 
 		regulators {
+			/*
+			 * ldo1 and ldo4 are the rear module's cam_vdig and
+			 * cam_v_custom1. The imx363 driver has no concept of
+			 * either, so keep them up -- the sensor sits in reset
+			 * with its clock off when idle, which is what the rails
+			 * cost.
+			 */
 			slg51000_ldo1: ldo1 {
 				regulator-name = "slg51000_ldo1";
-				regulator-min-microvolt = <2250000>;
-				regulator-max-microvolt = <3300000>;
+				regulator-min-microvolt = <2850000>;
+				regulator-max-microvolt = <2850000>;
+				regulator-always-on;
 			};
 
 			slg51000_ldo2: ldo2 {
@@ -847,14 +897,15 @@
 
 			slg51000_ldo3: ldo3 {
 				regulator-name = "slg51000_ldo3";
-				regulator-min-microvolt = <1200000>;
-				regulator-max-microvolt = <3750000>;
+				regulator-min-microvolt = <2850000>;
+				regulator-max-microvolt = <2850000>;
 			};
 
 			slg51000_ldo4: ldo4 {
 				regulator-name = "slg51000_ldo4";
-				regulator-min-microvolt = <1200000>;
-				regulator-max-microvolt = <3750000>;
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
 			};
 
 			slg51000_ldo5: ldo5 {
@@ -863,10 +914,11 @@
 				regulator-max-microvolt = <1200000>;
 			};
 
+			/* cam_v_custom2: the rear sensor's 1.05 V digital core. */
 			slg51000_ldo6: ldo6 {
 				regulator-name = "slg51000_ldo6";
-				regulator-min-microvolt = <500000>;
-				regulator-max-microvolt = <1200000>;
+				regulator-min-microvolt = <1050000>;
+				regulator-max-microvolt = <1050000>;
 			};
 
 			slg51000_ldo7: ldo7 {
@@ -1330,6 +1382,22 @@
 
 		reset-pins {
 			pins = "gpio68";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+
+	cam_rear_default: cam-rear-default-state {
+		mclk-pins {
+			pins = "gpio13";
+			function = "cam_mclk";
+			drive-strength = <4>;
+			bias-disable;
+		};
+
+		reset-pins {
+			pins = "gpio43";
 			function = "gpio";
 			drive-strength = <2>;
 			bias-disable;
