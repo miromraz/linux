@@ -587,7 +587,14 @@
 		vif-supply = <&slg51000_ldo7>;
 
 		orientation = <1>;
-		rotation = <90>;
+		/*
+		 * The stock dtbo says sensor-position-roll = 90, but that is not this
+		 * property: a captured frame needs a 90 degree clockwise turn to sit
+		 * upright, so the sensor's image is 270 degrees clockwise from the
+		 * phone's natural orientation. Declaring 90 leaves libcamera's
+		 * correction 180 degrees out and every preview upside down.
+		 */
+		rotation = <270>;
 
 		port {
 			imx363_ep: endpoint {
