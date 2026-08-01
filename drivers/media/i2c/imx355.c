@@ -69,6 +69,21 @@
 /* number of data lanes */
 #define IMX355_DATA_LANES		4
 
+/*
+ * Sensor active pixel array. Derived from mode_3280x2464_regs: the crop
+ * window registers 0x0344/0x0345 (x start) and 0x0346/0x0347 (y start) are
+ * both 0, while 0x0348/0x0349 (x end) = 0x0ccf (3279) and 0x034a/0x034b
+ * (y end) = 0x099f (2463), i.e. a 3280x2464 window at origin (0,0).
+ * No datasheet-justified dummy/OB border is available, so the native size
+ * is set equal to the active array.
+ */
+#define IMX355_NATIVE_WIDTH		3280U
+#define IMX355_NATIVE_HEIGHT		2464U
+#define IMX355_PIXEL_ARRAY_LEFT		0U
+#define IMX355_PIXEL_ARRAY_TOP		0U
+#define IMX355_PIXEL_ARRAY_WIDTH	3280U
+#define IMX355_PIXEL_ARRAY_HEIGHT	2464U
+
 struct imx355_reg {
 	u16 address;
 	u8 val;
@@ -1501,6 +1516,33 @@ static int imx355_identify_module(struct imx355 *imx355)
 	return 0;
 }
 
+static int imx355_get_selection(struct v4l2_subdev *sd,
+				struct v4l2_subdev_state *sd_state,
+				struct v4l2_subdev_selection *sel)
+{
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		sel->r.left = IMX355_PIXEL_ARRAY_LEFT;
+		sel->r.top = IMX355_PIXEL_ARRAY_TOP;
+		sel->r.width = IMX355_PIXEL_ARRAY_WIDTH;
+		sel->r.height = IMX355_PIXEL_ARRAY_HEIGHT;
+
+		return 0;
+
+	case V4L2_SEL_TGT_NATIVE_SIZE:
+		sel->r.left = 0;
+		sel->r.top = 0;
+		sel->r.width = IMX355_NATIVE_WIDTH;
+		sel->r.height = IMX355_NATIVE_HEIGHT;
+
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
 static const struct v4l2_subdev_core_ops imx355_subdev_core_ops = {
 	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
 	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
@@ -1515,6 +1557,7 @@ static const struct v4l2_subdev_pad_ops imx355_pad_ops = {
 	.get_fmt = imx355_get_pad_format,
 	.set_fmt = imx355_set_pad_format,
 	.enum_frame_size = imx355_enum_frame_size,
+	.get_selection = imx355_get_selection,
 };
 
 static const struct v4l2_subdev_ops imx355_subdev_ops = {
