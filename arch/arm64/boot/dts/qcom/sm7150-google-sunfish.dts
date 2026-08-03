@@ -1143,8 +1143,6 @@
 	camera_rear_vcm_en: camera-rear-vcm-en-state {
 		pins = "gpio12";
 		function = PMIC_GPIO_FUNC_NORMAL;
-		qcom,drive-strength = <PMIC_GPIO_STRENGTH_MED>;
-		bias-disable;
 		output-low;
 		power-source = <0>;
 	};
