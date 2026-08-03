@@ -201,6 +201,25 @@
 		regulator-always-on;
 		vin-supply = <&vph_pwr>;
 	};
+
+	/*
+	 * cam_vaf: the rear module's LC898219XI focus-coil rail. The stock dtbo
+	 * gates 2.85 V off pm6150l GPIO12 (active high); mainline modelled no VAF
+	 * rail, which is why the actuator had no power. 80 mA per the vendor tree.
+	 */
+	camera_ldo: regulator-camera-ldo {
+		compatible = "regulator-fixed";
+
+		regulator-name = "camera_ldo";
+		regulator-min-microvolt = <2850000>;
+		regulator-max-microvolt = <2850000>;
+
+		gpio = <&pm6150l_gpios 12 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&camera_rear_vcm_en>;
+	};
 };
 
 &apps_rsc {
@@ -596,6 +615,9 @@
 		 */
 		rotation = <270>;
 
+		/* ON Semi LC898219XI focus coil on the same CCI bus, at 0x72. */
+		lens-focus = <&rear_cam_actuator>;
+
 		port {
 			imx363_ep: endpoint {
 				data-lanes = <1 2 3 4>;
@@ -603,6 +625,20 @@
 				remote-endpoint = <&csiphy0_ep>;
 			};
 		};
+	};
+
+	rear_cam_actuator: actuator@72 {
+		compatible = "onnn,lc898219xi";
+		reg = <0x72>;
+
+		/*
+		 * vdd is the focus coil's own 2.85 V (cam_vaf); vio/vana are the
+		 * IO and analog rails it shares with the imx363 above, so the
+		 * actuator holds them up while it is powered for the I2C handshake.
+		 */
+		vdd-supply = <&camera_ldo>;
+		vio-supply = <&slg51000_ldo7>;
+		vana-supply = <&slg51000_ldo3>;
 	};
 };
 
@@ -1101,6 +1137,16 @@
 		bias-disable;
 		output-low;
 		power-source = <1>;
+	};
+
+	/* Enable line for camera_ldo, the rear focus-coil (cam_vaf) rail. */
+	camera_rear_vcm_en: camera-rear-vcm-en-state {
+		pins = "gpio12";
+		function = PMIC_GPIO_FUNC_NORMAL;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_MED>;
+		bias-disable;
+		output-low;
+		power-source = <0>;
 	};
 };
 
