@@ -62,10 +62,40 @@ static int lc898219xi_set_dac(struct lc898219xi *lc898219xi, u16 val)
 	return ret;
 }
 
+/* One wake attempt. The rails are already up when this is called. */
+static int lc898219xi_wake(struct i2c_client *client)
+{
+	int regdata, retry;
+
+	regdata = i2c_smbus_read_byte_data(client, 0xF0);
+	if (regdata != 0xA5) {
+		dev_dbg(&client->dev, "bad chip id: %x\n", regdata);
+		return -ENODEV;
+	}
+
+	usleep_range(1000, 1010);
+
+	i2c_smbus_write_byte_data(client, 0xE0, 0x01);
+	msleep(8);
+
+	for (retry = 0; retry < 10; retry++) {
+		int check = i2c_smbus_read_byte_data(client, 0xB3);
+
+		if ((check & 0xE0) == 0) {
+			i2c_smbus_write_byte_data(client, 0x8C, 0xE9);
+			return 0;
+		}
+		usleep_range(1000, 1010);
+	}
+
+	dev_dbg(&client->dev, "LSI wake up check failed\n");
+	return -ETIMEDOUT;
+}
+
 static int lc898219xi_power_on(struct lc898219xi *lc898219xi)
 {
-	int ret;
 	struct i2c_client *client = v4l2_get_subdevdata(&lc898219xi->sd);
+	int attempt, ret;
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(lc898219xi_supply_names),
 				    lc898219xi->supplies);
@@ -77,32 +107,22 @@ static int lc898219xi_power_on(struct lc898219xi *lc898219xi)
 
 	usleep_range(8000, 10000);
 
-	uint32_t regdata = i2c_smbus_read_byte_data(client, 0xF0);
-	if (regdata != 0xA5) {
-		dev_err(&client->dev, "communication error: regdata: %x \n",
-		        regdata);
-		return -1;
+	/*
+	 * Early in boot the camera rails are still ramping and the first wake
+	 * attempt fails, which used to leave the whole camera dead: the sensor
+	 * waits on this subdev through lens-focus, so it never registers either.
+	 * Give the coil a few more tries before giving up.
+	 */
+	for (attempt = 0; attempt < 3; attempt++) {
+		ret = lc898219xi_wake(client);
+		if (!ret)
+			return 0;
+		usleep_range(10000, 12000);
 	}
 
-	usleep_range(1000, 1010);
-
-	i2c_smbus_write_byte_data(client, 0xE0, 0x01);
-	msleep(8);
-
-	int retry;
-	for (retry = 0; retry < 10; retry++) {
-		uint32_t check = i2c_smbus_read_byte_data(client, 0xB3);
-		if ((check & 0XE0) == 0) {
-			break;
-		} else if (retry >= 9) {
-			dev_err(&client->dev, "LSI wake up check failed");
-			return -1;
-		}
-		usleep_range(1000, 1010);
-	}
-
-	i2c_smbus_write_byte_data(client, 0x8C, 0xE9);
-
+	dev_err(&client->dev, "wake up failed: %d\n", ret);
+	regulator_bulk_disable(ARRAY_SIZE(lc898219xi_supply_names),
+			       lc898219xi->supplies);
 	return ret;
 }
 
@@ -228,7 +248,13 @@ static int lc898219xi_probe(struct i2c_client *client)
 
 	ret = lc898219xi_power_on(lc898219xi);
 	if (ret)
-		return dev_err_probe(dev, ret, "power on failed\n");
+		/*
+		 * Retry rather than fail for good: a coil that is not awake yet
+		 * would otherwise keep the sensor unregistered for the whole
+		 * uptime, since lens-focus makes the sensor wait for us.
+		 */
+		return dev_err_probe(dev, ret == -ETIMEDOUT ? -EPROBE_DEFER : ret,
+				     "power on failed\n");
 
 	ret = lc898219xi_init_controls(lc898219xi);
 	if (ret) {

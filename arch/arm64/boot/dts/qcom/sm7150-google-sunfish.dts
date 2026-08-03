@@ -216,6 +216,9 @@
 
 		gpio = <&pm6150l_gpios 12 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
+		/* Nothing models the coil rail's ramp, and the actuator's wake
+		 * handshake fails if it is talked to before the rail settles. */
+		startup-delay-us = <10000>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&camera_rear_vcm_en>;
