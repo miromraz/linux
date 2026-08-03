@@ -13,39 +13,6 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-fwnode.h>
 
-/*
- * EXPERIMENTAL: Type-2 PDAF phase-pixel readout.
- *
- * The IMX363 embeds phase-detect pixels inside the ordinary RAW10 stream. The
- * gating registers below default to "off" (never written) so both cameras keep
- * their known-good behaviour. Set these module params (sentinel -1 = leave the
- * sensor default) to force PD output on and characterise it. They are read at
- * every stream start, so they can be poked live via
- * /sys/module/imx363/parameters between captures without reloading.
- *
- * This is an experiment, not a shipping interface. Revert by leaving all three
- * at -1 (the default), which reproduces the original register writes exactly.
- *
- * FINDING (empirical, 2026-08): on the sunfish IMX363 these three addresses are
- * inert. Direct i2c writes to them (and via these params) read back 0 while
- * neighbouring manufacturer regs (0x30f4/0x30f5/0x9348) accept writes normally,
- * and the vendor sensor module (com.qti.sensormodule.metric_imx363.bin) never
- * writes 0x3030/0x3032/0x7bcd at all - the names were inherited from the imx258
- * downstream driver. Full-res captures with all three forced on show no PD
- * lattice (frame diff at the noise floor, flat FFT). IMX363 PD is dual-pixel and
- * gated by a mode/readout reconfiguration (PDBlockPattern/pdlibsony), not these
- * registers. Kept as documented dead-end infrastructure; harmless at default -1.
- */
-static int pdaf_outen = -1;
-module_param(pdaf_outen, int, 0644);
-MODULE_PARM_DESC(pdaf_outen, "EXPERIMENTAL PDAF: value for reg 0x3030 PHASE_PIX_OUTEN, -1=leave default");
-static int pdaf_datarate = -1;
-module_param(pdaf_datarate, int, 0644);
-MODULE_PARM_DESC(pdaf_datarate, "EXPERIMENTAL PDAF: value for reg 0x3032 PDPIX_DATA_RATE, -1=leave default");
-static int pdaf_window = -1;
-module_param(pdaf_window, int, 0644);
-MODULE_PARM_DESC(pdaf_window, "EXPERIMENTAL PDAF: value for reg 0x7bcd AF_WINDOW_MODE, -1=leave default");
-
 #define IMX363_REG_MODE_SELECT	CCI_REG8(0x0100)
 #define IMX363_MODE_STANDBY		0x00
 #define IMX363_MODE_STREAMING	0x01
@@ -1108,24 +1075,6 @@ static int imx363_start_streaming(struct imx363 *imx363)
 	if (ret) {
 		dev_err(&client->dev, "%s failed to set mode\n", __func__);
 		return ret;
-	}
-
-	/*
-	 * EXPERIMENTAL: force Type-2 PDAF phase-pixel output on. No-op unless the
-	 * module params are set (default -1). Written after the mode list so they
-	 * override the mode's defaults. Failures here are logged but not fatal:
-	 * the sensor is already configured for a normal image and must keep
-	 * streaming for both cameras.
-	 */
-	if (pdaf_outen >= 0)
-		cci_write(imx363->regmap, IMX363_REG_PHASE_PIX_OUTEN, pdaf_outen, &ret);
-	if (pdaf_datarate >= 0)
-		cci_write(imx363->regmap, IMX363_REG_PDPIX_DATA_RATE, pdaf_datarate, &ret);
-	if (pdaf_window >= 0)
-		cci_write(imx363->regmap, IMX363_REG_AF_WINDOW_MODE, pdaf_window, &ret);
-	if (ret) {
-		dev_warn(&client->dev, "%s failed to set PDAF regs (%d)\n", __func__, ret);
-		ret = 0;
 	}
 
 	/* Apply customized values from user */
