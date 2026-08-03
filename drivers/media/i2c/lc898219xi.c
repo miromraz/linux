@@ -175,9 +175,16 @@ static const struct v4l2_ctrl_ops lc898219xi_ctrl_ops = {
 static int lc898219xi_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
 	struct lc898219xi *lc898219xi = sd_to_lc898219xi(sd);
+	int ret;
+
+	/* Power first: applying the controls talks to the coil over i2c. */
+	ret = pm_runtime_resume_and_get(sd->dev);
+	if (ret)
+		return ret;
+
 	__v4l2_ctrl_handler_setup(&lc898219xi->ctrls);
 
-	return pm_runtime_resume_and_get(sd->dev);
+	return 0;
 }
 
 static int lc898219xi_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
