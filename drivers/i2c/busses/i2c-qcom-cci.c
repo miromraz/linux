@@ -502,6 +502,16 @@ static int __maybe_unused cci_suspend(struct device *dev)
 
 static int __maybe_unused cci_resume(struct device *dev)
 {
+	/*
+	 * cci_suspend() leaves the clocks alone when the device is already
+	 * runtime suspended, so resuming it here would take a clock reference
+	 * that nothing ever drops: the runtime PM status is still
+	 * RPM_SUSPENDED, which makes the pm_request_autosuspend() below a
+	 * no-op. Stay symmetric with the suspend side instead.
+	 */
+	if (pm_runtime_suspended(dev))
+		return 0;
+
 	cci_resume_runtime(dev);
 	pm_request_autosuspend(dev);
 
