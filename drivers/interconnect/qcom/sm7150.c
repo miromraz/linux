@@ -1343,7 +1343,7 @@ static struct qcom_icc_bcm bcm_cn0 = {
 
 static struct qcom_icc_bcm bcm_qup0 = {
 	.name = "QUP0",
-	.keepalive = false,
+	.keepalive = true,
 	.num_nodes = 2,
 	.nodes = { &qhm_qup_center,
 		   &qhm_qup_north
