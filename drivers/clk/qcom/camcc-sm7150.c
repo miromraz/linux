@@ -8,6 +8,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
 #include <dt-bindings/clock/qcom,sm7150-camcc.h>
@@ -2028,10 +2029,21 @@ MODULE_DEVICE_TABLE(of, camcc_sm7150_match_table);
 static int camcc_sm7150_probe(struct platform_device *pdev)
 {
 	struct regmap *regmap;
+	int ret;
+
+	ret = devm_pm_runtime_enable(&pdev->dev);
+	if (ret)
+		return ret;
+
+	ret = pm_runtime_resume_and_get(&pdev->dev);
+	if (ret)
+		return ret;
 
 	regmap = qcom_cc_map(pdev, &camcc_sm7150_desc);
-	if (IS_ERR(regmap))
+	if (IS_ERR(regmap)) {
+		pm_runtime_put(&pdev->dev);
 		return PTR_ERR(regmap);
+	}
 
 	clk_fabia_pll_configure(&camcc_pll0, regmap, &camcc_pll0_config);
 	clk_fabia_pll_configure(&camcc_pll1, regmap, &camcc_pll1_config);
@@ -2042,7 +2054,11 @@ static int camcc_sm7150_probe(struct platform_device *pdev)
 	/* Keep some clocks always-on */
 	qcom_branch_set_clk_en(regmap, 0xc1a0); /* CAMCC_GDSC_CLK */
 
-	return qcom_cc_really_probe(&pdev->dev, &camcc_sm7150_desc, regmap);
+	ret = qcom_cc_really_probe(&pdev->dev, &camcc_sm7150_desc, regmap);
+
+	pm_runtime_put(&pdev->dev);
+
+	return ret;
 }
 
 static struct platform_driver camcc_sm7150_driver = {
