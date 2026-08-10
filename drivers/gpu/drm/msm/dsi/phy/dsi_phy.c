@@ -683,14 +683,15 @@ static int dsi_phy_driver_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, phy);
 
-	ret = devm_pm_runtime_enable(dev);
-	if (ret)
-		return ret;
-
 	phy->ahb_clk = devm_clk_get(dev, "iface");
 	if (IS_ERR(phy->ahb_clk))
 		return dev_err_probe(dev, PTR_ERR(phy->ahb_clk),
 				     "Unable to get iface clk\n");
+
+	/* after ahb_clk, which the runtime PM callbacks dereference */
+	ret = devm_pm_runtime_enable(dev);
+	if (ret)
+		return ret;
 
 	if (phy->cfg->ops.pll_init) {
 		ret = phy->cfg->ops.pll_init(phy);
