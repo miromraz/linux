@@ -438,7 +438,7 @@
 
 			cluster_sleep_cx_ret: cluster-sleep-1 {
 				compatible = "domain-idle-state";
-				arm,psci-suspend-param = <0x41001244>;
+				arm,psci-suspend-param = <0x41002244>;
 				entry-latency-us = <3638>;
 				exit-latency-us = <4562>;
 				min-residency-us = <8467>;
@@ -446,7 +446,7 @@
 
 			cluster_aoss_sleep: cluster-sleep-2 {
 				compatible = "domain-idle-state";
-				arm,psci-suspend-param = <0x4100b244>;
+				arm,psci-suspend-param = <0x4100c244>;
 				entry-latency-us = <3263>;
 				exit-latency-us = <6562>;
 				min-residency-us = <9826>;
