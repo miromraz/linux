@@ -3659,6 +3659,7 @@
 				 <&rpmhcc RPMH_CXO_CLK_A>;
 
 			power-domains = <&rpmhpd RPMHPD_CX>;
+			required-opps = <&rpmhpd_opp_low_svs>;
 
 			#clock-cells = <1>;
 			#reset-cells = <1>;
@@ -3944,6 +3945,7 @@
 				 <&sleep_clk>;
 
 			power-domains = <&rpmhpd RPMHPD_CX>;
+			required-opps = <&rpmhpd_opp_low_svs>;
 
 			#clock-cells = <1>;
 			#reset-cells = <1>;
@@ -4239,6 +4241,7 @@
 				 <0>;
 
 			power-domains = <&rpmhpd RPMHPD_CX>;
+			required-opps = <&rpmhpd_opp_low_svs>;
 
 			#clock-cells = <1>;
 			#reset-cells = <1>;
