@@ -11,6 +11,7 @@
  */
 
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -53,11 +54,22 @@ static int smp2p_sleepstate_pm_notify(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
+/*
+ * The remote acknowledges us on the "sleepstate_see" entry. It is not a wakeup
+ * request: with the sensor stack streaming, this fires at ~2.5 Hz, so treating
+ * it as one aborts every suspend. Consume it and leave the interrupt counter
+ * behind - it is the only direct measure of how busy the sensor island is.
+ */
+static irqreturn_t smp2p_sleepstate_isr(int irq, void *data)
+{
+	return IRQ_HANDLED;
+}
+
 static int smp2p_sleepstate_probe(struct platform_device *pdev)
 {
 	struct smp2p_sleepstate *ss;
 	unsigned int bit;
-	int ret;
+	int irq, ret;
 
 	ss = devm_kzalloc(&pdev->dev, sizeof(*ss), GFP_KERNEL);
 	if (!ss)
@@ -71,6 +83,19 @@ static int smp2p_sleepstate_probe(struct platform_device *pdev)
 
 	/* We are running, so say so before anyone can ask. */
 	smp2p_sleepstate_set(ss, true);
+
+	/* smp2p inbound interrupts are nested, so this has to be threaded. */
+	irq = platform_get_irq_optional(pdev, 0);
+	if (irq > 0) {
+		ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
+						smp2p_sleepstate_isr,
+						IRQF_ONESHOT, "sleepstate", ss);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret,
+					     "failed to request sleepstate irq\n");
+	} else if (irq != -ENXIO) {
+		return dev_err_probe(&pdev->dev, irq, "bad sleepstate irq\n");
+	}
 
 	/*
 	 * Run before the notifiers that freeze userspace, so the remote has
