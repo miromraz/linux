@@ -1,0 +1,5 @@
+linux-sunfish (7.1.0-sm7150-1) trixie; urgency=low
+
+  * Custom built Linux kernel.
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Fri, 28 Aug 2026 22:39:27 +0200
