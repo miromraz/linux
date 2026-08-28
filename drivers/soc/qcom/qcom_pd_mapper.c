@@ -524,10 +524,10 @@ static const struct qcom_pdm_domain_data *sm6350_domains[] = {
 
 static const struct qcom_pdm_domain_data *sm7150_domains[] = {
 	&adsp_audio_pd,
-	&adsp_root_pd,
+	&adsp_root_pd_pdr,
 	&adsp_sensor_pd,
 	&cdsp_root_pd,
-	&mpss_root_pd_gps,
+	&mpss_root_pd_gps_pdr,
 	&mpss_wlan_pd,
 	NULL,
 };
