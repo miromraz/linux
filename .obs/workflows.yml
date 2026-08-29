@@ -1,0 +1,12 @@
+version: '1.0'
+
+resync_sunfish_kernel:
+  steps:
+    - trigger_services:
+        project: home:realni
+        package: linux-sunfish
+  filters:
+    event: push
+    branches:
+      only:
+        - sunfish-venus-v7.2
