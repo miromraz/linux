@@ -100,6 +100,18 @@ enum smb_generation {
 #define CMD_ICL_OVERRIDE				0x342
 #define ICL_OVERRIDE_BIT				BIT(0)
 
+/*
+ * SMB5 only. Overrides the USBIN voltage range the input stage will accept;
+ * input outside of it is rejected and no current flows. Downstream calls this
+ * USBIN_ADAPTER_ALLOW_OVERRIDE_REG (USBIN_BASE + 0x44), see smb5-reg.h.
+ * SMB2 has no equivalent (it uses USBIN_ADAPTER_ALLOW_CFG at 0x360 instead),
+ * so this must never be programmed for pmi8998/pm660.
+ */
+#define SMB5_USBIN_ADAPTER_ALLOW_OVERRIDE		0x344
+#define SMB5_ADAPTER_ALLOW_OVERRIDE_MASK		GENMASK(3, 0)
+#define SMB5_FORCE_NULL					0
+#define SMB5_FORCE_9V					BIT(1)
+
 #define TYPE_C_CFG					0x358
 #define APSD_START_ON_CC_BIT				BIT(7)
 #define FACTORY_MODE_DETECTION_EN_BIT			BIT(5)
@@ -202,6 +214,32 @@ enum smb_generation {
 #define CDP_CURRENT_UA					1500000
 #define DCP_CURRENT_UA					1500000
 #define CURRENT_MAX_UA					DCP_CURRENT_UA
+
+/* Window around a 9V fixed PD contract, and the 18W (9V x 2A) it carries */
+#define PD_9V_MIN_UV					8500000
+#define PD_9V_MAX_UV					9500000
+#define PD_9V_CURRENT_UA				2000000
+
+/*
+ * Battery side ceiling. 1.95A is the conservative default used whenever the
+ * pack temperature is unknown or high. 4A is only programmed for a 9V contract
+ * with a healthy thermistor reading; it is what lets ~18W actually reach the
+ * pack, and is 1.3C on the 3080mAh sunfish cell.
+ */
+#define FAST_CHARGE_CURRENT_UA				1950000
+#define FAST_CHARGE_CURRENT_9V_UA			4000000
+
+/*
+ * Pack temperature gate for FAST_CHARGE_CURRENT_9V_UA, deci-degrees C.
+ * Both limbs matter: 1.3C into a cold cell plates lithium, which is permanent
+ * and a safety hazard, so a cold pack is derated exactly like a hot one. The
+ * recovery band is inset at both ends to stop the gate flapping.
+ */
+#define BATT_TEMP_HOT_DDEGC				450
+#define BATT_TEMP_HOT_RECOVER_DDEGC			400
+#define BATT_TEMP_COLD_DDEGC				100
+#define BATT_TEMP_COLD_RECOVER_DDEGC			150
+#define BATT_TEMP_POLL_MS				10000
 /* clang-format on */
 
 enum charger_status {
@@ -236,6 +274,8 @@ struct smb_init_register {
  * @wakeup_enabled:	If the cable IRQ will cause a wakeup
  * @usb_in_i_chan:	USB_IN current measurement channel
  * @usb_in_v_chan:	USB_IN voltage measurement channel
+ * @batt_therm_chan:	Pack thermistor channel, NULL if the board has none
+ * @batt_derate:	Pack is outside the fast charge temperature window
  * @chg_psy:		Charger power supply instance
  */
 struct smb_chip {
@@ -254,6 +294,8 @@ struct smb_chip {
 
 	struct iio_channel *usb_in_i_chan;
 	struct iio_channel *usb_in_v_chan;
+	struct iio_channel *batt_therm_chan;
+	bool batt_derate;
 
 	struct power_supply *chg_psy;
 };
@@ -505,6 +547,140 @@ static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
 			    val_raw);
 }
 
+static int smb_set_fast_charge_current(struct smb_chip *chip, unsigned int val)
+{
+	if (val > chip->current_limit_max_ua) {
+		dev_err(chip->dev,
+			"Can't set fast charge current higher than %u uA\n", chip->current_limit_max_ua);
+		return -EINVAL;
+	}
+
+	return regmap_write(chip->regmap, chip->base + FAST_CHARGE_CURRENT_CFG,
+			    val / chip->current_step_size_ua);
+}
+
+/*
+ * Decide whether the pack is outside the window where it may take
+ * FAST_CHARGE_CURRENT_9V_UA. Fails closed: a board without a thermistor, or a
+ * failed read, is treated as out of range and keeps the conservative default.
+ */
+static bool smb_batt_temp_derate(struct smb_chip *chip)
+{
+	int rc, millidegc;
+
+	if (!chip->batt_therm_chan)
+		return true;
+
+	rc = iio_read_channel_processed(chip->batt_therm_chan, &millidegc);
+	if (rc < 0) {
+		dev_err(chip->dev, "Couldn't read pack temperature: %d\n", rc);
+		return true;
+	}
+
+	/* millidegrees C to deci-degrees C, as qcom_qg reports it */
+	millidegc /= 100;
+
+	if (millidegc >= BATT_TEMP_HOT_DDEGC ||
+	    millidegc <= BATT_TEMP_COLD_DDEGC)
+		chip->batt_derate = true;
+	else if (millidegc <= BATT_TEMP_HOT_RECOVER_DDEGC &&
+		 millidegc >= BATT_TEMP_COLD_RECOVER_DDEGC)
+		chip->batt_derate = false;
+
+	return chip->batt_derate;
+}
+
+/*
+ * Apply an active 9V USB PD contract reported by the Type-C port (linked via
+ * the "power-supplies" phandle). The input stage rejects USBIN outside the
+ * allowed range, so the allowance has to be widened before any current flows -
+ * which is also why this runs before the online check.
+ *
+ * Only 9V is handled: nothing above that has been validated on this charge
+ * path. Anything else (including plain 5V, PD or not) restores the hardware
+ * default allowance and the default charge current, and is left to BC1.2 as
+ * before.
+ *
+ * Returns 0 if a 9V contract was applied.
+ */
+static int smb5_pd_apply(struct smb_chip *chip)
+{
+	union power_supply_propval online, volt, curr;
+	unsigned int current_ua;
+	int rc;
+
+	if (chip->gen != SMB5)
+		return -ENODEV;
+
+	rc = power_supply_get_property_from_supplier(chip->chg_psy,
+						     POWER_SUPPLY_PROP_ONLINE,
+						     &online);
+	if (rc < 0)
+		return rc;
+
+	rc = power_supply_get_property_from_supplier(
+		chip->chg_psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &volt);
+	if (rc < 0)
+		return rc;
+
+	if (!online.intval || volt.intval < PD_9V_MIN_UV ||
+	    volt.intval > PD_9V_MAX_UV) {
+		rc = regmap_update_bits(chip->regmap,
+					chip->base +
+						SMB5_USBIN_ADAPTER_ALLOW_OVERRIDE,
+					SMB5_ADAPTER_ALLOW_OVERRIDE_MASK,
+					SMB5_FORCE_NULL);
+		if (rc < 0)
+			dev_err(chip->dev,
+				"Couldn't restore adapter allowance: %d\n", rc);
+
+		rc = smb_set_fast_charge_current(chip, FAST_CHARGE_CURRENT_UA);
+		if (rc < 0)
+			dev_err(chip->dev,
+				"Couldn't restore fast charge current: %d\n",
+				rc);
+		return -ENODEV;
+	}
+
+	rc = power_supply_get_property_from_supplier(
+		chip->chg_psy, POWER_SUPPLY_PROP_CURRENT_MAX, &curr);
+	if (rc < 0)
+		return rc;
+
+	rc = regmap_update_bits(chip->regmap,
+				chip->base + SMB5_USBIN_ADAPTER_ALLOW_OVERRIDE,
+				SMB5_ADAPTER_ALLOW_OVERRIDE_MASK,
+				SMB5_FORCE_9V);
+	if (rc < 0) {
+		dev_err(chip->dev, "Couldn't allow 9V input: %d\n", rc);
+		return rc;
+	}
+	/*
+	 * The battery side ceiling is the only thermal lever needed: the buck
+	 * draws input power to match what it delivers, so capping the charge
+	 * current pulls the input down with it.
+	 */
+	rc = smb_set_fast_charge_current(chip, smb_batt_temp_derate(chip) ?
+						       FAST_CHARGE_CURRENT_UA :
+						       FAST_CHARGE_CURRENT_9V_UA);
+	if (rc < 0) {
+		dev_err(chip->dev, "Couldn't set fast charge current: %d\n", rc);
+		return rc;
+	}
+
+	/* Bounded by what the source actually advertised at 9V */
+	current_ua = min_t(unsigned int, curr.intval, PD_9V_CURRENT_UA);
+
+	rc = smb_set_current_limit(chip, current_ua);
+	if (rc < 0)
+		return rc;
+
+	/* Re-check the pack temperature for as long as the contract lasts */
+	schedule_delayed_work(&chip->status_change_work,
+			      msecs_to_jiffies(BATT_TEMP_POLL_MS));
+	return 0;
+}
+
 static void smb_status_change_work(struct work_struct *work)
 {
 	unsigned int charger_type, current_ua;
@@ -513,6 +689,11 @@ static void smb_status_change_work(struct work_struct *work)
 	struct smb_chip *chip;
 
 	chip = container_of(work, struct smb_chip, status_change_work.work);
+
+	if (!smb5_pd_apply(chip)) {
+		power_supply_changed(chip->chg_psy);
+		return;
+	}
 
 	smb_get_prop_usb_online(chip, &usb_online);
 	if (!usb_online)
@@ -775,6 +956,19 @@ static irqreturn_t smb_handle_wdog_bark(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/* A supplier change means the PD contract may have moved to or from 9V */
+static void smb_external_power_changed(struct power_supply *psy)
+{
+	struct smb_chip *chip = power_supply_get_drvdata(psy);
+
+	/* Can fire while probe is still bringing the chip up */
+	if (!chip->batt_info)
+		return;
+
+	/* Must pre-empt a pending temperature poll, not be swallowed by it */
+	mod_delayed_work(system_wq, &chip->status_change_work, 0);
+}
+
 static const struct power_supply_desc smb_psy_desc = {
 	.name = "SMB2_charger",
 	.type = POWER_SUPPLY_TYPE_USB,
@@ -787,6 +981,7 @@ static const struct power_supply_desc smb_psy_desc = {
 	.get_property = smb_get_property,
 	.set_property = smb_set_property,
 	.property_is_writeable = smb_property_is_writable,
+	.external_power_changed = smb_external_power_changed,
 };
 
 /* Init sequence derived from vendor downstream driver */
@@ -1052,6 +1247,15 @@ static int smb_probe(struct platform_device *pdev)
 	chip->dev = &pdev->dev;
 	chip->name = pdev->name;
 
+	/*
+	 * Fail closed: a temperature reading has not happened yet, so treat
+	 * the pack as derated until smb_batt_temp_derate() proves otherwise.
+	 * Without this, a first call landing inside either hysteresis band
+	 * inherits the kzalloc'd false and allows FAST_CHARGE_CURRENT_9V_UA
+	 * into a cell that has never been measured.
+	 */
+	chip->batt_derate = true;
+
 	chip->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chip->regmap)
 		return dev_err_probe(chip->dev, -ENODEV,
@@ -1072,6 +1276,16 @@ static int smb_probe(struct platform_device *pdev)
 		return dev_err_probe(chip->dev, PTR_ERR(chip->usb_in_i_chan),
 				     "Couldn't get usbin_i IIO channel\n");
 	}
+
+	/*
+	 * Optional: only boards that wire it up may fast charge from a 9V
+	 * contract. Without it smb_batt_too_hot() keeps the default current.
+	 */
+	chip->batt_therm_chan = devm_iio_channel_get(chip->dev, "batt-therm");
+	if (PTR_ERR(chip->batt_therm_chan) == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+	if (IS_ERR(chip->batt_therm_chan))
+		chip->batt_therm_chan = NULL;
 
 	match_data = (const struct smb_match_data *)device_get_match_data(chip->dev);
 
@@ -1098,6 +1312,17 @@ static int smb_probe(struct platform_device *pdev)
 	if (!desc->name)
 		return -ENOMEM;
 
+	/*
+	 * Must be live before the power supply is registered: registering it
+	 * makes smb_external_power_changed() reachable, and that schedules
+	 * this work.
+	 */
+	rc = devm_delayed_work_autocancel(chip->dev, &chip->status_change_work,
+					  smb_status_change_work);
+	if (rc)
+		return dev_err_probe(chip->dev, rc,
+				     "Failed to init status change work\n");
+
 	chip->chg_psy =
 		devm_power_supply_register(chip->dev, desc, &supply_config);
 	if (IS_ERR(chip->chg_psy))
@@ -1110,12 +1335,6 @@ static int smb_probe(struct platform_device *pdev)
 				     "Failed to get battery info\n");
 	if (chip->batt_info->constant_charge_current_max_ua == -EINVAL)
 		chip->batt_info->constant_charge_current_max_ua = DCP_CURRENT_UA;
-
-	rc = devm_delayed_work_autocancel(chip->dev, &chip->status_change_work,
-					  smb_status_change_work);
-	if (rc)
-		return dev_err_probe(chip->dev, rc,
-				     "Failed to init status change work\n");
 
 	rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500 + 1;
 	rc = regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
@@ -1149,15 +1368,12 @@ static int smb_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, chip);
 
 	/*
-	 * This overrides all of the other current limits and is expected
-	 * to be used for setting limits based on temperature. We set some
-	 * relatively safe default value while still allowing a comfortably
-	 * fast charging rate. Once temperature monitoring is hooked up we
-	 * would expect this to be changed dynamically based on temperature
-	 * reporting.
+	 * This overrides all of the other current limits. The conservative
+	 * default is what every input other than a 9V PD contract runs at;
+	 * smb5_pd_apply() raises it only while the pack thermistor says the
+	 * cell is cool enough.
 	 */
-	rc = regmap_write(chip->regmap, chip->base + FAST_CHARGE_CURRENT_CFG,
-			  1950000 / chip->current_step_size_ua);
+	rc = smb_set_fast_charge_current(chip, FAST_CHARGE_CURRENT_UA);
 	if (rc < 0)
 		return dev_err_probe(chip->dev, rc,
 				     "Couldn't write fast charge current cfg");
