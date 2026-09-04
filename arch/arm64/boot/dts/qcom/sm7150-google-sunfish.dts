@@ -88,6 +88,13 @@
 	 */
 	battery: battery {
 		compatible = "simple-battery";
+		/*
+		 * qcom_smbx programs the DCP (wall charger) input current
+		 * limit from this property; without it the field stays at
+		 * -EINVAL, smb_set_current_limit() rejects it and the limit
+		 * is never programmed at all.
+		 */
+		constant-charge-current-max-microamp = <1500000>;
 		voltage-min-design-microvolt = <3300000>;
 		voltage-max-design-microvolt = <4450000>;
 		charge-full-design-microamp-hours = <3080000>;
@@ -1027,6 +1034,21 @@
 
 &pm6150_charger {
 	monitored-battery = <&battery>;
+	/*
+	 * Let the charger see the negotiated USB PD contract: it has to widen
+	 * the accepted USBIN range before a 9 V source draws any current.
+	 * This is the only thing making the charger wait for the Type-C port
+	 * to probe -- drop it and the driver falls back to BC1.2 at 5 V.
+	 */
+	power-supplies = <&pm6150_typec>;
+	/*
+	 * batt-therm gates the raised charge current: without it qcom_smbx
+	 * refuses to go above its conservative default.
+	 */
+	io-channels = <&pm6150_adc ADC5_USB_IN_I>,
+		      <&pm6150_adc ADC5_USB_IN_V_16>,
+		      <&pm6150_adc ADC5_BAT_THERM_100K_PU>;
+	io-channel-names = "usbin_i", "usbin_v", "batt-therm";
 	status = "okay";
 };
 
@@ -1070,6 +1092,12 @@
 		source-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
 			       PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>;
 
+		/*
+		 * 9 V x 2 A is the 18 W stock charge rate, and it is not
+		 * reachable at 5 V (vSafe5V caps at 3 A = 15 W). 9 V is also
+		 * the ceiling: qcom_smbx only widens the SMB5 adapter
+		 * allowance for a 9 V contract, never higher.
+		 */
 		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
 			     PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)
 			     PDO_VAR(5000, 9000, 3000)>;
