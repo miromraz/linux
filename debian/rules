@@ -76,7 +76,7 @@ binary-arch: $(binary-targets)
 build: build-arch build-indep
 build-indep:
 build-arch:
-	$(Q)$(MAKE) $(make-opts) sunfish_defconfig
+	$(Q)$(MAKE) $(make-opts) sunfish_defconfig bengalos.config
 	$(Q)$(MAKE) $(make-opts) olddefconfig
 	$(Q)$(MAKE) $(make-opts) $(if $(filter um,$(ARCH)),,headers) all
 
