@@ -108,7 +108,14 @@ enum qcom_scm_qseecom_tz_owner {
 enum qcom_scm_qseecom_tz_svc {
 	QSEECOM_TZ_SVC_APP_ID_PLACEHOLDER	= 0,
 	QSEECOM_TZ_SVC_APP_MGR			= 1,
+	QSEECOM_TZ_SVC_LISTENER			= 2,
 	QSEECOM_TZ_SVC_INFO			= 6,
+};
+
+enum qcom_scm_qseecom_tz_cmd_listener {
+	QSEECOM_TZ_CMD_LISTENER_REGISTER	= 1,
+	QSEECOM_TZ_CMD_LISTENER_UNREGISTER	= 2,
+	QSEECOM_TZ_CMD_LISTENER_RESPONSE	= 3,
 };
 
 enum qcom_scm_qseecom_tz_cmd_app {
@@ -2096,6 +2103,24 @@ static int __qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
 	return 0;
 }
 
+/* One QSEECOM SCM call; the caller holds qcom_scm_qseecom_call_lock. */
+static int qcom_scm_qseecom_call_locked(const struct qcom_scm_desc *desc,
+					struct qcom_scm_qseecom_resp *res)
+{
+	int status;
+
+	status = __qcom_scm_qseecom_call(desc, res);
+
+	dev_dbg(__scm->dev, "%s: owner=%x, svc=%x, cmd=%x, result=%lld, type=%llx, data=%llx\n",
+		__func__, desc->owner, desc->svc, desc->cmd, res->result,
+		res->resp_type, res->data);
+
+	if (status)
+		dev_err(__scm->dev, "qseecom: scm call failed with error %d\n", status);
+
+	return status;
+}
+
 /**
  * qcom_scm_qseecom_call() - Perform a QSEECOM SCM call.
  * @desc: SCM call descriptor.
@@ -2113,22 +2138,17 @@ static int qcom_scm_qseecom_call(const struct qcom_scm_desc *desc,
 
 	/*
 	 * Note: Multiple QSEECOM SCM calls should not be executed same time,
-	 * so lock things here. This needs to be extended to callback/listener
-	 * handling when support for that is implemented.
+	 * so lock things here. Calls that may be answered with a listener
+	 * request take the lock for the whole exchange instead, see
+	 * qcom_scm_qseecom_app_send_listener().
 	 */
 
 	mutex_lock(&qcom_scm_qseecom_call_lock);
-	status = __qcom_scm_qseecom_call(desc, res);
+	status = qcom_scm_qseecom_call_locked(desc, res);
 	mutex_unlock(&qcom_scm_qseecom_call_lock);
 
-	dev_dbg(__scm->dev, "%s: owner=%x, svc=%x, cmd=%x, result=%lld, type=%llx, data=%llx\n",
-		__func__, desc->owner, desc->svc, desc->cmd, res->result,
-		res->resp_type, res->data);
-
-	if (status) {
-		dev_err(__scm->dev, "qseecom: scm call failed with error %d\n", status);
+	if (status)
 		return status;
-	}
 
 	/*
 	 * TODO: Handle incomplete and blocked calls:
@@ -2328,6 +2348,164 @@ int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_send);
+
+/**
+ * qcom_scm_qseecom_listener_register() - Register a QSEE listener service.
+ * @listener_id: The service id the QSEE side will ask for.
+ * @sb_phys:     The listener's shared buffer, in TZ memory.
+ * @sb_size:     Size of the shared buffer.
+ *
+ * A trustlet that needs something only the normal world can do -- file
+ * storage, typically -- asks QSEE for a listener service by id. QSEE then
+ * suspends the app call that asked, answers it with an INCOMPLETE result
+ * naming the listener, and expects the request in @sb_phys to have been
+ * served, and the response left in the same buffer, before the normal world
+ * resumes it with qcom_scm_qseecom_app_send_listener()'s response call.
+ *
+ * The registration outlives the caller: QSEE keeps @sb_phys until
+ * qcom_scm_qseecom_listener_unregister(), so the buffer must stay allocated
+ * until then. QSEE apps are 32-bit, so it must also lie below 4 GB.
+ *
+ * Return: Zero on success, nonzero on failure.
+ */
+int qcom_scm_qseecom_listener_register(u32 listener_id, phys_addr_t sb_phys,
+				       size_t sb_size)
+{
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	int status;
+
+	if (sb_phys + sb_size > SZ_4G)
+		return -EINVAL;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_REGISTER;
+	desc.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_RW, QCOM_SCM_VAL);
+	desc.args[0] = listener_id;
+	desc.args[1] = sb_phys;
+	desc.args[2] = sb_size;
+
+	status = qcom_scm_qseecom_call(&desc, &res);
+	if (status)
+		return status;
+
+	if (res.result != QSEECOM_RESULT_SUCCESS)
+		return -EIO;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_register);
+
+/**
+ * qcom_scm_qseecom_listener_unregister() - Unregister a QSEE listener service.
+ * @listener_id: The service id given to qcom_scm_qseecom_listener_register().
+ *
+ * Return: Zero on success, nonzero on failure.
+ */
+int qcom_scm_qseecom_listener_unregister(u32 listener_id)
+{
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	int status;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_LISTENER;
+	desc.cmd = QSEECOM_TZ_CMD_LISTENER_UNREGISTER;
+	desc.arginfo = QCOM_SCM_ARGS(1, QCOM_SCM_VAL);
+	desc.args[0] = listener_id;
+
+	status = qcom_scm_qseecom_call(&desc, &res);
+	if (status)
+		return status;
+
+	if (res.result != QSEECOM_RESULT_SUCCESS)
+		return -EIO;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_listener_unregister);
+
+/**
+ * qcom_scm_qseecom_app_send_listener() - Send to a QSEE app that may call back.
+ * @app_id:   The ID of the target app.
+ * @req:      Request buffer sent to the app (must be TZ memory)
+ * @req_size: Size of the request buffer.
+ * @rsp:      Response buffer, written to by the app (must be TZ memory)
+ * @rsp_size: Size of the response buffer.
+ * @handle:   Serves one listener request, or NULL to refuse them all.
+ * @priv:     Passed to @handle.
+ *
+ * Like qcom_scm_qseecom_app_send(), but when QSEE answers with a listener
+ * request instead of the app's response, @handle is called with the
+ * listener id to serve the request sitting in that listener's shared buffer,
+ * and the app is resumed with the outcome -- repeatedly, for as long as it
+ * keeps asking. A listener id @handle does not know, or a nonzero return
+ * from it, is reported to QSEE as a failed request; the app then answers in
+ * its own terms, and this function still succeeds.
+ *
+ * The QSEECOM call lock is held across the whole exchange, so @handle must
+ * not issue QSEECOM calls itself.
+ *
+ * Return: Zero on success, nonzero on failure.
+ */
+int qcom_scm_qseecom_app_send_listener(u32 app_id, void *req, size_t req_size,
+				       void *rsp, size_t rsp_size,
+				       int (*handle)(void *priv, u32 listener_id),
+				       void *priv)
+{
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	int status;
+
+	desc.owner = QSEECOM_TZ_OWNER_TZ_APPS;
+	desc.svc = QSEECOM_TZ_SVC_APP_ID_PLACEHOLDER;
+	desc.cmd = QSEECOM_TZ_CMD_APP_SEND;
+	desc.arginfo = QCOM_SCM_ARGS(5, QCOM_SCM_VAL,
+				     QCOM_SCM_RW, QCOM_SCM_VAL,
+				     QCOM_SCM_RW, QCOM_SCM_VAL);
+	desc.args[0] = app_id;
+	desc.args[1] = qcom_tzmem_to_phys(req);
+	desc.args[2] = req_size;
+	desc.args[3] = qcom_tzmem_to_phys(rsp);
+	desc.args[4] = rsp_size;
+
+	mutex_lock(&qcom_scm_qseecom_call_lock);
+
+	status = qcom_scm_qseecom_call_locked(&desc, &res);
+	while (!status && res.result == QSEECOM_RESULT_INCOMPLETE) {
+		u32 listener_id = res.data;
+		u64 outcome = QSEECOM_RESULT_FAILURE;
+
+		if (res.resp_type == QSEECOM_SCM_RES_QSEOS_LISTENER_ID &&
+		    handle && !handle(priv, listener_id))
+			outcome = QSEECOM_RESULT_SUCCESS;
+
+		memset(&desc, 0, sizeof(desc));
+		desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+		desc.svc = QSEECOM_TZ_SVC_LISTENER;
+		desc.cmd = QSEECOM_TZ_CMD_LISTENER_RESPONSE;
+		desc.arginfo = QCOM_SCM_ARGS(2, QCOM_SCM_VAL, QCOM_SCM_VAL);
+		desc.args[0] = listener_id;
+		desc.args[1] = outcome;
+
+		status = qcom_scm_qseecom_call_locked(&desc, &res);
+	}
+
+	mutex_unlock(&qcom_scm_qseecom_call_lock);
+
+	if (status)
+		return status;
+
+	if (res.result == QSEECOM_RESULT_BLOCKED_ON_LISTENER)
+		return -EBUSY;
+
+	if (res.result != QSEECOM_RESULT_SUCCESS)
+		return -EIO;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_send_listener);
 
 /*
  * We do not yet support re-entrant calls via the qseecom interface. To prevent
