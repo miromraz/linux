@@ -651,4 +651,20 @@ source "drivers/misc/mchp_pci1xxxx/Kconfig"
 source "drivers/misc/keba/Kconfig"
 source "drivers/misc/amd-sbi/Kconfig"
 source "drivers/misc/rp1/Kconfig"
+
+config FPC1020
+	tristate "FPC fingerprint sensor behind a QSEE trustlet"
+	depends on OF && GPIOLIB
+	depends on QCOM_QSEECOM
+	help
+	  Say Y here to support an FPC1020-family match-on-chip fingerprint
+	  sensor whose SPI bus belongs to a TrustZone trustlet, as on the
+	  Google Pixel 2 XL. The driver owns the sensor's supply, reset and
+	  interrupt lines, loads the trustlet, and provides /dev/fpc_tee to
+	  carry commands to it and serve the file listeners it stores its
+	  templates through.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called fpc1020.
+
 endmenu
