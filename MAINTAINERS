@@ -10191,6 +10191,14 @@ F:	Documentation/devicetree/bindings/sound/foursemi,fs2105s.yaml
 F:	sound/soc/codecs/fs-amp-lib.*
 F:	sound/soc/codecs/fs210x.*
 
+FPC FINGERPRINT SENSOR BEHIND A QSEE TRUSTLET
+M:	Giuseppe Maggio <jertlok@proton.me>
+L:	linux-arm-msm@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/misc/fpc,fpc1020.yaml
+F:	drivers/misc/fpc1020.c
+F:	include/uapi/misc/fpc1020.h
+
 FPGA DFL DRIVERS
 M:	Xu Yilun <yilun.xu@intel.com>
 R:	Tom Rix <trix@redhat.com>
