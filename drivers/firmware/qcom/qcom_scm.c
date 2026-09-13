@@ -113,6 +113,7 @@ enum qcom_scm_qseecom_tz_svc {
 
 enum qcom_scm_qseecom_tz_cmd_app {
 	QSEECOM_TZ_CMD_APP_SEND			= 1,
+	QSEECOM_TZ_CMD_APP_START		= 1,	/* (QSEE_OS, APP_MGR) */
 	QSEECOM_TZ_CMD_APP_LOOKUP		= 3,
 };
 
@@ -2229,6 +2230,52 @@ int qcom_scm_qseecom_app_get_id(const char *app_name, u32 *app_id)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_get_id);
+
+/**
+ * qcom_scm_qseecom_app_load() - Load a QSEE app.
+ * @img_phys: The app image in TZ memory: its .mdt followed by each of its
+ *            .bNN segments, in order.
+ * @mdt_len:  Length of the .mdt part of the image.
+ * @img_len:  Length of the whole image.
+ * @app_id:   The ID of the loaded app.
+ *
+ * QSEE apps are 32-bit, so the image must lie below 4 GB. QSEE refuses to
+ * start an app that is already running, and on some firmware cannot look a
+ * running app up by name afterwards, so the returned ID may be the only
+ * handle there ever is to it.
+ *
+ * Return: Zero on success, nonzero on failure.
+ */
+int qcom_scm_qseecom_app_load(phys_addr_t img_phys, size_t mdt_len,
+			      size_t img_len, u32 *app_id)
+{
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	int status;
+
+	if (img_phys + img_len > SZ_4G)
+		return -EINVAL;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_APP_MGR;
+	desc.cmd = QSEECOM_TZ_CMD_APP_START;
+	desc.arginfo = QCOM_SCM_ARGS(3, QCOM_SCM_VAL, QCOM_SCM_VAL, QCOM_SCM_VAL);
+	desc.args[0] = mdt_len;
+	desc.args[1] = img_len;
+	desc.args[2] = img_phys;
+
+	status = qcom_scm_qseecom_call(&desc, &res);
+	if (status)
+		return status;
+
+	if (res.result != QSEECOM_RESULT_SUCCESS ||
+	    res.resp_type != QSEECOM_SCM_RES_APP_ID)
+		return -EIO;
+
+	*app_id = res.data;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_load);
 
 /**
  * qcom_scm_qseecom_app_send() - Send to and receive data from a given QSEE app.

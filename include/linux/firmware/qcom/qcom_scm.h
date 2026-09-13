@@ -170,12 +170,21 @@ int qcom_scm_shm_bridge_delete(u64 handle);
 #ifdef CONFIG_QCOM_QSEECOM
 
 int qcom_scm_qseecom_app_get_id(const char *app_name, u32 *app_id);
+int qcom_scm_qseecom_app_load(phys_addr_t img_phys, size_t mdt_len,
+			      size_t img_len, u32 *app_id);
 int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
 			      void *rsp, size_t rsp_size);
 
 #else /* CONFIG_QCOM_QSEECOM */
 
 static inline int qcom_scm_qseecom_app_get_id(const char *app_name, u32 *app_id)
+{
+	return -EINVAL;
+}
+
+static inline int qcom_scm_qseecom_app_load(phys_addr_t img_phys,
+					    size_t mdt_len, size_t img_len,
+					    u32 *app_id)
 {
 	return -EINVAL;
 }
