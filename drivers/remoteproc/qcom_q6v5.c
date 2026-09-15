@@ -11,6 +11,7 @@
 #include <linux/interconnect.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/ratelimit.h>
 #include <linux/soc/qcom/qcom_aoss.h>
 #include <linux/soc/qcom/smem.h>
 #include <linux/soc/qcom/smem_state.h>
@@ -165,8 +166,20 @@ static irqreturn_t q6v5_handover_interrupt(int irq, void *data)
 	struct qcom_q6v5 *q6v5 = data;
 
 	if (q6v5->handover_issued) {
-		dev_err_ratelimited(q6v5->dev,
-				    "Handover signaled, but it already happened\n");
+		/*
+		 * Some firmware re-asserts the handover bit continuously - the
+		 * SM7150 ADSP does so at ~5 Hz for as long as a sensor client
+		 * is streaming. The repeat itself is harmless, the handover
+		 * resources are released exactly once, but the default
+		 * ratelimit still passes 2 lines/s and buries the log. One
+		 * line a minute, plus the suppressed count, is enough to see
+		 * that it is happening and how fast.
+		 */
+		static DEFINE_RATELIMIT_STATE(handover_rs, 60 * HZ, 1);
+
+		if (__ratelimit(&handover_rs))
+			dev_err(q6v5->dev,
+				"Handover signaled, but it already happened\n");
 		return IRQ_HANDLED;
 	}
 
