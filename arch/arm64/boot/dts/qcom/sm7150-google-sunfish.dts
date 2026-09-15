@@ -1052,6 +1052,26 @@
 	status = "okay";
 };
 
+/*
+ * The RTC has no way of its own to store the epoch: the PM6150 counter is
+ * battery-backed and keeps counting, but the offset from it to Unix time is
+ * lost at every boot, and the UEFI route is unavailable (U-Boot declares
+ * SetVariable unsupported at runtime). Park the offset in the PMIC's SDAM
+ * instead, the way sc8280xp-crd.dts does.
+ *
+ * This SDAM belongs to the fuel gauge, so the cell was picked from a dump of
+ * the live block rather than guessed. qcom-spmi-sdam puts SDAM_MEM_START at
+ * 0x40 and sizes the block from register 0x44 (reads 4 -> 4*32 = 128), so the
+ * usable window is 0x40-0x7f; 0x40, 0x41 and 0x44 are read-only. In that
+ * window the gauge leaves exactly one run of six zero bytes, 0x76-0x7b, and
+ * 0x78 is the aligned four inside it. 0x7c is NOT free -- it reads 0x31.
+ */
+&pm6150_qg_sdam {
+	rtc_offset: rtc-offset@78 {
+		reg = <0x78 0x4>;
+	};
+};
+
 &pm6150_qgauge {
 	monitored-battery = <&battery>;
 	power-supplies = <&pm6150_charger>;
@@ -1072,6 +1092,9 @@
  */
 
 &pm6150_rtc {
+	nvmem-cells = <&rtc_offset>;
+	nvmem-cell-names = "offset";
+
 	status = "okay";
 };
 
