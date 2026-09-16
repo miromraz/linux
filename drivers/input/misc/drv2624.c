@@ -17,7 +17,7 @@
  *   - Short rumbles (<DRV2624_SHORT_PLAY_MS): the chip is parked in
  *     RAM Waveform Sequencer mode with effect 1 (CLICK) pre-selected.
  *     The play callback just toggles the GO bit, the chip plays the
- *     pre-tuned waveform from the loaded firmware blob, and the
+ *     pre-tuned waveform out of its own RAM, and the
  *     onboard auto-brake stops the LRA cleanly. This is what
  *     feedbackd uses for button-press / keyboard events and is the
  *     path that produces stock-Android-style crisp clicks.
@@ -27,9 +27,9 @@
  *     back to the Waveform Sequencer park state for the next short
  *     event.
  *
- * The driver embeds the 25-byte ROM waveform library at build time
- * (effects 1=CLICK, 2=TICK, 3=DOUBLE_CLICK, 4=HEAVY_CLICK — verbatim
- * from Google's drv2624.bin) and uploads it to chip RAM at probe.
+ * The driver synthesises its waveform library at probe from the
+ * actuator's resonant frequency and uploads it to chip RAM, so there
+ * is no firmware blob to ship or load.
  * A `ti,autocal-comp` byte-array DT property can carry the device's
  * factory autocal compensation; if absent the chip's internal
  * defaults are used.
@@ -92,27 +92,33 @@
 #define DRV2624_DEF_LRA_HZ		205
 
 /*
- * Pre-tuned ROM waveform library, lifted verbatim from the post-header
- * RAM image of Google's drv2624.bin (the same library Pixel's downstream
- * HAL uploads). 25 bytes: an effect pointer table followed by
- * voltage/time sample pairs the chip's playback engine resolves on its
- * own. Effects: 1=CLICK, 2=TICK, 3=DOUBLE_CLICK, 4=HEAVY_CLICK.
+ * Waveform library layout, per the DRV2624 datasheet (SLOS893D section
+ * 7.6.9.2 "Loading Data to RAM"):
  *
- * Embedded rather than loaded via request_firmware because:
- *   - request_firmware(_nowait) goes through firmware_class.path on this
- *     SoC (msm-firmware-loader sets it to a path that does not fall
- *     through to /lib/firmware in practice), and silently fails;
- *   - the data is tiny, stable, and not vendor-secret;
- *   - synchronous upload from probe removes the chip-state race where
- *     a haptic event arrives before the async callback finishes and
- *     leaves the chip stuck in RTP mode.
+ *   byte 0		revision, must be 0
+ *   bytes 1..3N	N header entries of 3 bytes each: the effect's start
+ *			address (upper byte, lower byte) followed by a
+ *			configuration byte holding WAVEFORM_REPEATS[2:0]
+ *			and the effect size[4:0] in bytes (even, 2..30).
+ *			An entry's position in the header is its effect ID,
+ *			numbered from 1.
+ *   then		the waveform data: interleaved voltage/time pairs.
+ *			Voltage is 7-bit signed, full scale 63, and its MSB
+ *			is the linear-ramp flag. Time is a tick count; a
+ *			tick is 1 ms because drv2624_hw_init() sets
+ *			PLAYBACK_INTERVAL.
+ *
+ * We build exactly one effect, ID 1, because that is the only one the
+ * input FF_RUMBLE path can select — FF_RUMBLE carries a magnitude and a
+ * duration, not an effect name, so there is no way for userspace to ask
+ * for a second library entry.
  */
-static const u8 drv2624_rom_library[] = {
-	0x00, 0x00, 0x0d, 0x02, 0x00, 0x0f, 0x02, 0x00,
-	0x11, 0x06, 0x00, 0x17, 0x02, 0x3f, 0x06, 0x3f,
-	0x06, 0x3f, 0x08, 0x00, 0x8d, 0x3f, 0x0c, 0x3f,
-	0x06,
-};
+#define DRV2624_ROM_HEADER_ENTRIES	1
+#define DRV2624_ROM_DATA_START		(1 + 3 * DRV2624_ROM_HEADER_ENTRIES)
+#define DRV2624_ROM_LIB_SIZE		(DRV2624_ROM_DATA_START + 2)
+
+/* Voltage field is 7-bit signed; bit 7 is the ramp flag, not magnitude. */
+#define DRV2624_AMP_FULL_SCALE		63
 
 /*
  * Below this requested rumble length we use ROM CLICK from the loaded
@@ -121,11 +127,8 @@ static const u8 drv2624_rom_library[] = {
  */
 #define DRV2624_SHORT_PLAY_MS		100
 
-/* Pre-set ROM effect IDs in TI/Pixel's drv2624.bin library */
+/* Effect ID of the click we build in drv2624_upload_rom(). */
 #define DRV2624_ROM_EFFECT_CLICK	1
-#define DRV2624_ROM_EFFECT_TICK		2
-#define DRV2624_ROM_EFFECT_DCLICK	3
-#define DRV2624_ROM_EFFECT_HEAVY	4
 
 enum drv2624_actuator {
 	DRV2624_ACTUATOR_LRA,
@@ -149,7 +152,6 @@ struct drv2624_data {
 	u8 autocal[3];
 	bool autocal_present;
 
-	const u8 *fw_ram;
 	size_t fw_ram_size;
 
 	u8 magnitude;
@@ -172,7 +174,7 @@ static const struct regmap_config drv2624_regmap_config = {
 /*
  * Park the chip in RAM Waveform Sequencer mode with effect 1 (CLICK)
  * pre-selected. With the chip parked this way, the worker's GO write
- * triggers the ROM CLICK from the loaded firmware library — that's
+ * triggers the ROM CLICK from the uploaded library — that's
  * the path that feels like stock Android, vs. raw RTP which sounds
  * buzzy on a narrow-band LRA.
  */
@@ -235,7 +237,7 @@ static void drv2624_worker(struct work_struct *work)
 
 	/*
 	 * Long effect (or chip in RTP mode) → RTP path. End-of-effect
-	 * (magnitude=0 above) re-parks in WAV_SEQ if firmware is loaded.
+	 * (magnitude=0 above) re-parks in WAV_SEQ if the library is loaded.
 	 */
 	error = regmap_write(h->regmap, DRV2624_REG_MODE, DRV2624_MODE_RTP);
 	if (error) {
@@ -282,14 +284,41 @@ static void drv2624_close(struct input_dev *input)
 }
 
 /*
- * Synchronously upload the embedded ROM library to chip RAM. The chip's
- * playback engine resolves the per-effect pointer table + sample pairs
- * itself; we just bulk-write the bytes starting at RAM address 0.
+ * Build the single-click library and upload it synchronously to chip RAM
+ * starting at address 0. The chip's playback engine walks the header
+ * itself, so we only have to lay the bytes out in the documented order.
+ *
+ * Synchronous upload from probe (rather than request_firmware_nowait)
+ * removes the chip-state race where a haptic event arrives before an
+ * async callback finishes and leaves the chip stuck in RTP mode.
  */
 static int drv2624_upload_rom(struct drv2624_data *h)
 {
+	u8 lib[DRV2624_ROM_LIB_SIZE];
+	unsigned int click_ms, freq_hz;
 	int error;
 	size_t i;
+
+	/*
+	 * Drive for one resonant period, rounded to the 1 ms playback
+	 * tick: long enough for the LRA to reach peak displacement, short
+	 * enough that AUTO_BRK_OL starts braking before the next cycle
+	 * accelerates it again. That single-period impulse is what makes a
+	 * click read as a tap rather than a buzz. A 172 Hz actuator (Pixel
+	 * sunfish) gives 6 ms; the 205 Hz default gives 5 ms.
+	 *
+	 * freq_hz is re-checked here because ti,lra-frequency-hz comes from
+	 * DT and a 0 would divide by zero.
+	 */
+	freq_hz = h->lra_freq_hz ? h->lra_freq_hz : DRV2624_DEF_LRA_HZ;
+	click_ms = clamp_t(unsigned int, DIV_ROUND_CLOSEST(1000, freq_hz), 1, 255);
+
+	lib[0] = 0;				/* revision */
+	lib[1] = DRV2624_ROM_DATA_START >> 8;	/* effect 1 start, upper */
+	lib[2] = DRV2624_ROM_DATA_START & 0xFF;	/* effect 1 start, lower */
+	lib[3] = 2;				/* no repeats, 2 data bytes */
+	lib[4] = DRV2624_AMP_FULL_SCALE;	/* voltage */
+	lib[5] = click_ms;			/* time, in 1 ms ticks */
 
 	error = regmap_write(h->regmap, DRV2624_REG_RAM_ADDR_UPPER, 0);
 	if (error)
@@ -297,13 +326,12 @@ static int drv2624_upload_rom(struct drv2624_data *h)
 	error = regmap_write(h->regmap, DRV2624_REG_RAM_ADDR_LOWER, 0);
 	if (error)
 		return error;
-	for (i = 0; i < ARRAY_SIZE(drv2624_rom_library); i++) {
-		error = regmap_write(h->regmap, DRV2624_REG_RAM_DATA,
-				     drv2624_rom_library[i]);
+	for (i = 0; i < ARRAY_SIZE(lib); i++) {
+		error = regmap_write(h->regmap, DRV2624_REG_RAM_DATA, lib[i]);
 		if (error)
 			return error;
 	}
-	h->fw_ram_size = ARRAY_SIZE(drv2624_rom_library);
+	h->fw_ram_size = ARRAY_SIZE(lib);
 	return 0;
 }
 
@@ -442,7 +470,7 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		}
 	}
 
-	/* Upload the embedded ROM waveform library to chip RAM. */
+	/* Build and upload the waveform library to chip RAM. */
 	error = drv2624_upload_rom(h);
 	if (error)
 		return error;
