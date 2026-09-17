@@ -1519,18 +1519,27 @@ static int imx363_probe(struct i2c_client *client)
 	if (ret)
 		goto error_handler_free;
 
-	ret = v4l2_async_register_subdev_sensor(&imx363->sd);
-	if (ret < 0)
-		goto error_media_entity;
-
+	/*
+	 * Enable runtime PM before registering the subdev: once it is
+	 * registered a bound consumer may power the sensor immediately, so
+	 * runtime PM must already be active (the device was powered on
+	 * manually above).
+	 */
 	pm_runtime_set_active(&client->dev);
 	pm_runtime_enable(&client->dev);
+
+	ret = v4l2_async_register_subdev_sensor(&imx363->sd);
+	if (ret < 0)
+		goto error_media_entity_runtime_pm;
+
 	pm_runtime_idle(&client->dev);
 	v4l2_fwnode_endpoint_free(&ep);
 
 	return 0;
 
-error_media_entity:
+error_media_entity_runtime_pm:
+	pm_runtime_disable(&client->dev);
+	pm_runtime_set_suspended(&client->dev);
 	media_entity_cleanup(&imx363->sd.entity);
 
 error_handler_free:
