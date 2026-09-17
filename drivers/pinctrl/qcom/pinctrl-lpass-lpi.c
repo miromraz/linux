@@ -185,6 +185,16 @@ static int lpi_config_get(struct pinctrl_dev *pctldev,
 	int pull;
 	int ret;
 
+	/*
+	 * gpio-reserved-ranges only sets the gpiolib valid_mask; the pinctrl
+	 * debugfs (pinconf-pins/pinconf-groups) still iterates every pin and
+	 * would read a reserved pad here. Some pads are XPU-fenced and reading
+	 * them wedges the SoC, so refuse invalid lines. Before the gpiochip is
+	 * registered gpiochip_line_is_valid() has no mask and allows all pins.
+	 */
+	if (!gpiochip_line_is_valid(&state->chip, pin))
+		return -EINVAL;
+
 	ret = lpi_gpio_read(state, pin, LPI_GPIO_CFG_REG, &ctl_reg);
 	if (ret)
 		return ret;
@@ -273,6 +283,10 @@ static int lpi_config_set(struct pinctrl_dev *pctldev, unsigned int group,
 	const struct lpi_pingroup *g;
 	u32 val;
 	int i, ret;
+
+	/* Never touch an XPU-fenced/reserved pad; see lpi_config_get(). */
+	if (!gpiochip_line_is_valid(&pctrl->chip, group))
+		return -EINVAL;
 
 	g = &pctrl->data->groups[group];
 	for (i = 0; i < nconfs; i++) {
