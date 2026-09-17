@@ -2030,7 +2030,6 @@ static const struct camss_subdev_resources csiphy_res_7150[] = {
 	},
 };
 
-
 static const struct camss_subdev_resources csid_res_7150[] = {
 	/* CSID0 */
 	{
