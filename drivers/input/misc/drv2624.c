@@ -49,12 +49,10 @@
 #define DRV2624_REG_LRA_PERIOD_H	0x05	/* measured closed-loop period */
 #define DRV2624_REG_LRA_PERIOD_L	0x06
 #define DRV2624_REG_MODE		0x07
-#define   DRV2624_MODE_STANDBY		BIT(6)
 #define   DRV2624_MODE_MASK		GENMASK(1, 0)
-#define   DRV2624_MODE_RAM_PLAYBACK	0x00
+/* MODE[1:0], datasheet Table 8-10: 0 RTP, 1 waveform sequencer, 2 diag, 3 autocal */
+#define   DRV2624_MODE_RTP		0x00
 #define   DRV2624_MODE_RAM_WAVE_SEQ	0x01
-#define   DRV2624_MODE_RTP		0x02
-#define   DRV2624_MODE_DIAGNOSTICS	0x03
 #define DRV2624_REG_CONTROL1		0x08
 #define   DRV2624_CTRL1_LRA		BIT(7)
 #define   DRV2624_CTRL1_AUTO_BRK_OL	BIT(3)
@@ -353,13 +351,6 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	}
 
 	/*
-	 * Take the chip into standby while we program it. The standby bit
-	 * blocks playback; we exit it at the end after parking in WAV_SEQ.
-	 */
-	regmap_write(h->regmap, DRV2624_REG_MODE,
-		     DRV2624_MODE_STANDBY | DRV2624_MODE_RAM_WAVE_SEQ);
-
-	/*
 	 * CONTROL1: set actuator type (LRA), enable open-loop auto-brake (a
 	 * brake waveform played at end of drive in open loop) and auto-brake
 	 * into standby (decelerate the LRA when GO returns to 0 rather than
@@ -637,8 +628,8 @@ static int drv2624_suspend(struct device *dev)
 	if (!input_device_enabled(h->input_dev))
 		return 0;
 
-	regmap_update_bits(h->regmap, DRV2624_REG_MODE,
-			   DRV2624_MODE_STANDBY, DRV2624_MODE_STANDBY);
+	/* No software standby bit exists; stop playback and power down. */
+	regmap_write(h->regmap, DRV2624_REG_GO, 0);
 	if (h->enable_gpio)
 		gpiod_set_value_cansleep(h->enable_gpio, 0);
 	if (h->vdd)
