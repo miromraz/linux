@@ -67,7 +67,7 @@
 #define DRV2624_REG_WAV_SEQ_LOOP1	0x17
 #define DRV2624_REG_RATED_VOLT		0x1F
 #define DRV2624_REG_OD_CLAMP		0x20
-#define DRV2624_REG_AUTOCAL_COMP	0x21	/* compensation result, 3 bytes 0x21..0x23 */
+#define DRV2624_REG_AUTOCAL_COMP	0x21	/* A_CAL_COMP + A_CAL_BEMF, 0x21/0x22 */
 #define DRV2624_REG_DRIVE_TIME		0x27
 #define DRV2624_REG_BLANKING_IDISS	0x28
 #define DRV2624_REG_ZC_DET_TIME		0x29
@@ -146,7 +146,7 @@ struct drv2624_data {
 	u32 ol_lra_period;	/* DT-supplied per-unit factory cal; 0 = derive from freq */
 	u8 rated_volt_raw;	/* raw register value; 0 = leave at chip default */
 	u8 od_clamp_raw;	/* raw register value; 0 = leave at chip default */
-	u8 autocal[3];
+	u8 autocal[2];
 	bool autocal_present;
 
 	size_t fw_ram_size;
@@ -397,16 +397,17 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	}
 
 	/*
-	 * Apply factory autocal compensation if present. Pixel devices
-	 * ship these three bytes per-unit in /persist/haptics/drv2624.cal;
-	 * userspace (or DT, via the optional ti,autocal-comp property)
-	 * passes them to the driver. Without them the chip falls back to
-	 * its internal calibration defaults — usable but less tuned.
+	 * Apply factory autocal compensation if present: A_CAL_COMP (0x21)
+	 * and A_CAL_BEMF (0x22) only. Pixel devices ship these two bytes
+	 * per-unit in /persist/haptics/drv2624.cal; userspace (or DT, via
+	 * the optional ti,autocal-comp property) passes them to the driver.
+	 * 0x23 holds NG_THRESH/FB_BRAKE_FACTOR/LOOP_GAIN/BEMF_GAIN and must
+	 * be left at its reset default. Without the bytes the chip falls
+	 * back to its internal calibration defaults — usable but less tuned.
 	 */
 	if (h->autocal_present) {
 		regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 0, h->autocal[0]);
 		regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 1, h->autocal[1]);
-		regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 2, h->autocal[2]);
 	}
 
 	/* LRA timing: DRIVE_TIME is the half-cycle drive duration. */
@@ -528,8 +529,8 @@ static int drv2624_probe(struct i2c_client *client)
 	/*
 	 * Optional factory autocal compensation. The board's per-device
 	 * calibration file (e.g. /persist/haptics/drv2624.cal on Pixel
-	 * sunfish) carries an "autocal: X Y Z" line; pass those three
-	 * bytes via DT as ti,autocal-comp.
+	 * sunfish) carries an "autocal: X Y" line; pass those two bytes
+	 * (A_CAL_COMP, A_CAL_BEMF) via DT as ti,autocal-comp.
 	 */
 	if (!device_property_read_u8_array(dev, "ti,autocal-comp",
 					   h->autocal, sizeof(h->autocal)))
