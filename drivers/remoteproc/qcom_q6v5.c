@@ -173,11 +173,11 @@ static irqreturn_t q6v5_handover_interrupt(int irq, void *data)
 		 * resources are released exactly once, but the default
 		 * ratelimit still passes 2 lines/s and buries the log. One
 		 * line a minute, plus the suppressed count, is enough to see
-		 * that it is happening and how fast.
+		 * that it is happening and how fast. The state is per-q6v5
+		 * (see qcom_q6v5_init) so an ADSP storm cannot swallow a
+		 * genuine modem or CDSP handover message.
 		 */
-		static DEFINE_RATELIMIT_STATE(handover_rs, 60 * HZ, 1);
-
-		if (__ratelimit(&handover_rs))
+		if (__ratelimit(&q6v5->handover_rl))
 			dev_err(q6v5->dev,
 				"Handover signaled, but it already happened\n");
 		return IRQ_HANDLED;
@@ -272,6 +272,9 @@ int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
 
 	init_completion(&q6v5->start_done);
 	init_completion(&q6v5->stop_done);
+
+	/* Per-instance so one remote's handover storm cannot mute another's */
+	ratelimit_state_init(&q6v5->handover_rl, 60 * HZ, 1);
 
 	q6v5->wdog_irq = platform_get_irq_byname(pdev, "wdog");
 	if (q6v5->wdog_irq < 0)
