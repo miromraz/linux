@@ -19,16 +19,19 @@ allOf:
   - if:
       properties:
         compatible:
-          const: st,stmfts5
+          contains:
+            const: st,stmfts5
     then:
       required:
         - mode-switch-gpios
 
 properties:
   compatible:
-    enum:
-      - st,stmfts
-      - st,stmfts5
+    oneOf:
+      - const: st,stmfts
+      - items:
+          - const: st,stmfts5
+          - const: st,stmfts
 
   reg:
     maxItems: 1
