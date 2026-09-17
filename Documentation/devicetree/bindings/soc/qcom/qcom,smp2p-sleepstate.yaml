@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/qcom/qcom,smp2p-sleepstate.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm SMP2P sleepstate notifier
+
+maintainers:
+  - Miroslav Mráz <mraz.miro@seznam.cz>
+
+description:
+  Tells the remote processors when the application processor is about to
+  suspend, over the outbound "sleepstate" SMP2P entry, and consumes the
+  remote's inbound "sleepstate_see" acknowledgment interrupt. See
+  qcom,smp2p.yaml for the underlying edge and its entry subnodes.
+
+properties:
+  compatible:
+    const: qcom,smp2p-sleepstate
+
+  qcom,smem-states:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    maxItems: 1
+    description: The outbound "sleepstate" SMP2P entry.
+
+  interrupts:
+    maxItems: 1
+    description: The inbound "sleepstate_see" acknowledgment.
+
+required:
+  - compatible
+  - qcom,smem-states
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    sleepstate {
+        compatible = "qcom,smp2p-sleepstate";
+        qcom,smem-states = <&smp2p_sleepstate_out 0>;
+        interrupts-extended = <&smp2p_sleepstate_in 0 IRQ_TYPE_EDGE_RISING>;
+    };
