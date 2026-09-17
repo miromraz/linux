@@ -46,10 +46,11 @@ properties:
   ti,rated-voltage-reg:
     description: |
       Optional raw RATED_VOLT register value (0x1F). The chip's reset
-      default (0x3E) is safe for typical LRAs; only set this when the
+      default (0x3F) is safe for typical LRAs; only set this when the
       board's downstream HAL uses a different value. The voltage
       formula depends on f_LRA, playback interval, OD_CLAMP_LATCH and
       chip revision, so the driver does not derive this from mV.
+    $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 1
     maximum: 255
 
@@ -57,6 +58,7 @@ properties:
     description: |
       Optional raw OD_CLAMP register value (0x20). Defaults to the
       chip reset value (0x89) when omitted.
+    $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 1
     maximum: 255
 
@@ -69,22 +71,23 @@ properties:
   ti,autocal-comp:
     description: |
       Optional per-device factory autocal compensation bytes. The
-      driver writes these three values to the AUTOCAL_COMP register
-      bank (0x21..0x23) at init time. For Pixel devices this carries
-      the values from /persist/haptics/drv2624.cal's "autocal: X Y Z"
+      driver writes these two values to A_CAL_COMP (0x21) and
+      A_CAL_BEMF (0x22) at init time. For Pixel devices this carries
+      the values from /persist/haptics/drv2624.cal's "autocal: X Y"
       line. If omitted, the chip's internal autocal default is used.
     $ref: /schemas/types.yaml#/definitions/uint8-array
-    minItems: 3
-    maxItems: 3
+    minItems: 2
+    maxItems: 2
 
   ti,ol-lra-period:
     description: |
       Optional per-device factory-calibrated open-loop LRA period as
-      the raw 9-bit register value (~24.39 us/tick). Overrides the
+      the raw 10-bit register value (~24.615 us/tick). Overrides the
       value derived from ti,lra-frequency-hz. Carries the
       "lra_period: NNN" line from Pixel's /persist/haptics/drv2624.cal.
+    $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 1
-    maximum: 511
+    maximum: 1023
 
 required:
   - compatible
