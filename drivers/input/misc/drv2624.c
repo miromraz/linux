@@ -487,6 +487,7 @@ static int drv2624_probe(struct i2c_client *client)
 	struct drv2624_data *h;
 	const char *actuator;
 	int error;
+	u32 val;
 
 	h = devm_kzalloc(dev, sizeof(*h), GFP_KERNEL);
 	if (!h)
@@ -515,8 +516,10 @@ static int drv2624_probe(struct i2c_client *client)
 	 * these are only needed when a board's downstream HAL set
 	 * different values (e.g. a stronger or weaker LRA). Skip if zero.
 	 */
-	device_property_read_u8(dev, "ti,rated-voltage-reg", &h->rated_volt_raw);
-	device_property_read_u8(dev, "ti,od-clamp-reg", &h->od_clamp_raw);
+	if (!device_property_read_u32(dev, "ti,rated-voltage-reg", &val))
+		h->rated_volt_raw = val;
+	if (!device_property_read_u32(dev, "ti,od-clamp-reg", &val))
+		h->od_clamp_raw = val;
 
 	/*
 	 * Optional per-unit factory-calibrated open-loop LRA period (raw
