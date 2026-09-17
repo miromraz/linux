@@ -549,6 +549,18 @@ static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
 
 static int smb_set_fast_charge_current(struct smb_chip *chip, unsigned int val)
 {
+	/*
+	 * current_limit_max_ua is the USBIN *input* ceiling. The pack's own
+	 * FCC limit is the DT constant-charge-current-max property; clamp to it
+	 * when present so a high 9V request cannot push the cell past its
+	 * rating. batt_info is populated in probe before this can be reached
+	 * from the work queue.
+	 */
+	if (chip->batt_info &&
+	    chip->batt_info->constant_charge_current_max_ua > 0)
+		val = min(val, (unsigned int)
+			  chip->batt_info->constant_charge_current_max_ua);
+
 	if (val > chip->current_limit_max_ua) {
 		dev_err(chip->dev,
 			"Can't set fast charge current higher than %u uA\n", chip->current_limit_max_ua);
@@ -592,9 +604,16 @@ static bool smb_batt_temp_derate(struct smb_chip *chip)
 
 /*
  * Apply an active 9V USB PD contract reported by the Type-C port (linked via
- * the "power-supplies" phandle). The input stage rejects USBIN outside the
- * allowed range, so the allowance has to be widened before any current flows -
- * which is also why this runs before the online check.
+ * the "power-supplies" phandle). The 9V allowance is widened only after the
+ * supplier is confirmed online and VOLTAGE_NOW is already inside the 8.5-9.5V
+ * window - i.e. after, not before, the online check.
+ *
+ * Open question: the input stage is documented to reject USBIN outside the
+ * allowed range, which would imply the allowance must be widened before 9V
+ * could ever be observed; yet in practice VOLTAGE_NOW reads ~9V here with the
+ * default allowance still in place. Left as observed because it works on the
+ * hardware tested; the ordering is not proven against a source that only ramps
+ * to 9V after the allowance is set.
  *
  * Only 9V is handled: nothing above that has been validated on this charge
  * path. Anything else (including plain 5V, PD or not) restores the hardware
@@ -606,7 +625,7 @@ static bool smb_batt_temp_derate(struct smb_chip *chip)
 static int smb5_pd_apply(struct smb_chip *chip)
 {
 	union power_supply_propval online, volt, curr;
-	unsigned int current_ua;
+	unsigned int current_ua, prev_allow;
 	int rc;
 
 	if (chip->gen != SMB5)
@@ -647,6 +666,18 @@ static int smb5_pd_apply(struct smb_chip *chip)
 	if (rc < 0)
 		return rc;
 
+	/*
+	 * Remember the current allowance so any later failure can put it back:
+	 * leaving the override forced to 9V would make the input stage reject a
+	 * subsequent 5V source until reboot.
+	 */
+	rc = regmap_read(chip->regmap,
+			 chip->base + SMB5_USBIN_ADAPTER_ALLOW_OVERRIDE,
+			 &prev_allow);
+	if (rc < 0)
+		return rc;
+	prev_allow &= SMB5_ADAPTER_ALLOW_OVERRIDE_MASK;
+
 	rc = regmap_update_bits(chip->regmap,
 				chip->base + SMB5_USBIN_ADAPTER_ALLOW_OVERRIDE,
 				SMB5_ADAPTER_ALLOW_OVERRIDE_MASK,
@@ -665,7 +696,7 @@ static int smb5_pd_apply(struct smb_chip *chip)
 						       FAST_CHARGE_CURRENT_9V_UA);
 	if (rc < 0) {
 		dev_err(chip->dev, "Couldn't set fast charge current: %d\n", rc);
-		return rc;
+		goto restore_allow;
 	}
 
 	/* Bounded by what the source actually advertised at 9V */
@@ -673,12 +704,18 @@ static int smb5_pd_apply(struct smb_chip *chip)
 
 	rc = smb_set_current_limit(chip, current_ua);
 	if (rc < 0)
-		return rc;
+		goto restore_allow;
 
 	/* Re-check the pack temperature for as long as the contract lasts */
 	schedule_delayed_work(&chip->status_change_work,
 			      msecs_to_jiffies(BATT_TEMP_POLL_MS));
 	return 0;
+
+restore_allow:
+	regmap_update_bits(chip->regmap,
+			   chip->base + SMB5_USBIN_ADAPTER_ALLOW_OVERRIDE,
+			   SMB5_ADAPTER_ALLOW_OVERRIDE_MASK, prev_allow);
+	return rc;
 }
 
 static void smb_status_change_work(struct work_struct *work)
@@ -923,8 +960,20 @@ static irqreturn_t smb_handle_batt_overvoltage(int irq, void *data)
 static irqreturn_t smb_handle_usb_plugin(int irq, void *data)
 {
 	struct smb_chip *chip = data;
+	int usb_online = 0;
 
 	power_supply_changed(chip->chg_psy);
+
+	/*
+	 * On removal, stop the 9V contract's self-rearming temperature poll;
+	 * otherwise it keeps re-scheduling itself after the charger is gone.
+	 * This is a threaded IRQ, so the regmap read may sleep.
+	 */
+	smb_get_prop_usb_online(chip, &usb_online);
+	if (!usb_online) {
+		cancel_delayed_work(&chip->status_change_work);
+		return IRQ_HANDLED;
+	}
 
 	schedule_delayed_work(&chip->status_change_work,
 			      msecs_to_jiffies(1500));
@@ -1279,7 +1328,7 @@ static int smb_probe(struct platform_device *pdev)
 
 	/*
 	 * Optional: only boards that wire it up may fast charge from a 9V
-	 * contract. Without it smb_batt_too_hot() keeps the default current.
+	 * contract. Without it smb_batt_temp_derate() keeps the default current.
 	 */
 	chip->batt_therm_chan = devm_iio_channel_get(chip->dev, "batt-therm");
 	if (PTR_ERR(chip->batt_therm_chan) == -EPROBE_DEFER)
