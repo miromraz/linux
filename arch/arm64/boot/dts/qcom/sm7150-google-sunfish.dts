@@ -880,7 +880,7 @@
 		 * shared default that still feels right on most Pixel 4a
 		 * LRAs we've seen.
 		 */
-		ti,autocal-comp = /bits/ 8 <18 150 0>;
+		ti,autocal-comp = /bits/ 8 <18 150>;
 
 		/*
 		 * Raw 9-bit open-loop period from the same cal file
