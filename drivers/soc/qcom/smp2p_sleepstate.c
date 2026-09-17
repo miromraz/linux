@@ -10,8 +10,10 @@
  * giving the remote a moment to quiesce, avoids that.
  */
 
+#include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -28,6 +30,7 @@
 struct smp2p_sleepstate {
 	struct qcom_smem_state *state;
 	struct notifier_block nb;
+	struct completion ack;
 	u32 mask;
 };
 
@@ -43,8 +46,16 @@ static int smp2p_sleepstate_pm_notify(struct notifier_block *nb,
 
 	switch (event) {
 	case PM_SUSPEND_PREPARE:
+		/*
+		 * Arm the ack before clearing the bit, then wait for the remote
+		 * to acknowledge on "sleepstate_see". A live ADSP acks in well
+		 * under the ceiling and we return early; with no DSP loaded the
+		 * ack never comes and the timeout bounds the delay.
+		 */
+		reinit_completion(&ss->ack);
 		smp2p_sleepstate_set(ss, false);
-		usleep_range(SLEEPSTATE_QUIESCE_US, SLEEPSTATE_QUIESCE_US + 500);
+		wait_for_completion_timeout(&ss->ack,
+					    usecs_to_jiffies(SLEEPSTATE_QUIESCE_US));
 		break;
 	case PM_POST_SUSPEND:
 		smp2p_sleepstate_set(ss, true);
@@ -57,11 +68,15 @@ static int smp2p_sleepstate_pm_notify(struct notifier_block *nb,
 /*
  * The remote acknowledges us on the "sleepstate_see" entry. It is not a wakeup
  * request: with the sensor stack streaming, this fires at ~2.5 Hz, so treating
- * it as one aborts every suspend. Consume it and leave the interrupt counter
- * behind - it is the only direct measure of how busy the sensor island is.
+ * it as one would abort every suspend. Complete the ack the suspend path may be
+ * waiting on (harmless when it is not) and leave the interrupt counter behind -
+ * it is the only direct measure of how busy the sensor island is.
  */
 static irqreturn_t smp2p_sleepstate_isr(int irq, void *data)
 {
+	struct smp2p_sleepstate *ss = data;
+
+	complete(&ss->ack);
 	return IRQ_HANDLED;
 }
 
@@ -74,6 +89,8 @@ static int smp2p_sleepstate_probe(struct platform_device *pdev)
 	ss = devm_kzalloc(&pdev->dev, sizeof(*ss), GFP_KERNEL);
 	if (!ss)
 		return -ENOMEM;
+
+	init_completion(&ss->ack);
 
 	ss->state = devm_qcom_smem_state_get(&pdev->dev, NULL, &bit);
 	if (IS_ERR(ss->state))
@@ -94,12 +111,21 @@ static int smp2p_sleepstate_probe(struct platform_device *pdev)
 			return dev_err_probe(&pdev->dev, ret,
 					     "failed to request sleepstate irq\n");
 	} else if (irq != -ENXIO) {
-		return dev_err_probe(&pdev->dev, irq, "bad sleepstate irq\n");
+		/*
+		 * -ENXIO means no ack interrupt is wired up, which is allowed
+		 * (the suspend path then just waits out the timeout). Anything
+		 * else, including a bogus 0, is a real failure - map 0 to
+		 * -EINVAL so dev_err_probe() cannot return success.
+		 */
+		return dev_err_probe(&pdev->dev, irq ? irq : -EINVAL,
+				     "bad sleepstate irq\n");
 	}
 
 	/*
-	 * Run before the notifiers that freeze userspace, so the remote has
-	 * already been told by the time its RPC service stops responding.
+	 * Every PM notifier already runs before userspace is frozen, so the
+	 * priority does not order us against the freezer. INT_MAX only puts us
+	 * ahead of the other PM notifiers, telling the remote as early as
+	 * possible within PM_SUSPEND_PREPARE.
 	 */
 	ss->nb.notifier_call = smp2p_sleepstate_pm_notify;
 	ss->nb.priority = INT_MAX;
