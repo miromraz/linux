@@ -60,9 +60,7 @@
 #define DRV2624_REG_GO			0x0C
 #define   DRV2624_GO_BIT		BIT(0)
 #define DRV2624_REG_CONTROL2		0x0D
-#define   DRV2624_CTRL2_LIB_LRA		BIT(7)
-#define   DRV2624_CTRL2_INTERVAL_1MS	BIT(5)
-#define   DRV2624_CTRL2_STOP_BIT	BIT(0)
+#define   DRV2624_CTRL2_INTERVAL_1MS	BIT(5)	/* PLAYBACK_INTERVAL, Table 8-17 */
 #define DRV2624_REG_RTP_INPUT		0x0E
 #define DRV2624_REG_WAV_FRM_SEQ1	0x0F
 #define DRV2624_REG_WAV_FRM_SEQ2	0x10
@@ -201,14 +199,8 @@ static void drv2624_worker(struct work_struct *work)
 
 	/* Magnitude 0 means stop; the FF memless layer calls this at end-of-effect. */
 	if (!h->magnitude) {
-		/*
-		 * Pulse the STOP bit only — full writes here clear LIB_LRA and
-		 * route subsequent ROM playback through the ERM library, which
-		 * sounds buzzy on an LRA.
-		 */
-		regmap_update_bits(h->regmap, DRV2624_REG_CONTROL2,
-				   DRV2624_CTRL2_STOP_BIT,
-				   DRV2624_CTRL2_STOP_BIT);
+		/* Stop by clearing GO (datasheet Table 8-15); there is no STOP bit. */
+		regmap_write(h->regmap, DRV2624_REG_GO, 0);
 		if (h->fw_ram_size)
 			drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
 		return;
@@ -274,9 +266,8 @@ static void drv2624_close(struct input_dev *input)
 	struct drv2624_data *h = input_get_drvdata(input);
 
 	cancel_work_sync(&h->work);
-	/* Only pulse the STOP bit; LIB_LRA must survive close→open. */
-	regmap_update_bits(h->regmap, DRV2624_REG_CONTROL2,
-			   DRV2624_CTRL2_STOP_BIT, DRV2624_CTRL2_STOP_BIT);
+	/* Stop any active playback by clearing GO (datasheet Table 8-15). */
+	regmap_write(h->regmap, DRV2624_REG_GO, 0);
 	if (h->fw_ram_size)
 		drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
 }
@@ -371,14 +362,13 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		return error;
 
 	/*
-	 * CONTROL2: select LRA library + 1 ms playback interval. The default
-	 * 5 ms tick stretches every ROM effect 5× too long. (The LIB_LRA bit
-	 * is chip-side mode-dependent and may read back 0 on some revisions —
-	 * we set it anyway; the INTERVAL bit is what actually changes feel.)
+	 * CONTROL2: select the 1 ms playback interval. The default 5 ms tick
+	 * stretches every ROM effect 5x too long. Leave DIG_MEM_GAIN[1:0] at 0
+	 * (100 % strength); there is no LIB_LRA bit (datasheet Table 8-17).
 	 */
 	error = regmap_update_bits(h->regmap, DRV2624_REG_CONTROL2,
-				   DRV2624_CTRL2_LIB_LRA | DRV2624_CTRL2_INTERVAL_1MS,
-				   DRV2624_CTRL2_LIB_LRA | DRV2624_CTRL2_INTERVAL_1MS);
+				   DRV2624_CTRL2_INTERVAL_1MS,
+				   DRV2624_CTRL2_INTERVAL_1MS);
 	if (error)
 		return error;
 
