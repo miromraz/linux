@@ -65,9 +65,14 @@ static int lc898219xi_set_dac(struct lc898219xi *lc898219xi, u16 val)
 /* One wake attempt. The rails are already up when this is called. */
 static int lc898219xi_wake(struct i2c_client *client)
 {
-	int regdata, retry;
+	int regdata, retry, ret;
 
 	regdata = i2c_smbus_read_byte_data(client, 0xF0);
+	if (regdata < 0) {
+		/* A bus error is not a bad part; report it as such. */
+		dev_dbg(&client->dev, "chip id read failed: %d\n", regdata);
+		return regdata;
+	}
 	if (regdata != 0xA5) {
 		dev_dbg(&client->dev, "bad chip id: %x\n", regdata);
 		return -ENODEV;
@@ -75,16 +80,18 @@ static int lc898219xi_wake(struct i2c_client *client)
 
 	usleep_range(1000, 1010);
 
-	i2c_smbus_write_byte_data(client, 0xE0, 0x01);
+	ret = i2c_smbus_write_byte_data(client, 0xE0, 0x01);
+	if (ret < 0)
+		return ret;
 	msleep(8);
 
 	for (retry = 0; retry < 10; retry++) {
 		int check = i2c_smbus_read_byte_data(client, 0xB3);
 
-		if ((check & 0xE0) == 0) {
-			i2c_smbus_write_byte_data(client, 0x8C, 0xE9);
-			return 0;
-		}
+		if (check < 0)
+			return check;
+		if ((check & 0xE0) == 0)
+			return i2c_smbus_write_byte_data(client, 0x8C, 0xE9);
 		usleep_range(1000, 1010);
 	}
 
