@@ -571,7 +571,13 @@ static int drv2624_probe(struct i2c_client *client)
 	if (error)
 		goto err_gpio_low;
 
-	h->input_dev = devm_input_allocate_device(dev);
+	/*
+	 * The input device is registered non-devm and unregistered
+	 * explicitly in remove() so that its close() callback (which talks
+	 * I2C and re-parks the chip) runs while the chip is still powered,
+	 * and so ff-memless cannot schedule work after teardown.
+	 */
+	h->input_dev = input_allocate_device();
 	if (!h->input_dev) {
 		error = -ENOMEM;
 		goto err_gpio_low;
@@ -584,14 +590,16 @@ static int drv2624_probe(struct i2c_client *client)
 
 	error = input_ff_create_memless(h->input_dev, NULL, drv2624_play);
 	if (error)
-		goto err_gpio_low;
+		goto err_free_input;
 
 	error = input_register_device(h->input_dev);
 	if (error)
-		goto err_gpio_low;
+		goto err_free_input;
 
 	return 0;
 
+err_free_input:
+	input_free_device(h->input_dev);
 err_gpio_low:
 	if (h->enable_gpio)
 		gpiod_set_value_cansleep(h->enable_gpio, 0);
@@ -605,6 +613,12 @@ static void drv2624_remove(struct i2c_client *client)
 {
 	struct drv2624_data *h = i2c_get_clientdata(client);
 
+	/*
+	 * Unregister first (runs close() while the chip is still powered and
+	 * stops ff-memless from scheduling more work), then flush any pending
+	 * work, then drop power.
+	 */
+	input_unregister_device(h->input_dev);
 	cancel_work_sync(&h->work);
 
 	if (h->enable_gpio)
