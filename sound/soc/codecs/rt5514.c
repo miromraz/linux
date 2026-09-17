@@ -72,17 +72,29 @@ static const struct reg_sequence rt5514p_i2c_patch[] = {
 
 static const struct reg_sequence rt5514_patch[] = {
 	{RT5514_DIG_IO_CTRL,		0x00000040},
-	{RT5514_CLK_CTRL1,		0x380200c1},
+	{RT5514_CLK_CTRL1,		0x38020041},
 	{RT5514_SRC_CTRL,		0x44000eee},
-	{RT5514_ANA_CTRL_LDO10,		0x00028704},
+	{RT5514_ANA_CTRL_LDO10,		0x00028604},
 	{RT5514_ANA_CTRL_ADCFED,	0x00000800},
 	{RT5514_ASRC_IN_CTRL1,		0x00000003},
+	{RT5514_DOWNFILTER0_CTRL3,	0x10000342},
+	{RT5514_DOWNFILTER1_CTRL3,	0x10000342},
+};
+
+/*
+ * RT5514P-only register overrides. Applied as a regmap patch after variant
+ * detection so the plain-RT5514 defaults stay byte-for-byte identical to
+ * upstream. CLK_CTRL1/LDO10 differ on the P silicon, and the DOWNFILTER0/1
+ * CTRL1/2 values clear the inverted AD_DMIC_MIX ("DMIC Switch") bit that the
+ * P part needs.
+ */
+static const struct reg_sequence rt5514p_patch[] = {
+	{RT5514_CLK_CTRL1,		0x380200c1},
+	{RT5514_ANA_CTRL_LDO10,		0x00028704},
 	{RT5514_DOWNFILTER0_CTRL1,	0x0002042f},
 	{RT5514_DOWNFILTER0_CTRL2,	0x0002042f},
-	{RT5514_DOWNFILTER0_CTRL3,	0x10000342},
 	{RT5514_DOWNFILTER1_CTRL1,	0x0002042f},
 	{RT5514_DOWNFILTER1_CTRL2,	0x0002042f},
-	{RT5514_DOWNFILTER1_CTRL3,	0x10000342},
 };
 
 static const struct reg_default rt5514_reg[] = {
@@ -100,20 +112,20 @@ static const struct reg_default rt5514_reg[] = {
 	{RT5514_SRC_CTRL,		0x44000eee},
 	{RT5514_DOWNFILTER2_CTRL1,	0x0000882f},
 	{RT5514_PLL_SOURCE_CTRL,	0x00000004},
-	{RT5514_CLK_CTRL1,		0x380200c1},
+	{RT5514_CLK_CTRL1,		0x38020041},
 	{RT5514_CLK_CTRL2,		0x00000000},
 	{RT5514_PLL3_CALIB_CTRL1,	0x00400200},
 	{RT5514_PLL3_CALIB_CTRL5,	0x40220012},
 	{RT5514_DELAY_BUF_CTRL1,	0x7fff006a},
 	{RT5514_DELAY_BUF_CTRL3,	0x00000000},
 	{RT5514_ASRC_IN_CTRL1,		0x00000003},
-	{RT5514_DOWNFILTER0_CTRL1,	0x0002042f},
-	{RT5514_DOWNFILTER0_CTRL2,	0x0002042f},
+	{RT5514_DOWNFILTER0_CTRL1,	0x00020c2f},
+	{RT5514_DOWNFILTER0_CTRL2,	0x00020c2f},
 	{RT5514_DOWNFILTER0_CTRL3,	0x10000342},
-	{RT5514_DOWNFILTER1_CTRL1,	0x0002042f},
-	{RT5514_DOWNFILTER1_CTRL2,	0x0002042f},
+	{RT5514_DOWNFILTER1_CTRL1,	0x00020c2f},
+	{RT5514_DOWNFILTER1_CTRL2,	0x00020c2f},
 	{RT5514_DOWNFILTER1_CTRL3,	0x10000342},
-	{RT5514_ANA_CTRL_LDO10,		0x00028704},
+	{RT5514_ANA_CTRL_LDO10,		0x00028604},
 	{RT5514_ANA_CTRL_LDO18_16,	0x02000345},
 	{RT5514_ANA_CTRL_ADC12,		0x0000a2a8},
 	{RT5514_ANA_CTRL_ADC21,		0x00001180},
@@ -1374,7 +1386,11 @@ static int rt5514_i2c_probe(struct i2c_client *i2c)
 		return -ENODEV;
 	}
 
-	regmap_read(rt5514->regmap, RT5514_VENDOR_ID1, &val);
+	ret = regmap_read(rt5514->regmap, RT5514_VENDOR_ID1, &val);
+	if (ret) {
+		dev_err(&i2c->dev, "Failed to read vendor ID1: %d\n", ret);
+		return ret;
+	}
 	rt5514->v_p = (val == 0x80);
 	dev_info(&i2c->dev, "Detected %s\n", rt5514->v_p ? "RT5514P" : "RT5514");
 
@@ -1394,6 +1410,15 @@ static int rt5514_i2c_probe(struct i2c_client *i2c)
 				    ARRAY_SIZE(rt5514_patch));
 	if (ret != 0)
 		dev_warn(&i2c->dev, "Failed to apply regmap patch: %d\n", ret);
+
+	if (rt5514->v_p) {
+		ret = regmap_register_patch(rt5514->regmap, rt5514p_patch,
+					    ARRAY_SIZE(rt5514p_patch));
+		if (ret != 0)
+			dev_warn(&i2c->dev,
+				 "Failed to apply RT5514P regmap patch: %d\n",
+				 ret);
+	}
 
 	return devm_snd_soc_register_component(&i2c->dev,
 			&soc_component_dev_rt5514,
