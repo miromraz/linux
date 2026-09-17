@@ -722,6 +722,8 @@ static int imx363_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 		v4l2_subdev_state_get_format(fh->state, 0);
 	struct v4l2_rect *try_crop;
 
+	mutex_lock(&imx363->mutex);
+
 	/* Initialize try_fmt */
 	try_fmt->width = supported_modes[0].width;
 	try_fmt->height = supported_modes[0].height;
@@ -734,6 +736,8 @@ static int imx363_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	try_crop->top = IMX363_PIXEL_ARRAY_TOP;
 	try_crop->width = IMX363_PIXEL_ARRAY_WIDTH;
 	try_crop->height = IMX363_PIXEL_ARRAY_HEIGHT;
+
+	mutex_unlock(&imx363->mutex);
 
 	return 0;
 }
@@ -853,7 +857,9 @@ static int imx363_enum_mbus_code(struct v4l2_subdev *sd,
 	if (code->index > 0)
 		return -EINVAL;
 
+	mutex_lock(&imx363->mutex);
 	code->code = imx363_get_format_code(imx363);
+	mutex_unlock(&imx363->mutex);
 
 	return 0;
 }
@@ -866,8 +872,12 @@ static int imx363_enum_frame_size(struct v4l2_subdev *sd,
 	if (fse->index >= ARRAY_SIZE(supported_modes))
 		return -EINVAL;
 
-	if (fse->code != imx363_get_format_code(imx363))
+	mutex_lock(&imx363->mutex);
+	if (fse->code != imx363_get_format_code(imx363)) {
+		mutex_unlock(&imx363->mutex);
 		return -EINVAL;
+	}
+	mutex_unlock(&imx363->mutex);
 
 	fse->min_width = supported_modes[fse->index].width;
 	fse->max_width = fse->min_width;
