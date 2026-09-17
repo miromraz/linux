@@ -72,7 +72,14 @@ static void venus_event_notify(struct venus_core *core, u32 event)
 	}
 
 	mutex_lock(&core->lock);
-	set_bit(0, &core->sys_error);
+	/*
+	 * A 0->1 transition of sys_error marks the start of a new error
+	 * episode; reset the recovery retry budget so that a fresh fault after
+	 * an earlier recovery (whether it succeeded or was exhausted) is not
+	 * denied its retries by a sticky counter.
+	 */
+	if (!test_and_set_bit(0, &core->sys_error))
+		core->sys_err_retries = 0;
 	set_bit(0, &core->dump_core);
 	list_for_each_entry(inst, &core->instances, list)
 		inst->ops->event_notify(inst, EVT_SESSION_ERROR, NULL);
@@ -172,6 +179,22 @@ static void venus_sys_error_handler(struct work_struct *work)
 			dev_err(core->dev,
 				"system error recovery failed, giving up after %u attempts\n",
 				core->sys_err_retries);
+			/*
+			 * Recovery is exhausted. Leave the firmware powered off
+			 * but return the core to a coherent state: balance the
+			 * disable_irq_nosync() above, then drop sys_error and
+			 * wake the open() waiters. Nothing re-inits the firmware
+			 * from here; clearing sys_error only stops open() from
+			 * sleeping on sys_err_done, so a later open() proceeds
+			 * into hfi_session_create() and fails promptly on its
+			 * HFI timeout (-ETIMEDOUT/-EIO) instead of blocking
+			 * forever. Recovering the core needs a rebind or reboot.
+			 */
+			enable_irq(core->irq);
+			mutex_lock(&core->lock);
+			clear_bit(0, &core->sys_error);
+			wake_up_all(&core->sys_err_done);
+			mutex_unlock(&core->lock);
 			return;
 		}
 
