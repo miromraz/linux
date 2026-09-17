@@ -428,9 +428,9 @@ static int drv2624_hw_init(struct drv2624_data *h)
 
 	/*
 	 * Open-loop LRA period. The chip uses this until the closed-loop
-	 * tracker locks on resonance. Register unit is 24.39 us (datasheet);
-	 * period_ticks ≈ 41000 / f_Hz, and the field is 9 bits wide
-	 * (bit 8 in PERIOD_H, bits 7:0 in PERIOD_L). The DT prop
+	 * tracker locks on resonance. Register unit is 24.615 us (datasheet
+	 * Table 8-47); period_ticks ~ 41000 / f_Hz, and OL_LRA_PERIOD is
+	 * 10 bits wide (bits [9:8] in PERIOD_H, [7:0] in PERIOD_L). The DT prop
 	 * ti,ol-lra-period overrides the computed value with the chip's
 	 * per-unit factory-calibrated period (Pixel devices ship this in
 	 * /persist/haptics/drv2624.cal as "lra_period: NNN").
@@ -443,9 +443,9 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		else
 			period = 0;
 		if (period) {
-			period = min_t(u32, period, 0x1FF);
+			period = min_t(u32, period, 0x3FF);
 			regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_H,
-				     (period >> 8) & 0x01);
+				     (period >> 8) & 0x03);
 			regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_L,
 				     period & 0xFF);
 		}
