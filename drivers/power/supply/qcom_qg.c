@@ -130,11 +130,26 @@ static int qcom_qg_get_property(struct power_supply *psy,
 	int ret;
 
 	switch (psp) {
-	case POWER_SUPPLY_PROP_STATUS:
-		val->intval = power_supply_am_i_supplied(psy) ?
-			POWER_SUPPLY_STATUS_CHARGING :
-			POWER_SUPPLY_STATUS_DISCHARGING;
+	case POWER_SUPPLY_PROP_STATUS: {
+		int capacity;
+
+		/*
+		 * power_supply_am_i_supplied() returns -ENODEV (truthy) when no
+		 * supplier is registered, so only a strictly positive result
+		 * means we are actually being charged; anything else is
+		 * discharging. Report FULL at 100% so UPower stops charging UI
+		 * and does not defer its low-battery shutdown.
+		 */
+		if (power_supply_am_i_supplied(psy) > 0) {
+			ret = qcom_qg_get_capacity(chip, &capacity);
+			val->intval = (!ret && capacity == 100) ?
+				POWER_SUPPLY_STATUS_FULL :
+				POWER_SUPPLY_STATUS_CHARGING;
+		} else {
+			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+		}
 		break;
+	}
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
 		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
 		break;
