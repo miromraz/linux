@@ -82,7 +82,8 @@
 #define DRV2624_REG_RAM_ADDR_LOWER	0xFE
 #define DRV2624_REG_RAM_DATA		0xFF
 
-#define DRV2624_CHIP_ID_VAL		0x03
+#define DRV2624_CHIP_ID_MASK		GENMASK(7, 4)	/* CHIPID[3:0], Table 8-2 */
+#define DRV2624_CHIP_ID_VAL		0x00		/* DRV2624 */
 
 /* Default LRA resonant frequency, Hz */
 #define DRV2624_DEF_LRA_HZ		205
@@ -335,9 +336,8 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		dev_err(dev, "failed to read CHIP_ID: %d\n", error);
 		return error;
 	}
-	if (chip_id != DRV2624_CHIP_ID_VAL) {
-		dev_err(dev, "unexpected CHIP_ID 0x%02x (want 0x%02x)\n",
-			chip_id, DRV2624_CHIP_ID_VAL);
+	if ((chip_id & DRV2624_CHIP_ID_MASK) != DRV2624_CHIP_ID_VAL) {
+		dev_err(dev, "unexpected CHIPID nibble in 0x%02x\n", chip_id);
 		return -ENODEV;
 	}
 
