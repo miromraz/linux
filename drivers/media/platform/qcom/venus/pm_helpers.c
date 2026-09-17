@@ -1218,6 +1218,13 @@ err_put_cvp:
 	pm_runtime_put_sync(pds[2]);
 err_put_vcodec0:
 	pm_runtime_put_sync(pds[1]);
+	/*
+	 * dev_pm_opp_set_rate() above cast a CX performance-state vote before
+	 * any of these failures; drop it so a failed power-on leaves no vote
+	 * behind (POWER_OFF does the same). This covers core_power_v4()'s
+	 * failure branch too, as that is exactly a non-zero return from here.
+	 */
+	dev_pm_opp_set_rate(dev, 0);
 
 	return ret;
 }
