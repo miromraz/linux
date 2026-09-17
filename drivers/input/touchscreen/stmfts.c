@@ -1125,6 +1125,14 @@ static int stmfts_probe(struct i2c_client *client)
 	init_completion(&sdata->cmd_done);
 
 	sdata->ops = of_device_get_match_data(dev);
+	if (!sdata->ops)
+		/*
+		 * No OF match data: instantiated via the i2c_device_id table
+		 * (e.g. sysfs new_device) or without OF. There is no way to
+		 * tell which chip variant this is, so refuse rather than
+		 * dereference a NULL ops table.
+		 */
+		return dev_err_probe(dev, -ENODEV, "no chip match data\n");
 
 	err = devm_regulator_bulk_get_const(dev,
 					    ARRAY_SIZE(stmfts_supplies),
