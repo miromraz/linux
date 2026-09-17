@@ -1675,9 +1675,17 @@ static int qcom_swrm_probe(struct platform_device *pdev)
 		goto err_clk;
 	}
 
-	ret = devm_add_action_or_reset(dev, qcom_swrm_ssr_unregister, ctrl);
-	if (ret)
-		goto err_clk;
+	/*
+	 * A NULL handle means remoteproc SSR tracking is not built in
+	 * (!QCOM_RPROC_COMMON): the stub registers nothing, so there is
+	 * nothing to unregister and adsp_down simply stays false.
+	 */
+	if (ctrl->ssr_notifier) {
+		ret = devm_add_action_or_reset(dev, qcom_swrm_ssr_unregister,
+					       ctrl);
+		if (ret)
+			goto err_clk;
+	}
 
 	ret = qcom_swrm_get_port_config(ctrl);
 	if (ret)
@@ -1785,10 +1793,14 @@ static int __maybe_unused swrm_runtime_resume(struct device *dev)
 	int ret;
 
 	/*
-	 * Leave the hardware alone, including the iface clock: enabling it
-	 * runs the LPASS macro gate ops, which poke the same dead register
-	 * space.  swrm_runtime_suspend() bails out the same way, so the clock
-	 * enable count stays balanced.
+	 * Once the ADSP is gone, do not touch anything - not even hclk.  hclk
+	 * is the LPASS macro's gate clock and its enable/disable ops write the
+	 * same dead LPASS register space, under the clk framework prepare_lock;
+	 * its provider (q6afe, an APR device) is torn down with the ADSP, so the
+	 * clk references are stale.  Enabling it here would take a synchronous
+	 * external abort and wedge the machine.  swrm_runtime_suspend() bails
+	 * out the same way, so the enable count stays put on a provider that no
+	 * longer exists - bookkeeping, not a live power vote.
 	 */
 	if (ctrl->adsp_down)
 		return 0;
@@ -1858,6 +1870,12 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
 	struct qcom_swrm_ctrl *ctrl = dev_get_drvdata(dev);
 	int ret;
 
+	/*
+	 * Mirror swrm_runtime_resume(): once the ADSP is gone, hclk's gate ops
+	 * would fault on the dead LPASS register space through a stale q6afe
+	 * provider, so leave the clock alone here too and let its enable count
+	 * rest on that defunct provider.
+	 */
 	if (ctrl->adsp_down)
 		return 0;
 
