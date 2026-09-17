@@ -1462,7 +1462,6 @@ static int imx363_probe(struct i2c_client *client)
 		break;
 	case 4:
 		imx363->lane_mode_idx = IMX363_4_LANE_MODE;
-		printk(KERN_INFO "imx363: 4 lanes\n");
 		break;
 	default:
 		dev_err(&client->dev, "Invalid data lanes: %u\n",
