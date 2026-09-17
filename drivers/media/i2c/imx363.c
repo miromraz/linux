@@ -1472,8 +1472,10 @@ static int imx363_probe(struct i2c_client *client)
 	/* request optional reset pin */
 	imx363->reset_gpio = devm_gpiod_get_optional(&client->dev, "reset",
 						     GPIOD_OUT_LOW);
-	if (IS_ERR(imx363->reset_gpio))
-		return PTR_ERR(imx363->reset_gpio);
+	if (IS_ERR(imx363->reset_gpio)) {
+		ret = PTR_ERR(imx363->reset_gpio);
+		goto error_endpoint_free;
+	}
 
 	/* Initialize subdev */
 	v4l2_i2c_subdev_init(&imx363->sd, client, &imx363_subdev_ops);
