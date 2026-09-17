@@ -739,7 +739,7 @@
 	codec: rt5514@57 {
 		compatible = "realtek,rt5514";
 		reg = <0x57>;
-		#sound-dai-cells = <1>;
+		#sound-dai-cells = <0>;
 	};
 };
 
@@ -1414,7 +1414,7 @@
 			};
 
 			codec {
-				sound-dai = <&codec 0>;
+				sound-dai = <&codec>;
 			};
 		};
 
