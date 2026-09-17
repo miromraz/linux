@@ -95,11 +95,8 @@
 #define IMX363_REG_IOPPXCK_DIV                    CCI_REG8(0x0309)
 #define IMX363_REG_IOPSYCK_DIV                    CCI_REG8(0x030b)
 #define IMX363_REG_PREPLLCK_OP_DIV                CCI_REG8(0x030d)
-#define IMX363_REG_PHASE_PIX_OUTEN                CCI_REG8(0x3030)
-#define IMX363_REG_PDPIX_DATA_RATE                CCI_REG8(0x3032)
 #define IMX363_REG_SCALE_MODE                     CCI_REG8(0x0401)
 #define IMX363_REG_SCALE_MODE_EXT                 CCI_REG8(0x3038)
-#define IMX363_REG_AF_WINDOW_MODE                 CCI_REG8(0x7bcd)
 #define IMX363_REG_FRM_LENGTH_CTL                 CCI_REG8(0x0350)
 #define IMX363_REG_CSI_LANE_MODE                  CCI_REG8(0x0114)
 #define IMX363_REG_X_EVN_INC                      CCI_REG8(0x0381)
@@ -290,9 +287,6 @@ static const struct cci_reg_sequence mode_common_regs[] = {
 	// {IMX363_REG_R_DIGITAL_GAIN, 256},
 	// {IMX363_REG_B_DIGITAL_GAIN, 256},
 	// {IMX363_REG_GB_DIGITAL_GAIN, 256},
-	// {IMX363_REG_AF_WINDOW_MODE, 0},
-	// {IMX363_REG_PHASE_PIX_OUTEN, 0},
-	// {IMX363_REG_PDPIX_DATA_RATE, 0},
 	// {IMX363_REG_HDR, 0},
 	
 	// Seems important. Probably will work even without specifying these. But let's just set it anyway.
