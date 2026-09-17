@@ -95,8 +95,9 @@
  *   byte 0		revision, must be 0
  *   bytes 1..3N	N header entries of 3 bytes each: the effect's start
  *			address (upper byte, lower byte) followed by a
- *			configuration byte holding WAVEFORM_REPEATS[2:0]
- *			and the effect size[4:0] in bytes (even, 2..30).
+ *			configuration byte holding WAVEFORM_REPEATS[2:0] in
+ *			bits [7:5] and the effect size[4:0] in bits [4:0]
+ *			(size in bytes, even, 2..30; Fig 7-16).
  *			An entry's position in the header is its effect ID,
  *			numbered from 1.
  *   then		the waveform data: interleaved voltage/time pairs.
@@ -375,7 +376,7 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	/*
 	 * Program rated and overdrive voltages if explicit raw register
 	 * values were supplied via DT. The chip reset defaults
-	 * (RATED_VOLT=0x3E ≈ 2 V_rms, OD_CLAMP=0x89 ≈ 4 V_peak) are safe
+	 * (RATED_VOLT=0x3F, OD_CLAMP=0x89) are safe
 	 * for the LRAs we've seen and match what the downstream Pixel HAL
 	 * ends up with after autocal. Writing computed values from a
 	 * voltage-in-mV formula is dangerous: the closed-form encoding
@@ -467,13 +468,9 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		return error;
 
 	/*
-	 * Force the chip down into true low-power standby. The DRV2624
-	 * auto-enters standby when idle, but per datasheet section 7.3.10 it
-	 * can get stuck in a higher-current "pseudo-standby" state. Left
-	 * there from probe onward the extra current draw browns out the boot
-	 * window and the phone reboot-loops. The documented remedy is a
-	 * single I2C transaction after the settle time; the STATUS read also
-	 * clears any latched event bits.
+	 * Let the programming settle, then read STATUS to clear any latched
+	 * event bits (DIAG_RESULT, PRG_ERROR, etc.; datasheet Table 8-4,
+	 * sticky and clear-on-read) before the first play.
 	 */
 	usleep_range(5000, 8000);
 	regmap_read(h->regmap, DRV2624_REG_STATUS, &status);
