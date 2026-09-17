@@ -141,6 +141,7 @@ struct stmfts_data {
 	bool hover_enabled;
 	bool stylus_enabled;
 	bool running;
+	bool powered;
 
 	/*
 	 * Set when the chip is an in-cell module whose physical power is
@@ -934,6 +935,8 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 	 */
 	(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 
+	sdata->powered = true;
+
 	return 0;
 
 err_disable_regulators:
@@ -967,6 +970,16 @@ static void stmfts5_chip_power_off(struct stmfts_data *sdata)
 static void stmfts_power_off(void *data)
 {
 	struct stmfts_data *sdata = data;
+
+	/*
+	 * Idempotent: this is both the devm unbind action and the panel
+	 * follower's .panel_unpreparing callback, and on unbind the DRM
+	 * framework may also call the latter, so guard against a double
+	 * power-off (which would underflow the regulator/IRQ enable counts).
+	 */
+	if (!sdata->powered)
+		return;
+	sdata->powered = false;
 
 	disable_irq(sdata->client->irq);
 
@@ -1233,11 +1246,18 @@ static int stmfts_probe(struct i2c_client *client)
 		err = stmfts_power_on(sdata);
 		if (err)
 			return err;
-
-		err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
-		if (err)
-			return err;
 	}
+
+	/*
+	 * Register the power-off action in both modes. In panel-follower
+	 * mode the panel framework powers the chip on via panel_prepared();
+	 * without this action a device left powered (screen on) at unbind
+	 * would leak its regulator enables. stmfts_power_off() is guarded by
+	 * sdata->powered so it is a no-op when the chip is already off.
+	 */
+	err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
+	if (err)
+		return err;
 
 	/*
 	 * Runtime PM must be enabled in both modes. In legacy mode it
