@@ -5016,6 +5016,13 @@
 				 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
 			clock-names = "mclk", "macro";
 
+			/*
+			 * 9.6 MHz VA MCLK / 16 = 600 kHz DMIC clock, the same
+			 * value the sm8250 VA macro uses. Without it the driver
+			 * logs "qcom,dmic-sample-rate dt entry missing".
+			 */
+			qcom,dmic-sample-rate = <600000>;
+
 			#clock-cells = <0>;
 			clock-output-names = "fsgen";
 			#sound-dai-cells = <1>;
