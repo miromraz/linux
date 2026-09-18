@@ -1411,12 +1411,22 @@ static int rt5514_i2c_probe(struct i2c_client *i2c)
 	if (ret != 0)
 		dev_warn(&i2c->dev, "Failed to apply regmap patch: %d\n", ret);
 
+	/*
+	 * Not a registered patch: regmap_register_patch() writes with the
+	 * cache bypassed, so the cache would keep the plain-RT5514 defaults
+	 * and the first regmap_update_bits() on CLK_CTRL1 (the ADC filter
+	 * DAPM supplies live there) would write the cached value back and drop
+	 * the P-only bit again -- exactly what happened on the Pixel 4a, whose
+	 * DMICs then delivered silence. A cached write keeps cache and silicon
+	 * in step, and regcache_sync() after a reset restores it because it
+	 * differs from the default.
+	 */
 	if (rt5514->v_p) {
-		ret = regmap_register_patch(rt5514->regmap, rt5514p_patch,
-					    ARRAY_SIZE(rt5514p_patch));
+		ret = regmap_multi_reg_write(rt5514->regmap, rt5514p_patch,
+					     ARRAY_SIZE(rt5514p_patch));
 		if (ret != 0)
 			dev_warn(&i2c->dev,
-				 "Failed to apply RT5514P regmap patch: %d\n",
+				 "Failed to apply RT5514P register overrides: %d\n",
 				 ret);
 	}
 
