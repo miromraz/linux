@@ -36,6 +36,7 @@
 #define DRV2624_REG_LRA_PERIOD_L	0x06
 #define DRV2624_REG_MODE		0x07
 #define   DRV2624_MODE_MASK		GENMASK(1, 0)
+#define   DRV2624_TRIG_PIN_FUNC_MASK	GENMASK(3, 2)	/* Table 8-10 */
 /* MODE[1:0], datasheet Table 8-10: 0 RTP, 1 waveform sequencer, 2 diag, 3 autocal */
 #define   DRV2624_MODE_RTP		0x00
 #define DRV2624_REG_CONTROL1		0x08
@@ -171,6 +172,18 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		dev_err(dev, "unexpected CHIPID nibble in 0x%02x\n", chip_id);
 		return -ENODEV;
 	}
+
+	/*
+	 * TRIG_PIN_FUNC resets to 1 = external level trigger, in which mode
+	 * "the GO bit cannot be used" (SLOS893D Table 8-10). Nothing drives
+	 * the TRIG/INTZ pin on this board, so select the pulse-trigger function
+	 * (0), where GO starts and stops playback. Measured: with the reset
+	 * value every RTP request left the actuator silent.
+	 */
+	error = regmap_update_bits(h->regmap, DRV2624_REG_MODE,
+				   DRV2624_TRIG_PIN_FUNC_MASK, 0);
+	if (error)
+		return error;
 
 	/*
 	 * CONTROL1: set actuator type (LRA), enable open-loop auto-brake (a
