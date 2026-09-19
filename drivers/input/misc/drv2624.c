@@ -7,15 +7,36 @@
  * Based on drv260x.c by Dan Murphy <dmurphy@ti.com>.
  *
  * DRV2624 is the successor of the DRV260x family. Compared to DRV260x
- * it uses a different mode encoding and a separate GO register, but the
- * FF_RUMBLE play path is the same real-time-playback (RTP) model that
- * drv260x.c uses: on a non-zero magnitude the driver selects RTP mode,
- * writes the amplitude to RTP_INPUT and sets GO; the chip then vibrates
- * until GO is cleared. The input force-feedback (ff-memless) layer
- * starts an effect with a magnitude and ends it with magnitude 0 when
- * the effect duration elapses, so the driver never has to time or guess
- * durations itself.
+ * it adds an internal RAM with a per-effect pointer table fed through a
+ * Waveform Sequencer, a separate GO register, and a different mode
+ * encoding.
  *
+ * The input force-feedback layer (ff-memless) drives FF_RUMBLE with a
+ * magnitude only: play(magnitude>0) starts an effect and play(0) is
+ * called when its duration elapses. It never tells the driver the
+ * duration at play() time (replay.length in the combined effect is
+ * always 0), so the driver cannot decide up front whether a request is
+ * a short tap or a long rumble.
+ *
+ * This driver plays a hybrid that gets both right without knowing the
+ * duration in advance:
+ *
+ *   - Every start fires a synthesised one-period (~6 ms) waveform from
+ *     the chip's RAM library through the Waveform Sequencer, with
+ *     open-loop auto-brake. That single braked impulse reads as a crisp
+ *     tap rather than a buzz, and is what stock Android does. A 15 ms
+ *     keyboard/theme tap, which is only ~2.5 motor cycles of RTP drive
+ *     and feels like a buzz, thus stays a pure click.
+ *
+ *   - If the effect is still running a short time after the click
+ *     (DRV2624_CLICK_TO_RTP_MS), the driver hands over to real-time
+ *     playback (RTP) at the requested magnitude and drives until
+ *     play(0) arrives, giving sustained rumbles their full length.
+ *
+ * The driver synthesises its waveform library at probe from the
+ * actuator's resonant frequency (ti,lra-frequency-hz sets the click
+ * length) and uploads it to chip RAM, so there is no firmware blob to
+ * ship or load.
  * A `ti,autocal-comp` byte-array DT property can carry the device's
  * factory autocal compensation; if absent the chip's internal
  * defaults are used.
@@ -29,6 +50,7 @@
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/workqueue.h>
 
 #define DRV2624_REG_CHIP_ID		0x00
 #define DRV2624_REG_STATUS		0x01
@@ -39,13 +61,20 @@
 #define   DRV2624_TRIG_PIN_FUNC_MASK	GENMASK(3, 2)	/* Table 8-10 */
 /* MODE[1:0], datasheet Table 8-10: 0 RTP, 1 waveform sequencer, 2 diag, 3 autocal */
 #define   DRV2624_MODE_RTP		0x00
+#define   DRV2624_MODE_RAM_WAVE_SEQ	0x01
 #define DRV2624_REG_CONTROL1		0x08
 #define   DRV2624_CTRL1_LRA		BIT(7)	/* LRA_ERM, Table 8-11 */
 #define   DRV2624_CTRL1_AUTO_BRK_OL	BIT(4)
 #define   DRV2624_CTRL1_AUTO_BRK_INTO_STBY  BIT(3)
 #define DRV2624_REG_GO			0x0C
 #define   DRV2624_GO_BIT		BIT(0)
+#define DRV2624_REG_CONTROL2		0x0D
+#define   DRV2624_CTRL2_INTERVAL_1MS	BIT(5)		/* PLAYBACK_INTERVAL, Table 8-17 */
+#define   DRV2624_CTRL2_DIG_MEM_GAIN_MASK  GENMASK(1, 0)	/* Table 8-17 */
 #define DRV2624_REG_RTP_INPUT		0x0E
+#define DRV2624_REG_WAV_FRM_SEQ1	0x0F
+#define DRV2624_REG_WAV_FRM_SEQ2	0x10
+#define DRV2624_REG_WAV_SEQ_LOOP1	0x17
 #define DRV2624_REG_RATED_VOLT		0x1F
 #define DRV2624_REG_OD_CLAMP		0x20
 #define DRV2624_REG_AUTOCAL_COMP	0x21	/* A_CAL_COMP + A_CAL_BEMF, 0x21/0x22 */
@@ -58,11 +87,58 @@
 #define DRV2624_REG_OL_LRA_PERIOD_L	0x2F
 #define DRV2624_REG_MAX			0x30
 
+/* RAM access (auto-increment on RAM_DATA writes) */
+#define DRV2624_REG_RAM_ADDR_UPPER	0xFD
+#define DRV2624_REG_RAM_ADDR_LOWER	0xFE
+#define DRV2624_REG_RAM_DATA		0xFF
+
 #define DRV2624_CHIP_ID_MASK		GENMASK(7, 4)	/* CHIPID[3:0], Table 8-2 */
 #define DRV2624_CHIP_ID_VAL		0x00		/* DRV2624 */
 
 /* Default LRA resonant frequency, Hz */
 #define DRV2624_DEF_LRA_HZ		205
+
+/*
+ * Waveform library layout, per the DRV2624 datasheet (SLOS893D section
+ * 7.6.9.2 "Loading Data to RAM"):
+ *
+ *   byte 0		revision, must be 0
+ *   bytes 1..3N	N header entries of 3 bytes each: the effect's start
+ *			address (upper byte, lower byte) followed by a
+ *			configuration byte holding WAVEFORM_REPEATS[2:0] in
+ *			bits [7:5] and the effect size[4:0] in bits [4:0]
+ *			(size in bytes, even, 2..30; Fig 7-16).
+ *			An entry's position in the header is its effect ID,
+ *			numbered from 1.
+ *   then		the waveform data: interleaved voltage/time pairs.
+ *			Voltage is 7-bit signed, full scale 63, and its MSB
+ *			is the linear-ramp flag. Time is a tick count; a
+ *			tick is 1 ms because drv2624_hw_init() sets
+ *			PLAYBACK_INTERVAL.
+ *
+ * We build exactly one effect, ID 1, because that is the only one the
+ * input FF_RUMBLE path can select — FF_RUMBLE carries a magnitude and a
+ * duration, not an effect name, so there is no way for userspace to ask
+ * for a second library entry.
+ */
+#define DRV2624_ROM_HEADER_ENTRIES	1
+#define DRV2624_ROM_DATA_START		(1 + 3 * DRV2624_ROM_HEADER_ENTRIES)
+#define DRV2624_ROM_LIB_SIZE		(DRV2624_ROM_DATA_START + 2)
+
+/* Voltage field is 7-bit signed; bit 7 is the ramp flag, not magnitude. */
+#define DRV2624_AMP_FULL_SCALE		63
+
+/* Effect ID of the click we build in drv2624_upload_rom(). */
+#define DRV2624_ROM_EFFECT_CLICK	1
+
+/*
+ * How long after the RAM click starts we hand a still-running effect
+ * over to RTP. A ~6 ms click plus this margin means a 15 ms theme tap
+ * has already ended (play(0) has cleared the magnitude) and stays a pure
+ * braked click, while any effect lasting >= 40 ms gets the crisp click
+ * as an attack and then RTP sustain until play(0).
+ */
+#define DRV2624_CLICK_TO_RTP_MS	40
 
 enum drv2624_actuator {
 	DRV2624_ACTUATOR_LRA,
@@ -74,6 +150,7 @@ struct drv2624_data {
 	struct input_dev *input_dev;
 	struct regmap *regmap;
 	struct work_struct work;
+	struct delayed_work handover;
 
 	struct gpio_desc *enable_gpio;
 	struct regulator *vdd;
@@ -87,34 +164,157 @@ struct drv2624_data {
 	bool autocal_present;
 
 	u8 magnitude;
+	u8 gain;		/* DIG_MEM_GAIN value currently programmed */
+	bool parked;		/* chip is in Waveform Sequencer park state */
 };
 
 static const struct regmap_config drv2624_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
-	.max_register = DRV2624_REG_MAX,
+	/*
+	 * RAM access registers (0xFD/0xFE/0xFF) live above the normal
+	 * control-register window, so the regmap window has to extend
+	 * to 0xFF — otherwise the ROM upload regmap_writes get rejected
+	 * as out-of-range and probe fails with -EIO.
+	 */
+	.max_register = DRV2624_REG_RAM_DATA,
 };
 
 /*
- * ff-memless drives this: a non-zero magnitude starts vibration, and a
- * magnitude of 0 (posted when the effect's duration elapses) stops it.
- * On start, select RTP mode and write the 7-bit amplitude to RTP_INPUT,
- * then set GO; the chip drives the LRA until GO is cleared. On stop,
- * clear GO — with AUTO_BRK_INTO_STBY set in CONTROL1 the chip brakes the
- * LRA and idles by itself (datasheet Table 8-15; there is no STOP bit).
+ * Park the chip in RAM Waveform Sequencer mode with effect 1 (CLICK)
+ * pre-selected. With the chip parked this way, a GO write triggers the
+ * ROM CLICK from the uploaded library — the path that feels like stock
+ * Android, vs. raw RTP which sounds buzzy on a narrow-band LRA. MODE is
+ * written with update_bits so TRIG_PIN_FUNC (bits 3:2) stays 0.
+ */
+static int drv2624_park_seq(struct drv2624_data *h, u8 effect_id)
+{
+	int error;
+
+	error = regmap_write(h->regmap, DRV2624_REG_WAV_FRM_SEQ1, effect_id);
+	if (error)
+		return error;
+	error = regmap_write(h->regmap, DRV2624_REG_WAV_FRM_SEQ2, 0);
+	if (error)
+		return error;
+	error = regmap_write(h->regmap, DRV2624_REG_WAV_SEQ_LOOP1, 0);
+	if (error)
+		return error;
+	return regmap_update_bits(h->regmap, DRV2624_REG_MODE,
+				  DRV2624_MODE_MASK, DRV2624_MODE_RAM_WAVE_SEQ);
+}
+
+/* Map the 7-bit magnitude to DIG_MEM_GAIN (Table 8-17): 0=100% .. 3=25%. */
+/*
+ * Map the FF magnitude to DIG_MEM_GAIN for the click. Measured on the
+ * Pixel 4a with a microphone (one-period RAM click, same grip, 4 taps per
+ * step, values read back from CONTROL2 after each tap):
+ *
+ *   gain step   peak        attack
+ *   25 %        -43.7 dBFS  21 ms    under-driven
+ *   50 %        -33.8 dBFS  9.8 ms   strongest and sharpest
+ *   75 %        -38.1 dBFS  20.5 ms  over-driven
+ *   100 %       -38.1 dBFS  20.5 ms  over-driven
+ *
+ * A single full-scale period over-drives the LRA and the closed loop and
+ * brake cut the stroke, so anything above the 50 % step feels duller, not
+ * stronger. Normal taps therefore use the 50 % step; only clearly light
+ * requests drop to 25 %. Note ff-memless hands the driver about 3/4 of the
+ * requested magnitude (a 0xffff request arrives as ~96 after >> 9), so the
+ * threshold is on the value that actually arrives.
+ */
+static u8 drv2624_mag_to_gain(u8 mag)
+{
+	if (mag >= 31)
+		return 2;	/* 50 %: the strongest, sharpest click */
+	return 3;		/* 25 % */
+}
+
+/*
+ * Main work, scheduled from play() (which runs in atomic context and
+ * cannot do I2C). On a non-zero magnitude it fires the braked RAM click
+ * and arms the RTP handover; on magnitude 0 it stops and re-parks.
  */
 static void drv2624_worker(struct work_struct *work)
 {
 	struct drv2624_data *h = container_of(work, struct drv2624_data, work);
 	struct device *dev = &h->client->dev;
+	u8 mag = h->magnitude;
+	u8 gain;
 	int error;
 
-	if (!h->magnitude) {
+	if (!mag) {
+		/*
+		 * Stop. Wait out a handover that may already be running on
+		 * another CPU (it never waits on this work, so this cannot
+		 * deadlock) -- otherwise it could re-arm GO right after we
+		 * clear it and leave the motor running. Then brake and re-park
+		 * so the next tap fires a click.
+		 */
+		cancel_delayed_work_sync(&h->handover);
 		error = regmap_write(h->regmap, DRV2624_REG_GO, 0);
 		if (error)
 			dev_err(dev, "GO clear failed: %d\n", error);
+		error = drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
+		if (error)
+			dev_err(dev, "re-park failed: %d\n", error);
+		else
+			h->parked = true;
 		return;
 	}
+
+	/*
+	 * (a) DIG_MEM_GAIN scales library (click) playback only; it is
+	 * ignored in RTP. Write it only when it changed.
+	 */
+	gain = drv2624_mag_to_gain(mag);
+	if (gain != h->gain) {
+		error = regmap_update_bits(h->regmap, DRV2624_REG_CONTROL2,
+					   DRV2624_CTRL2_DIG_MEM_GAIN_MASK, gain);
+		if (error) {
+			dev_err(dev, "DIG_MEM_GAIN write failed: %d\n", error);
+			return;
+		}
+		h->gain = gain;
+	}
+
+	/* (b) make sure the sequencer is parked so GO fires the RAM click. */
+	if (!h->parked) {
+		error = drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
+		if (error) {
+			dev_err(dev, "park failed: %d\n", error);
+			return;
+		}
+		h->parked = true;
+	}
+
+	/* (c) fire the braked one-period click out of RAM. */
+	error = regmap_write(h->regmap, DRV2624_REG_GO, DRV2624_GO_BIT);
+	if (error) {
+		dev_err(dev, "GO write failed: %d\n", error);
+		return;
+	}
+
+	/* (d) if the effect outlives the click, hand over to RTP. */
+	mod_delayed_work(system_dfl_wq, &h->handover,
+			 msecs_to_jiffies(DRV2624_CLICK_TO_RTP_MS));
+}
+
+/*
+ * Delayed handover: if the effect is still running after the click
+ * window, switch to RTP so it sustains at the requested magnitude until
+ * play(0). If play(0) already fired, magnitude is 0 and we do nothing.
+ */
+static void drv2624_handover(struct work_struct *work)
+{
+	struct drv2624_data *h = container_of(to_delayed_work(work),
+					      struct drv2624_data, handover);
+	struct device *dev = &h->client->dev;
+	u8 mag = h->magnitude;
+	int error;
+
+	if (!mag)
+		return;
 
 	error = regmap_update_bits(h->regmap, DRV2624_REG_MODE,
 				   DRV2624_MODE_MASK, DRV2624_MODE_RTP);
@@ -122,7 +322,8 @@ static void drv2624_worker(struct work_struct *work)
 		dev_err(dev, "RTP mode write failed: %d\n", error);
 		return;
 	}
-	error = regmap_write(h->regmap, DRV2624_REG_RTP_INPUT, h->magnitude);
+	h->parked = false;
+	error = regmap_write(h->regmap, DRV2624_REG_RTP_INPUT, mag);
 	if (error) {
 		dev_err(dev, "RTP_INPUT write failed: %d\n", error);
 		return;
@@ -153,8 +354,62 @@ static void drv2624_close(struct input_dev *input)
 	struct drv2624_data *h = input_get_drvdata(input);
 
 	cancel_work_sync(&h->work);
+	cancel_delayed_work_sync(&h->handover);
 	/* Stop any active playback by clearing GO (datasheet Table 8-15). */
 	regmap_write(h->regmap, DRV2624_REG_GO, 0);
+	if (!drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK))
+		h->parked = true;
+}
+
+/*
+ * Build the single-click library and upload it synchronously to chip RAM
+ * starting at address 0. The chip's playback engine walks the header
+ * itself, so we only have to lay the bytes out in the documented order.
+ *
+ * Synchronous upload from probe (rather than request_firmware_nowait)
+ * removes the chip-state race where a haptic event arrives before an
+ * async callback finishes and leaves the chip stuck in RTP mode.
+ */
+static int drv2624_upload_rom(struct drv2624_data *h)
+{
+	u8 lib[DRV2624_ROM_LIB_SIZE];
+	unsigned int click_ms, freq_hz;
+	int error;
+	size_t i;
+
+	/*
+	 * Drive for one resonant period, rounded to the 1 ms playback
+	 * tick: long enough for the LRA to reach peak displacement, short
+	 * enough that AUTO_BRK_OL starts braking before the next cycle
+	 * accelerates it again. That single-period impulse is what makes a
+	 * click read as a tap rather than a buzz. A 172 Hz actuator (Pixel
+	 * sunfish) gives 6 ms; the 205 Hz default gives 5 ms.
+	 *
+	 * freq_hz is re-checked here because ti,lra-frequency-hz comes from
+	 * DT and a 0 would divide by zero.
+	 */
+	freq_hz = h->lra_freq_hz ? h->lra_freq_hz : DRV2624_DEF_LRA_HZ;
+	click_ms = clamp_t(unsigned int, DIV_ROUND_CLOSEST(1000, freq_hz), 1, 255);
+
+	lib[0] = 0;				/* revision */
+	lib[1] = DRV2624_ROM_DATA_START >> 8;	/* effect 1 start, upper */
+	lib[2] = DRV2624_ROM_DATA_START & 0xFF;	/* effect 1 start, lower */
+	lib[3] = 2;				/* no repeats, 2 data bytes */
+	lib[4] = DRV2624_AMP_FULL_SCALE;	/* voltage */
+	lib[5] = click_ms;			/* time, in 1 ms ticks */
+
+	error = regmap_write(h->regmap, DRV2624_REG_RAM_ADDR_UPPER, 0);
+	if (error)
+		return error;
+	error = regmap_write(h->regmap, DRV2624_REG_RAM_ADDR_LOWER, 0);
+	if (error)
+		return error;
+	for (i = 0; i < ARRAY_SIZE(lib); i++) {
+		error = regmap_write(h->regmap, DRV2624_REG_RAM_DATA, lib[i]);
+		if (error)
+			return error;
+	}
+	return 0;
 }
 
 static int drv2624_hw_init(struct drv2624_data *h)
@@ -204,6 +459,19 @@ static int drv2624_hw_init(struct drv2624_data *h)
 				   DRV2624_CTRL1_AUTO_BRK_INTO_STBY);
 	if (error)
 		return error;
+
+	/*
+	 * CONTROL2: select the 1 ms playback interval. The default 5 ms tick
+	 * stretches every ROM effect 5x too long. DIG_MEM_GAIN[1:0] is left
+	 * at reset (0 = 100 %) here and driven per-effect from the magnitude
+	 * in the worker; h->gain tracks it and is reset to match.
+	 */
+	error = regmap_update_bits(h->regmap, DRV2624_REG_CONTROL2,
+				   DRV2624_CTRL2_INTERVAL_1MS,
+				   DRV2624_CTRL2_INTERVAL_1MS);
+	if (error)
+		return error;
+	h->gain = 0;
 
 	/*
 	 * Program rated and overdrive voltages if explicit raw register
@@ -285,6 +553,21 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		}
 	}
 
+	/* Build and upload the waveform library to chip RAM. */
+	error = drv2624_upload_rom(h);
+	if (error)
+		return error;
+
+	/*
+	 * Park in WAV_SEQ with effect 1 (CLICK) selected. From here every
+	 * play() fires the click; the worker switches RTP in for effects
+	 * that outlive the click and re-parks on stop.
+	 */
+	error = drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
+	if (error)
+		return error;
+	h->parked = true;
+
 	/*
 	 * Let the programming settle, then read STATUS to clear any latched
 	 * event bits (DIAG_RESULT, PRG_ERROR, etc.; datasheet Table 8-4,
@@ -311,6 +594,7 @@ static int drv2624_probe(struct i2c_client *client)
 	h->client = client;
 	i2c_set_clientdata(client, h);
 	INIT_WORK(&h->work, drv2624_worker);
+	INIT_DELAYED_WORK(&h->handover, drv2624_handover);
 
 	/* Actuator type (lra/erm), defaults to LRA */
 	h->actuator = DRV2624_ACTUATOR_LRA;
@@ -435,6 +719,7 @@ static void drv2624_remove(struct i2c_client *client)
 	 */
 	input_unregister_device(h->input_dev);
 	cancel_work_sync(&h->work);
+	cancel_delayed_work_sync(&h->handover);
 
 	if (h->enable_gpio)
 		gpiod_set_value_cansleep(h->enable_gpio, 0);
@@ -450,6 +735,9 @@ static int drv2624_suspend(struct device *dev)
 
 	if (!input_device_enabled(h->input_dev))
 		return 0;
+
+	cancel_work_sync(&h->work);
+	cancel_delayed_work_sync(&h->handover);
 
 	/* No software standby bit exists; stop playback and power down. */
 	regmap_write(h->regmap, DRV2624_REG_GO, 0);
@@ -481,9 +769,10 @@ static int drv2624_resume(struct device *dev)
 	}
 
 	/*
-	 * Dropping the enable line resets the chip's registers, so re-run
-	 * the full init sequence on resume to restore the LRA configuration
-	 * and calibration.
+	 * Dropping the enable line wipes the chip's RAM (per datasheet —
+	 * RAM is volatile across the ULP/standby gate). Re-run the full
+	 * init sequence on resume so the RAM library, calibration, and
+	 * WAV_SEQ park state are all restored.
 	 */
 	return drv2624_hw_init(h);
 }
