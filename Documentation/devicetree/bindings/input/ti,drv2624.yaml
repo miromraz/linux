@@ -85,9 +85,41 @@ properties:
       the raw 10-bit register value (~24.615 us/tick). Overrides the
       value derived from ti,lra-frequency-hz. Carries the
       "lra_period: NNN" line from Pixel's /persist/haptics/drv2624.cal.
+      On sunfish this mirrors the stock dtbo value (262, ~155 Hz).
     $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 1
     maximum: 1023
+
+  ti,rtp-ol-lra-period:
+    description: |
+      Optional open-loop LRA period (raw 10-bit register value,
+      ~24.615 us/tick) used for the long real-time-playback (RTP)
+      buzz, which stock drives at a lower frequency than the click.
+      Defaults to ti,ol-lra-period when omitted. On sunfish this
+      mirrors the stock dtbo value (280, ~145 Hz).
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 1
+    maximum: 1023
+
+  ti,fb-brake-factor:
+    description: |
+      Feedback brake factor, LOOP_CONTROL register 0x23 bits [6:4].
+      Defaults to the chip reset value 3 (4x) when omitted. On sunfish
+      this mirrors the stock dtbo value (0, 1x brake).
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 0
+    maximum: 7
+    default: 3
+
+  ti,bemf-gain:
+    description: |
+      Back-EMF gain, LOOP_CONTROL register 0x23 bits [1:0]. Defaults
+      to the chip reset value 2 when omitted. On sunfish this mirrors
+      the stock dtbo value (0).
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 0
+    maximum: 3
+    default: 2
 
 required:
   - compatible
