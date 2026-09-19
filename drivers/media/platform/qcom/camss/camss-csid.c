@@ -1053,7 +1053,6 @@ static int csid_set_test_pattern(struct csid_device *csid, s32 value)
 
 	/* If CSID is linked to CSIPHY, do not allow to enable test generator */
 	if (value && media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_SINK])) {
-		printk("csid_set_test_pattern\n");
 		return -EBUSY;
 	}
 
@@ -1255,7 +1254,6 @@ static int csid_link_setup(struct media_entity *entity,
 {
 	if (flags & MEDIA_LNK_FL_ENABLED)
 		if (media_pad_remote_pad_first(local)) {
-			printk("csid_link_setup media_pad_remote_pad_first\n");
 			return -EBUSY;
 		}
 
@@ -1274,7 +1272,6 @@ static int csid_link_setup(struct media_entity *entity,
 		/* do not allow a link from CSIPHY to CSID */
 		if (csid->testgen.nmodes != CSID_PAYLOAD_MODE_DISABLED &&
 		    csid->testgen_mode->cur.val != 0) {
-			printk("csid_link_setup test generator\n");
 			return -EBUSY;
 		}
 

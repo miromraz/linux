@@ -96,7 +96,6 @@ static int video_get_subdev_format(struct camss_video *video,
 
 	subdev = video_remote_subdev(video, &pad);
 	if (subdev == NULL) {
-		printk(KERN_INFO "subdev is null\n");
 		return -EPIPE;
 	}
 
@@ -232,7 +231,6 @@ static int video_check_format(struct camss_video *video)
 	    pix->width != sd_pix->width ||
 	    pix->num_planes != sd_pix->num_planes ||
 	    pix->field != format.fmt.pix_mp.field) {
-		printk(KERN_INFO "format mismatch\n");
 		return -EPIPE;
 	}
 
@@ -245,7 +243,6 @@ static int video_prepare_streaming(struct vb2_queue *q)
 	struct video_device *vdev = &video->vdev;
 	int ret;
 
-	printk(KERN_INFO "video_prepare_streaming called\n");
 	ret = v4l2_pipeline_pm_get(&vdev->entity);
 	if (ret < 0) {
 		dev_err(video->camss->dev, "Failed to power up pipeline: %d\n",
@@ -563,7 +560,6 @@ static int video_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
 	int ret;
 
 	if (vb2_is_busy(&video->vb2_q)) {
-		printk(KERN_INFO "video_s_fmt\n");
 		return -EBUSY;
 	}
 
