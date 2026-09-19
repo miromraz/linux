@@ -871,7 +871,14 @@
 
 		ti,actuator = "lra";
 		ti,lra-frequency-hz = <172>;
-		/* Omit ti,rated-voltage-reg / ti,od-clamp-reg → chip defaults. */
+
+		/* RATED_VOLT / OD_CLAMP from the stock sunfish dtbo. */
+		ti,rated-voltage-reg = <109>;
+		ti,od-clamp-reg = <161>;
+
+		/* FB_BRAKE_FACTOR 1x, no BEMF gain — stock sunfish dtbo. */
+		ti,fb-brake-factor = <0>;
+		ti,bemf-gain = <0>;
 
 		/*
 		 * Factory autocal compensation from
@@ -883,11 +890,12 @@
 		ti,autocal-comp = /bits/ 8 <18 150>;
 
 		/*
-		 * Raw 9-bit open-loop period from the same cal file
-		 * ("lra_period: 241"). Overrides the freq-derived
-		 * approximation in the driver.
+		 * Open-loop periods from the stock sunfish dtbo: 262
+		 * (~155 Hz) for the sine click, 280 (~145 Hz) for the
+		 * square RTP buzz.
 		 */
 		ti,ol-lra-period = <241>;
+		ti,rtp-ol-lra-period = <256>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&haptic_en_default>;

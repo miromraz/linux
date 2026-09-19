@@ -40,6 +40,13 @@
  * A `ti,autocal-comp` byte-array DT property can carry the device's
  * factory autocal compensation; if absent the chip's internal
  * defaults are used.
+ *
+ * The register tuning mirrors what stock Android runs on the Pixel 4a
+ * (sunfish), read from the stock dtbo and the Pixel haptics HAL: always
+ * open loop; the click is a sine wave at the ~155 Hz open-loop period
+ * played from RAM at 100 % gain; the long RTP buzz is a square wave at
+ * the ~145 Hz open-loop period; RATED_VOLTAGE 109 / OD_CLAMP 161; brake
+ * factor 1x and BEMF gain 0. The per-board numbers come from DT.
  */
 
 #include <linux/delay.h>
@@ -64,6 +71,7 @@
 #define   DRV2624_MODE_RAM_WAVE_SEQ	0x01
 #define DRV2624_REG_CONTROL1		0x08
 #define   DRV2624_CTRL1_LRA		BIT(7)	/* LRA_ERM, Table 8-11 */
+#define   DRV2624_CTRL1_OPEN_LOOP	BIT(6)	/* CONTROL_LOOP: 1 = open loop */
 #define   DRV2624_CTRL1_AUTO_BRK_OL	BIT(4)
 #define   DRV2624_CTRL1_AUTO_BRK_INTO_STBY  BIT(3)
 #define DRV2624_REG_GO			0x0C
@@ -78,6 +86,9 @@
 #define DRV2624_REG_RATED_VOLT		0x1F
 #define DRV2624_REG_OD_CLAMP		0x20
 #define DRV2624_REG_AUTOCAL_COMP	0x21	/* A_CAL_COMP + A_CAL_BEMF, 0x21/0x22 */
+#define DRV2624_REG_LOOP_CONTROL	0x23	/* NG/FB_BRAKE/LOOP_GAIN/BEMF_GAIN */
+#define   DRV2624_FB_BRAKE_FACTOR_MASK	GENMASK(6, 4)
+#define   DRV2624_BEMF_GAIN_MASK	GENMASK(1, 0)
 #define DRV2624_REG_DRIVE_TIME		0x27
 #define DRV2624_REG_BLANKING_IDISS	0x28
 #define DRV2624_REG_ZC_DET_TIME		0x29
@@ -158,14 +169,19 @@ struct drv2624_data {
 	enum drv2624_actuator actuator;
 	u32 lra_freq_hz;
 	u32 ol_lra_period;	/* DT-supplied per-unit factory cal; 0 = derive from freq */
+	u32 rtp_ol_lra_period;	/* open-loop period used for RTP; 0 = use click period */
+	u32 ol_period_click;	/* open-loop period programmed for the click */
 	u8 rated_volt_raw;	/* raw register value; 0 = leave at chip default */
 	u8 od_clamp_raw;	/* raw register value; 0 = leave at chip default */
+	u8 fb_brake_factor;	/* CONTROL 0x23[6:4]; chip reset default 3 */
+	u8 bemf_gain;		/* CONTROL 0x23[1:0]; chip reset default 2 */
 	u8 autocal[2];
 	bool autocal_present;
 
 	u8 magnitude;
 	u8 gain;		/* DIG_MEM_GAIN value currently programmed */
 	bool parked;		/* chip is in Waveform Sequencer park state */
+	bool rtp_wave;		/* chip has RTP square wave + RTP period loaded */
 };
 
 static const struct regmap_config drv2624_regmap_config = {
@@ -204,30 +220,37 @@ static int drv2624_park_seq(struct drv2624_data *h, u8 effect_id)
 				  DRV2624_MODE_MASK, DRV2624_MODE_RAM_WAVE_SEQ);
 }
 
-/* Map the 7-bit magnitude to DIG_MEM_GAIN (Table 8-17): 0=100% .. 3=25%. */
+/* Write the 10-bit OL_LRA_PERIOD (bits [9:8] in PERIOD_H, [7:0] in PERIOD_L). */
+static int drv2624_write_ol_period(struct drv2624_data *h, u32 period)
+{
+	int error;
+
+	period = min_t(u32, period, 0x3FF);
+	error = regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_H,
+			     (period >> 8) & 0x03);
+	if (error)
+		return error;
+	return regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_L,
+			    period & 0xFF);
+}
+
 /*
- * Map the FF magnitude to DIG_MEM_GAIN for the click. Measured on the
- * Pixel 4a with a microphone (one-period RAM click, same grip, 4 taps per
- * step, values read back from CONTROL2 after each tap):
+ * Map the FF magnitude to DIG_MEM_GAIN (Table 8-17): 0=100% .. 3=25%.
  *
- *   gain step   peak        attack
- *   25 %        -43.7 dBFS  21 ms    under-driven
- *   50 %        -33.8 dBFS  9.8 ms   strongest and sharpest
- *   75 %        -38.1 dBFS  20.5 ms  over-driven
- *   100 %       -38.1 dBFS  20.5 ms  over-driven
- *
- * A single full-scale period over-drives the LRA and the closed loop and
- * brake cut the stroke, so anything above the 50 % step feels duller, not
- * stronger. Normal taps therefore use the 50 % step; only clearly light
- * requests drop to 25 %. Note ff-memless hands the driver about 3/4 of the
- * requested magnitude (a 0xffff request arrives as ~96 after >> 9), so the
- * threshold is on the value that actually arrives.
+ * Stock Android runs the click open loop with a 1x brake factor and plays
+ * the RAM click at 100 % gain. An earlier "50 % is best" measurement was
+ * made in CLOSED loop with a 4x brake factor (both since dropped to match
+ * stock), so it no longer applies and is superseded. Normal taps therefore
+ * play at 100 %; only clearly light requests drop to 50 %. ff-memless hands
+ * the driver about 3/4 of the requested magnitude (a 0xffff request arrives
+ * as ~96 after >> 9), so a 0.5 theme value arrives as ~48; the threshold is
+ * on the value that actually arrives.
  */
 static u8 drv2624_mag_to_gain(u8 mag)
 {
-	if (mag >= 31)
-		return 2;	/* 50 %: the strongest, sharpest click */
-	return 3;		/* 25 % */
+	if (mag >= 48)
+		return 0;	/* 100 %: stock full-scale click */
+	return 2;		/* 50 % */
 }
 
 /*
@@ -255,6 +278,18 @@ static void drv2624_worker(struct work_struct *work)
 		error = regmap_write(h->regmap, DRV2624_REG_GO, 0);
 		if (error)
 			dev_err(dev, "GO clear failed: %d\n", error);
+		/*
+		 * If the RTP path swapped in the square wave + RTP period,
+		 * restore the click's sine wave + open-loop period so the next
+		 * tap fires the stock-matching click.
+		 */
+		if (h->rtp_wave) {
+			regmap_update_bits(h->regmap, DRV2624_REG_LRA_WAVE_SHAPE,
+					   DRV2624_LRA_WAVE_SINE,
+					   DRV2624_LRA_WAVE_SINE);
+			drv2624_write_ol_period(h, h->ol_period_click);
+			h->rtp_wave = false;
+		}
 		error = drv2624_park_seq(h, DRV2624_ROM_EFFECT_CLICK);
 		if (error)
 			dev_err(dev, "re-park failed: %d\n", error);
@@ -276,6 +311,27 @@ static void drv2624_worker(struct work_struct *work)
 			return;
 		}
 		h->gain = gain;
+	}
+
+	/*
+	 * (a2) if a prior RTP burst left the square wave + RTP period, put the
+	 * click's sine wave + open-loop period back before firing (guarded by
+	 * the flag so a plain click that follows another click writes nothing).
+	 */
+	if (h->rtp_wave) {
+		error = regmap_update_bits(h->regmap, DRV2624_REG_LRA_WAVE_SHAPE,
+					   DRV2624_LRA_WAVE_SINE,
+					   DRV2624_LRA_WAVE_SINE);
+		if (error) {
+			dev_err(dev, "wave-shape restore failed: %d\n", error);
+			return;
+		}
+		error = drv2624_write_ol_period(h, h->ol_period_click);
+		if (error) {
+			dev_err(dev, "OL period restore failed: %d\n", error);
+			return;
+		}
+		h->rtp_wave = false;
 	}
 
 	/* (b) make sure the sequencer is parked so GO fires the RAM click. */
@@ -315,6 +371,26 @@ static void drv2624_handover(struct work_struct *work)
 
 	if (!mag)
 		return;
+
+	/*
+	 * Stock drives the long RTP buzz with a square wave at the RTP
+	 * open-loop period (145 Hz on sunfish), distinct from the sine-wave
+	 * click. Swap those in before switching to RTP; the click path (or
+	 * stop) restores the sine wave + click period afterwards.
+	 */
+	error = regmap_update_bits(h->regmap, DRV2624_REG_LRA_WAVE_SHAPE,
+				   DRV2624_LRA_WAVE_SINE, 0);
+	if (error) {
+		dev_err(dev, "RTP wave-shape write failed: %d\n", error);
+		return;
+	}
+	error = drv2624_write_ol_period(h, h->rtp_ol_lra_period ?
+					h->rtp_ol_lra_period : h->ol_period_click);
+	if (error) {
+		dev_err(dev, "RTP OL period write failed: %d\n", error);
+		return;
+	}
+	h->rtp_wave = true;
 
 	error = regmap_update_bits(h->regmap, DRV2624_REG_MODE,
 				   DRV2624_MODE_MASK, DRV2624_MODE_RTP);
@@ -441,20 +517,23 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		return error;
 
 	/*
-	 * CONTROL1: set actuator type (LRA), enable open-loop auto-brake (a
-	 * brake waveform played at end of drive in open loop) and auto-brake
-	 * into standby (decelerate the LRA when GO returns to 0 rather than
-	 * cutting drive cold and leaving the actuator to ring down at its
-	 * natural Q). Without AUTO_BRK_INTO_STBY a typical phone LRA rings
-	 * for ~700 ms after the kernel ends an effect, which is felt as a
-	 * long buzz instead of a crisp tap.
+	 * CONTROL1: set actuator type (LRA), run open loop (stock sunfish
+	 * always drives open loop, "ctrl_loop=1"), enable open-loop auto-brake
+	 * (a brake waveform played at end of drive) and auto-brake into standby
+	 * (decelerate the LRA when GO returns to 0 rather than cutting drive
+	 * cold and leaving the actuator to ring down at its natural Q). Without
+	 * AUTO_BRK_INTO_STBY a typical phone LRA rings for ~700 ms after the
+	 * kernel ends an effect, which is felt as a long buzz instead of a
+	 * crisp tap. Effective byte 0xD8 (bit3 AUTO_BRK_INTO_STBY resets to 1).
 	 */
 	error = regmap_update_bits(h->regmap, DRV2624_REG_CONTROL1,
 				   DRV2624_CTRL1_LRA |
+				   DRV2624_CTRL1_OPEN_LOOP |
 				   DRV2624_CTRL1_AUTO_BRK_OL |
 				   DRV2624_CTRL1_AUTO_BRK_INTO_STBY,
 				   (h->actuator == DRV2624_ACTUATOR_LRA ?
 					DRV2624_CTRL1_LRA : 0) |
+				   DRV2624_CTRL1_OPEN_LOOP |
 				   DRV2624_CTRL1_AUTO_BRK_OL |
 				   DRV2624_CTRL1_AUTO_BRK_INTO_STBY);
 	if (error)
@@ -511,6 +590,16 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 1, h->autocal[1]);
 	}
 
+	/*
+	 * LOOP_CONTROL (0x23): FB_BRAKE_FACTOR[6:4] and BEMF_GAIN[1:0] from DT
+	 * (chip reset defaults 3 and 2). LOOP_GAIN[3:2] and NG_THRESH[7] are
+	 * left untouched via the mask. Stock sunfish sets both to 0 (1x brake,
+	 * no BEMF gain), giving 0x04 with LOOP_GAIN at its reset value 1.
+	 */
+	regmap_update_bits(h->regmap, DRV2624_REG_LOOP_CONTROL,
+			   DRV2624_FB_BRAKE_FACTOR_MASK | DRV2624_BEMF_GAIN_MASK,
+			   (h->fb_brake_factor << 4) | h->bemf_gain);
+
 	/* LRA timing: DRIVE_TIME is the half-cycle drive duration. */
 	if (h->actuator == DRV2624_ACTUATOR_LRA && h->lra_freq_hz) {
 		u32 drive_time = (5U * (1000U - h->lra_freq_hz)) / h->lra_freq_hz;
@@ -546,12 +635,12 @@ static int drv2624_hw_init(struct drv2624_data *h)
 			period = 0;
 		if (period) {
 			period = min_t(u32, period, 0x3FF);
-			regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_H,
-				     (period >> 8) & 0x03);
-			regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_L,
-				     period & 0xFF);
+			drv2624_write_ol_period(h, period);
+			h->ol_period_click = period;
 		}
 	}
+	/* Init leaves the click's sine wave + period programmed. */
+	h->rtp_wave = false;
 
 	/* Build and upload the waveform library to chip RAM. */
 	error = drv2624_upload_rom(h);
@@ -627,6 +716,25 @@ static int drv2624_probe(struct i2c_client *client)
 	 * from /persist/haptics/drv2624.cal "lra_period: 241".
 	 */
 	device_property_read_u32(dev, "ti,ol-lra-period", &h->ol_lra_period);
+
+	/*
+	 * Open-loop period used for the long RTP buzz (stock sunfish drives it
+	 * at a lower frequency than the click). Defaults to the click period.
+	 */
+	if (device_property_read_u32(dev, "ti,rtp-ol-lra-period",
+				     &h->rtp_ol_lra_period))
+		h->rtp_ol_lra_period = h->ol_lra_period;
+
+	/*
+	 * FB_BRAKE_FACTOR (0x23[6:4]) and BEMF_GAIN (0x23[1:0]); default to the
+	 * chip reset values (3 and 2) when absent. Stock sunfish sets both 0.
+	 */
+	h->fb_brake_factor = 3;
+	if (!device_property_read_u32(dev, "ti,fb-brake-factor", &val))
+		h->fb_brake_factor = val;
+	h->bemf_gain = 2;
+	if (!device_property_read_u32(dev, "ti,bemf-gain", &val))
+		h->bemf_gain = val;
 
 	/*
 	 * Optional factory autocal compensation. The board's per-device
