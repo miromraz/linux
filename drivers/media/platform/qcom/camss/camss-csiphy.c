@@ -723,7 +723,6 @@ static int csiphy_link_setup(struct media_entity *entity,
 			     const struct media_pad *local,
 			     const struct media_pad *remote, u32 flags)
 {
-	printk(KERN_INFO "csiphy_link_setup called\n");
 	if ((local->flags & MEDIA_PAD_FL_SOURCE) &&
 	    (flags & MEDIA_LNK_FL_ENABLED)) {
 		struct v4l2_subdev *sd;
@@ -731,7 +730,6 @@ static int csiphy_link_setup(struct media_entity *entity,
 		struct csid_device *csid;
 
 		if (media_pad_remote_pad_first(local)) {
-			printk("media_pad_remote_pad_first\n");
 			return -EBUSY;
 		}
 

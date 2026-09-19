@@ -1075,8 +1075,6 @@ static void csiphy_reset(struct csiphy_device *csiphy)
 {
 	struct csiphy_device_regs *regs = csiphy->regs;
 
-	printk(KERN_DEBUG "csiphy_reset id %d with base %p and offset %d\n", csiphy->id, csiphy->base, regs->offset);
-
 	writel_relaxed(0x1, csiphy->base +
 		      CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 0));
 	usleep_range(5000, 8000);
@@ -1089,8 +1087,6 @@ static irqreturn_t csiphy_isr(int irq, void *dev)
 	struct csiphy_device *csiphy = dev;
 	struct csiphy_device_regs *regs = csiphy->regs;
 	int i;
-
-	printk(KERN_DEBUG "csiphy_isr called\n");
 
 	for (i = 0; i < 11; i++) {
 		int c = i + 22;

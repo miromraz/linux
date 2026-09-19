@@ -1310,7 +1310,6 @@ static int ispif_link_setup(struct media_entity *entity,
 {
 	if (flags & MEDIA_LNK_FL_ENABLED) {
 		if (media_pad_remote_pad_first(local)) {
-			printk(KERN_INFO "ispif_link_setup\n");
 			return -EBUSY;
 		}
 

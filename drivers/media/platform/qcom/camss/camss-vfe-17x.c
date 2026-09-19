@@ -201,7 +201,6 @@ static void vfe_global_reset(struct vfe_device *vfe)
 	/* Make sure IRQ mask has been written before resetting */
 	wmb();
 
-	printk(KERN_INFO "Writing reset_bits=%x to vfe->base=%p with id %d\n", reset_bits, vfe->base, vfe->id);
 	writel_relaxed(reset_bits, vfe->base + VFE_GLOBAL_RESET_CMD);
 }
 
@@ -328,8 +327,6 @@ static void vfe_violation_read(struct vfe_device *vfe)
  */
 static irqreturn_t vfe_isr(int irq, void *dev)
 {
-	printk(KERN_INFO "vfe irq handled!\n");
-
 	struct vfe_device *vfe = dev;
 	u32 status0, status1, vfe_bus_status[VFE_LINE_NUM_MAX];
 	int i, wm;
