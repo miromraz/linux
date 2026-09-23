@@ -1214,6 +1214,11 @@
 	vcc-supply = <&vdd_qfprom>;
 };
 
+&qup_i2c7_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
 &qup_uart3_cts {
 	bias-pull-down;
 };
