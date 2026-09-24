@@ -230,6 +230,27 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&camera_rear_vcm_en>;
 	};
+
+	/*
+	 * External load switch gating the FTM5 touch controller's 3.0V analog
+	 * rail, enabled by pm6150 GPIO 4. The touch and display form one bonded
+	 * in-cell assembly, so the analog source (vreg_l7c_3p0) is shared with
+	 * the panel and stays up; only the tap to the touch chip is switched.
+	 */
+	vreg_touch_avdd: regulator-touch-avdd {
+		compatible = "regulator-fixed";
+
+		regulator-name = "touch_avdd";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+
+		gpio = <&pm6150_gpios 4 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		vin-supply = <&vreg_l7c_3p0>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&touch_power_default>;
+	};
 };
 
 &apps_rsc {
@@ -777,21 +798,21 @@
 
 		/*
 		 * VDD (digital, 1.8V) and AVDD (analog, 3.0V) are separate
-		 * physical supplies on the chip.  Downstream Android documents
-		 * the mapping in a commented-out hint in its sunfish DT, and
-		 * the rails are shared with the OLED panel (touch and display
-		 * are one bonded assembly).  pm6150 GPIO 4 enables an external
-		 * load switch upstream of these rails; it is asserted via
-		 * pinctrl below.
+		 * physical supplies on the chip.  The rails are shared with the
+		 * OLED panel (touch and display are one bonded assembly): VDD
+		 * comes straight from vreg_l13a_1p8 (also the display vddio).
+		 * The analog rail is gated to the touch chip by an external load
+		 * switch enabled from pm6150 GPIO 4, modelled as vreg_touch_avdd
+		 * so the driver's regulator votes actually cut touch power.
 		 */
 		vdd-supply  = <&vreg_l13a_1p8>;	/* 1.8V digital, shared with display vddio */
-		avdd-supply = <&vreg_l7c_3p0>;	/* 3.0V analog,  shared with display vdda-3p3 */
+		avdd-supply = <&vreg_touch_avdd>; /* 3.0V analog via the GPIO4 load switch */
 
 		touchscreen-size-x = <1080>;
 		touchscreen-size-y = <2340>;
 
 		pinctrl-names = "default";
-		pinctrl-0 = <&touch_irq_default &touch_reset_default &touch_power_default>;
+		pinctrl-0 = <&touch_irq_default &touch_reset_default>;
 	};
 };
 
@@ -1598,7 +1619,6 @@
 		qcom,drive-strength = <2>;
 		power-source = <1>;
 		bias-disable;
-		output-high;
 	};
 };
 
