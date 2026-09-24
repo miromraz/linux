@@ -133,7 +133,8 @@ static const struct nci_driver_ops nxp_nci_core_ops[] = {
  */
 #define ST54J_RF_PROTOCOL_MIFARE_CLASSIC 0x90
 
-static __u32 nxp_nci_get_rfprotocol(struct nci_dev *ndev, __u8 rf_protocol)
+static __u32 nxp_nci_st54j_get_rfprotocol(struct nci_dev *ndev,
+					  __u8 rf_protocol)
 {
 	if (rf_protocol == ST54J_RF_PROTOCOL_MIFARE_CLASSIC)
 		return NFC_PROTO_MIFARE_MASK;
@@ -141,23 +142,41 @@ static __u32 nxp_nci_get_rfprotocol(struct nci_dev *ndev, __u8 rf_protocol)
 	return 0;
 }
 
+/* NXP controllers: reachable firmware-download mode, no vendor RF protocols. */
 static const struct nci_ops nxp_nci_ops = {
 	.open = nxp_nci_open,
 	.close = nxp_nci_close,
 	.send = nxp_nci_send,
 	.fw_download = nxp_nci_fw_download,
-	.get_rfprotocol = nxp_nci_get_rfprotocol,
+	.core_ops = nxp_nci_core_ops,
+	.n_core_ops = ARRAY_SIZE(nxp_nci_core_ops),
+};
+
+/*
+ * The ST54J has no NXP firmware-download mode, so .fw_download is left out and
+ * the NFC core never offers it (a download would otherwise push NXP vendor
+ * frames to the ST part). It does report a proprietary RF protocol to map.
+ */
+static const struct nci_ops nxp_nci_st54j_ops = {
+	.open = nxp_nci_open,
+	.close = nxp_nci_close,
+	.send = nxp_nci_send,
+	.get_rfprotocol = nxp_nci_st54j_get_rfprotocol,
 	.core_ops = nxp_nci_core_ops,
 	.n_core_ops = ARRAY_SIZE(nxp_nci_core_ops),
 };
 
 int nxp_nci_probe(void *phy_id, struct device *pdev,
 		  const struct nxp_nci_phy_ops *phy_ops,
-		  unsigned int max_payload,
+		  unsigned int max_payload, enum nxp_nci_variant variant,
 		  struct nci_dev **ndev)
 {
+	const struct nci_ops *ops = &nxp_nci_ops;
 	struct nxp_nci_info *info;
 	int r;
+
+	if (variant == NXP_NCI_ST54J)
+		ops = &nxp_nci_st54j_ops;
 
 	info = devm_kzalloc(pdev, sizeof(struct nxp_nci_info), GFP_KERNEL);
 	if (!info)
@@ -179,7 +198,7 @@ int nxp_nci_probe(void *phy_id, struct device *pdev,
 
 	info->mode = NXP_NCI_MODE_COLD;
 
-	info->ndev = nci_allocate_device(&nxp_nci_ops, NXP_NCI_NFC_PROTOCOLS,
+	info->ndev = nci_allocate_device(ops, NXP_NCI_NFC_PROTOCOLS,
 					 NXP_NCI_HDR_LEN, 0);
 	if (!info->ndev)
 		return -ENOMEM;

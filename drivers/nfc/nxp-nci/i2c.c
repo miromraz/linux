@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/nfc.h>
 #include <linux/gpio/consumer.h>
+#include <linux/property.h>
 #include <linux/unaligned.h>
 
 #include <net/nfc/nfc.h>
@@ -309,7 +310,9 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
 	}
 
 	r = nxp_nci_probe(phy, &client->dev, &i2c_phy_ops,
-			  NXP_NCI_I2C_MAX_PAYLOAD, &phy->ndev);
+			  NXP_NCI_I2C_MAX_PAYLOAD,
+			  (enum nxp_nci_variant)(uintptr_t)device_get_match_data(dev),
+			  &phy->ndev);
 	if (r < 0)
 		return r;
 
@@ -369,7 +372,7 @@ static const struct of_device_id of_nxp_nci_i2c_match[] = {
 	 * The NXP-specific parts here are confined to the firmware-download mode,
 	 * which is only reachable through an NXP vendor command.
 	 */
-	{ .compatible = "st,st21nfc", },
+	{ .compatible = "st,st21nfc", .data = (void *)NXP_NCI_ST54J },
 	{}
 };
 MODULE_DEVICE_TABLE(of, of_nxp_nci_i2c_match);
