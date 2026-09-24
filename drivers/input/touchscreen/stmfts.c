@@ -16,7 +16,7 @@
 #include <linux/irq.h>
 #include <linux/leds.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 
@@ -1137,7 +1137,7 @@ static int stmfts_probe(struct i2c_client *client)
 	mutex_init(&sdata->mutex);
 	init_completion(&sdata->cmd_done);
 
-	sdata->ops = of_device_get_match_data(dev);
+	sdata->ops = i2c_get_match_data(client);
 	if (!sdata->ops)
 		/*
 		 * No OF match data: instantiated via the i2c_device_id table
