@@ -36,31 +36,27 @@ properties:
     maxItems: 1
 
   vdd-supply:
-    description: Optional power supply (1.8 V to 3.6 V).
+    description: Power supply to the chip (1.8 V to 3.6 V).
 
   ti,actuator:
     description: Actuator type connected to the driver.
     enum: [lra, erm]
     default: lra
 
-  ti,rated-voltage-reg:
+  vib-rated-mv:
     description: |
-      Optional raw RATED_VOLT register value (0x1F). The chip's reset
-      default (0x3F) is safe for typical LRAs; only set this when the
-      board's downstream HAL uses a different value. The voltage
-      formula depends on f_LRA, playback interval, OD_CLAMP_LATCH and
-      chip revision, so the driver does not derive this from mV.
+      Rated voltage of the actuator, in millivolts, programmed into
+      RATED_VOLTAGE (0x1F). Left at the chip reset default when omitted.
     $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 1
-    maximum: 255
 
-  ti,od-clamp-reg:
+  vib-overdrive-mv:
     description: |
-      Optional raw OD_CLAMP register value (0x20). Defaults to the
-      chip reset value (0x89) when omitted.
+      Overdrive clamp voltage of the actuator, in millivolts, programmed
+      into OD_CLAMP (0x20). This is the full-scale reference for the
+      open-loop drive. Left at the chip reset default when omitted.
     $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 1
-    maximum: 255
 
   ti,lra-frequency-hz:
     description: Resonant frequency of the LRA, in Hz. Ignored for ERM.
@@ -68,58 +64,31 @@ properties:
     maximum: 500
     default: 205
 
+  ti,open-loop-frequency-hz:
+    description: |
+      Frequency at which the LRA is driven in open loop, in Hz. Defaults
+      to the resonant frequency (ti,lra-frequency-hz) when omitted; set it
+      when the actuator is tuned to run off resonance. Ignored for ERM.
+    minimum: 50
+    maximum: 500
+
+  ti,rtp-open-loop-frequency-hz:
+    description: |
+      Open-loop drive frequency, in Hz, used for the sustained real-time
+      playback (RTP) buzz, which may run at a different frequency than the
+      click. Defaults to ti,open-loop-frequency-hz when omitted. Ignored
+      for ERM.
+    minimum: 50
+    maximum: 500
+
   ti,autocal-comp:
     description: |
-      Optional per-device factory autocal compensation bytes. The
-      driver writes these two values to A_CAL_COMP (0x21) and
-      A_CAL_BEMF (0x22) at init time. For Pixel devices this carries
-      the values from /persist/haptics/drv2624.cal's "autocal: X Y"
-      line. If omitted, the chip's internal autocal default is used.
+      Optional factory autocal compensation. The driver writes these two
+      raw calibration bytes to A_CAL_COMP (0x21) and A_CAL_BEMF (0x22) at
+      init time. If omitted, the chip's internal autocal default is used.
     $ref: /schemas/types.yaml#/definitions/uint8-array
     minItems: 2
     maxItems: 2
-
-  ti,ol-lra-period:
-    description: |
-      Optional per-device factory-calibrated open-loop LRA period as
-      the raw 10-bit register value (~24.615 us/tick). Overrides the
-      value derived from ti,lra-frequency-hz. Carries the
-      "lra_period: NNN" line from Pixel's /persist/haptics/drv2624.cal.
-      On sunfish this mirrors the stock dtbo value (262, ~155 Hz).
-    $ref: /schemas/types.yaml#/definitions/uint32
-    minimum: 1
-    maximum: 1023
-
-  ti,rtp-ol-lra-period:
-    description: |
-      Optional open-loop LRA period (raw 10-bit register value,
-      ~24.615 us/tick) used for the long real-time-playback (RTP)
-      buzz, which stock drives at a lower frequency than the click.
-      Defaults to ti,ol-lra-period when omitted. On sunfish this
-      mirrors the stock dtbo value (280, ~145 Hz).
-    $ref: /schemas/types.yaml#/definitions/uint32
-    minimum: 1
-    maximum: 1023
-
-  ti,fb-brake-factor:
-    description: |
-      Feedback brake factor, LOOP_CONTROL register 0x23 bits [6:4].
-      Defaults to the chip reset value 3 (4x) when omitted. On sunfish
-      this mirrors the stock dtbo value (0, 1x brake).
-    $ref: /schemas/types.yaml#/definitions/uint32
-    minimum: 0
-    maximum: 7
-    default: 3
-
-  ti,bemf-gain:
-    description: |
-      Back-EMF gain, LOOP_CONTROL register 0x23 bits [1:0]. Defaults
-      to the chip reset value 2 when omitted. On sunfish this mirrors
-      the stock dtbo value (0).
-    $ref: /schemas/types.yaml#/definitions/uint32
-    minimum: 0
-    maximum: 3
-    default: 2
 
 required:
   - compatible
@@ -140,7 +109,10 @@ examples:
             compatible = "ti,drv2624";
             reg = <0x5a>;
             enable-gpios = <&tlmm 11 GPIO_ACTIVE_HIGH>;
+            vdd-supply = <&vreg_haptic>;
             ti,actuator = "lra";
             ti,lra-frequency-hz = <205>;
+            vib-rated-mv = <2243>;
+            vib-overdrive-mv = <3416>;
         };
     };
