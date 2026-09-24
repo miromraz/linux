@@ -25252,6 +25252,14 @@ S:	Maintained
 T:	git git://linuxtv.org/media.git
 F:	drivers/media/i2c/imx355.c
 
+SONY IMX363 SENSOR DRIVER
+M:	Miroslav Mráz <mraz.miro@seznam.cz>
+L:	linux-media@vger.kernel.org
+S:	Maintained
+T:	git git://linuxtv.org/media.git
+F:	Documentation/devicetree/bindings/media/i2c/sony,imx363.yaml
+F:	drivers/media/i2c/imx363.c
+
 SONY IMX412 SENSOR DRIVER
 L:	linux-media@vger.kernel.org
 S:	Orphan
