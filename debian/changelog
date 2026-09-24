@@ -1,0 +1,5 @@
+linux-a52q (6.14.7-sm7125-1) trixie; urgency=low
+
+  * Custom built Linux kernel.
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Thu, 25 Sep 2026 12:00:00 +0200

@@ -1,0 +1,34 @@
+Source: linux-a52q
+Section: kernel
+Priority: optional
+Maintainer: Miroslav Mraz <mraz.miro@seznam.cz>
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 12)
+Build-Depends-Arch: bc, bison, flex,
+ gcc-aarch64-linux-gnu <!pkg.linux-a52q.nokernelheaders>,
+ kmod, libdw-dev:native, libelf-dev:native,
+ libssl-dev:native, libssl-dev <!pkg.linux-a52q.nokernelheaders>,
+ python3:native, rsync
+Homepage: https://www.kernel.org/
+
+Package: linux-image-6.14.7-sm7125
+Architecture: arm64
+Description: Linux kernel, version 6.14.7-sm7125
+ This package contains the Linux kernel, modules and corresponding other
+ files, version: 6.14.7-sm7125.
+
+Package: linux-headers-6.14.7-sm7125
+Architecture: arm64
+Build-Profiles: <!pkg.linux-a52q.nokernelheaders>
+Description: Linux kernel headers for 6.14.7-sm7125 on arm64
+ This package provides kernel header files for 6.14.7-sm7125 on arm64
+ .
+ This is useful for people who need to build external modules
+
+Package: linux-image-6.14.7-sm7125-dbg
+Section: debug
+Architecture: arm64
+Build-Profiles: <!pkg.linux-a52q.nokerneldbg>
+Description: Linux kernel debugging symbols for 6.14.7-sm7125
+ This package will come in handy if you need to debug the kernel. It provides
+ all the necessary debug symbols for the kernel and its modules.
