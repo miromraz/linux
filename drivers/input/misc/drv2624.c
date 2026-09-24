@@ -586,8 +586,14 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	 * back to its internal calibration defaults — usable but less tuned.
 	 */
 	if (h->autocal_present) {
-		regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 0, h->autocal[0]);
-		regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 1, h->autocal[1]);
+		error = regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 0,
+				     h->autocal[0]);
+		if (error)
+			return error;
+		error = regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 1,
+				     h->autocal[1]);
+		if (error)
+			return error;
 	}
 
 	/*
@@ -596,26 +602,36 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	 * left untouched via the mask. Stock sunfish sets both to 0 (1x brake,
 	 * no BEMF gain), giving 0x04 with LOOP_GAIN at its reset value 1.
 	 */
-	regmap_update_bits(h->regmap, DRV2624_REG_LOOP_CONTROL,
-			   DRV2624_FB_BRAKE_FACTOR_MASK | DRV2624_BEMF_GAIN_MASK,
-			   (h->fb_brake_factor << 4) | h->bemf_gain);
+	error = regmap_update_bits(h->regmap, DRV2624_REG_LOOP_CONTROL,
+				   DRV2624_FB_BRAKE_FACTOR_MASK | DRV2624_BEMF_GAIN_MASK,
+				   (h->fb_brake_factor << 4) | h->bemf_gain);
+	if (error)
+		return error;
 
 	/* LRA timing: DRIVE_TIME is the half-cycle drive duration. */
 	if (h->actuator == DRV2624_ACTUATOR_LRA && h->lra_freq_hz) {
 		u32 drive_time = (5U * (1000U - h->lra_freq_hz)) / h->lra_freq_hz;
 
 		drive_time = min_t(u32, drive_time, 0x1F);
-		regmap_update_bits(h->regmap, DRV2624_REG_DRIVE_TIME,
-				   0x1F, drive_time);
+		error = regmap_update_bits(h->regmap, DRV2624_REG_DRIVE_TIME,
+					   0x1F, drive_time);
+		if (error)
+			return error;
 	}
 
 	/* BEMF sample timing + zero-cross detect — Pixel-downstream defaults. */
-	regmap_write(h->regmap, DRV2624_REG_BLANKING_IDISS, 0x22);
-	regmap_write(h->regmap, DRV2624_REG_ZC_DET_TIME, 0x00);
+	error = regmap_write(h->regmap, DRV2624_REG_BLANKING_IDISS, 0x22);
+	if (error)
+		return error;
+	error = regmap_write(h->regmap, DRV2624_REG_ZC_DET_TIME, 0x00);
+	if (error)
+		return error;
 
 	/* Sine wave shape (default square sounds buzzier). */
-	regmap_update_bits(h->regmap, DRV2624_REG_LRA_WAVE_SHAPE,
-			   DRV2624_LRA_WAVE_SINE, DRV2624_LRA_WAVE_SINE);
+	error = regmap_update_bits(h->regmap, DRV2624_REG_LRA_WAVE_SHAPE,
+				   DRV2624_LRA_WAVE_SINE, DRV2624_LRA_WAVE_SINE);
+	if (error)
+		return error;
 
 	/*
 	 * Open-loop LRA period. The chip uses this until the closed-loop
@@ -635,7 +651,9 @@ static int drv2624_hw_init(struct drv2624_data *h)
 			period = 0;
 		if (period) {
 			period = min_t(u32, period, 0x3FF);
-			drv2624_write_ol_period(h, period);
+			error = drv2624_write_ol_period(h, period);
+			if (error)
+				return error;
 			h->ol_period_click = period;
 		}
 	}
@@ -663,7 +681,9 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	 * sticky and clear-on-read) before the first play.
 	 */
 	usleep_range(5000, 8000);
-	regmap_read(h->regmap, DRV2624_REG_STATUS, &status);
+	error = regmap_read(h->regmap, DRV2624_REG_STATUS, &status);
+	if (error)
+		return error;
 
 	return 0;
 }
