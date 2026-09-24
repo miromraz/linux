@@ -1285,7 +1285,7 @@ static int imx363_init_controls(struct imx363 *imx363)
 		imx363->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 
 	link_freq_cfgs = &imx363->link_freq_configs[0];
-	link_cfg = link_freq_cfgs[imx363->lane_mode_idx].link_cfg;
+	link_cfg = &link_freq_cfgs->link_cfg[imx363->lane_mode_idx];
 	pixel_rate = link_freq_to_pixel_rate(imx363->link_freq_menu_items[0],
 					     link_cfg);
 	printk(KERN_INFO "imx363: pixel_rate: %lld\n", pixel_rate);
