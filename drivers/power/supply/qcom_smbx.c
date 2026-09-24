@@ -221,13 +221,13 @@ enum smb_generation {
 #define PD_9V_CURRENT_UA				2000000
 
 /*
- * Battery side ceiling. 1.95A is the conservative default used whenever the
- * pack temperature is unknown or high. 4A is only programmed for a 9V contract
- * with a healthy thermistor reading; it is what lets ~18W actually reach the
- * pack, and is 1.3C on the 3080mAh sunfish cell.
+ * Conservative pack-side fast-charge default, used whenever the pack
+ * temperature is unknown or outside the fast-charge window. A board that
+ * declares a higher constant-charge-current-max in its battery node has its
+ * ceiling raised to that value under a 9V PD contract with a healthy
+ * thermistor reading, which is what lets more than ~10W reach the pack.
  */
 #define FAST_CHARGE_CURRENT_UA				1950000
-#define FAST_CHARGE_CURRENT_9V_UA			4000000
 
 /*
  * Pack temperature gate for FAST_CHARGE_CURRENT_9V_UA, deci-degrees C.
@@ -625,7 +625,7 @@ static bool smb_batt_temp_derate(struct smb_chip *chip)
 static int smb5_pd_apply(struct smb_chip *chip)
 {
 	union power_supply_propval online, volt, curr;
-	unsigned int current_ua, prev_allow;
+	unsigned int current_ua, prev_allow, fast_charge_ua;
 	int rc;
 
 	if (chip->gen != SMB5)
@@ -689,11 +689,17 @@ static int smb5_pd_apply(struct smb_chip *chip)
 	/*
 	 * The battery side ceiling is the only thermal lever needed: the buck
 	 * draws input power to match what it delivers, so capping the charge
-	 * current pulls the input down with it.
+	 * current pulls the input down with it. The raised ceiling is the pack's
+	 * own constant-charge-current-max from the battery node; a board that
+	 * does not declare one keeps the conservative default even at 9V.
 	 */
+	fast_charge_ua = chip->batt_info->constant_charge_current_max_ua > 0 ?
+			 chip->batt_info->constant_charge_current_max_ua :
+			 FAST_CHARGE_CURRENT_UA;
+
 	rc = smb_set_fast_charge_current(chip, smb_batt_temp_derate(chip) ?
 						       FAST_CHARGE_CURRENT_UA :
-						       FAST_CHARGE_CURRENT_9V_UA);
+						       fast_charge_ua);
 	if (rc < 0) {
 		dev_err(chip->dev, "Couldn't set fast charge current: %d\n", rc);
 		goto restore_allow;
