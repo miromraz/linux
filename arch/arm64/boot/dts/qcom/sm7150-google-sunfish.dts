@@ -872,30 +872,20 @@
 		ti,actuator = "lra";
 		ti,lra-frequency-hz = <172>;
 
-		/* RATED_VOLT / OD_CLAMP from the stock sunfish dtbo. */
-		ti,rated-voltage-reg = <109>;
-		ti,od-clamp-reg = <161>;
-
-		/* FB_BRAKE_FACTOR 1x, no BEMF gain — stock sunfish dtbo. */
-		ti,fb-brake-factor = <0>;
-		ti,bemf-gain = <0>;
-
 		/*
-		 * Factory autocal compensation from
-		 * /persist/haptics/drv2624.cal on a real sunfish unit.
-		 * Variations between phones exist; this is a reasonable
-		 * shared default that still feels right on most Pixel 4a
-		 * LRAs we've seen.
+		 * Stock sunfish tuning. The mV values convert to the stock
+		 * RATED_VOLTAGE 109 (2243 / 20.58) and OD_CLAMP 161
+		 * (3416 / 21.22); the open-loop frequencies convert to the
+		 * stock OL_LRA_PERIOD 262 (~155 Hz sine click) and 280
+		 * (~145 Hz square RTP buzz).
 		 */
+		vib-rated-mv = <2243>;
+		vib-overdrive-mv = <3416>;
+		ti,open-loop-frequency-hz = <155>;
+		ti,rtp-open-loop-frequency-hz = <145>;
+
+		/* Factory autocal compensation from a real sunfish unit. */
 		ti,autocal-comp = /bits/ 8 <18 150>;
-
-		/*
-		 * Open-loop periods from the stock sunfish dtbo: 262
-		 * (~155 Hz) for the sine click, 280 (~145 Hz) for the
-		 * square RTP buzz.
-		 */
-		ti,ol-lra-period = <241>;
-		ti,rtp-ol-lra-period = <256>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&haptic_en_default>;
