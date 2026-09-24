@@ -8,7 +8,6 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
 #include <dt-bindings/clock/qcom,sm7150-videocc.h>
@@ -50,6 +49,7 @@ static struct alpha_pll_config videocc_pll0_config = {
 
 static struct clk_alpha_pll videocc_pll0 = {
 	.offset = 0x42c,
+	.config = &videocc_pll0_config,
 	.vco_table = fabia_vco,
 	.num_vco = ARRAY_SIZE(fabia_vco),
 	.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_FABIA],
@@ -315,12 +315,29 @@ static const struct regmap_config videocc_sm7150_regmap_config = {
 	.fast_io	= true,
 };
 
+static struct clk_alpha_pll *videocc_sm7150_plls[] = {
+	&videocc_pll0,
+};
+
+static const u32 videocc_sm7150_critical_cbcrs[] = {
+	0x984, /* VIDEOCC_XO_CLK */
+};
+
+static const struct qcom_cc_driver_data videocc_sm7150_driver_data = {
+	.alpha_plls = videocc_sm7150_plls,
+	.num_alpha_plls = ARRAY_SIZE(videocc_sm7150_plls),
+	.clk_cbcrs = videocc_sm7150_critical_cbcrs,
+	.num_clk_cbcrs = ARRAY_SIZE(videocc_sm7150_critical_cbcrs),
+};
+
 static const struct qcom_cc_desc videocc_sm7150_desc = {
 	.config = &videocc_sm7150_regmap_config,
 	.clks = videocc_sm7150_clocks,
 	.num_clks = ARRAY_SIZE(videocc_sm7150_clocks),
 	.gdscs = videocc_sm7150_gdscs,
 	.num_gdscs = ARRAY_SIZE(videocc_sm7150_gdscs),
+	.use_rpm = true,
+	.driver_data = &videocc_sm7150_driver_data,
 };
 
 static const struct of_device_id videocc_sm7150_match_table[] = {
@@ -331,33 +348,7 @@ MODULE_DEVICE_TABLE(of, videocc_sm7150_match_table);
 
 static int videocc_sm7150_probe(struct platform_device *pdev)
 {
-	struct regmap *regmap;
-	int ret;
-
-	ret = devm_pm_runtime_enable(&pdev->dev);
-	if (ret)
-		return ret;
-
-	ret = pm_runtime_resume_and_get(&pdev->dev);
-	if (ret)
-		return ret;
-
-	regmap = qcom_cc_map(pdev, &videocc_sm7150_desc);
-	if (IS_ERR(regmap)) {
-		pm_runtime_put(&pdev->dev);
-		return PTR_ERR(regmap);
-	}
-
-	clk_fabia_pll_configure(&videocc_pll0, regmap, &videocc_pll0_config);
-
-	/* Keep some clocks always-on */
-	qcom_branch_set_clk_en(regmap, 0x984); /* VIDEOCC_XO_CLK */
-
-	ret = qcom_cc_really_probe(&pdev->dev, &videocc_sm7150_desc, regmap);
-
-	pm_runtime_put(&pdev->dev);
-
-	return ret;
+	return qcom_cc_probe(pdev, &videocc_sm7150_desc);
 }
 
 static struct platform_driver videocc_sm7150_driver = {

@@ -2031,6 +2031,14 @@ static int camcc_sm7150_probe(struct platform_device *pdev)
 	struct regmap *regmap;
 	int ret;
 
+	/*
+	 * camcc_pll2 is an Agera PLL registered with the Fabia register
+	 * offsets, so qcom_clk_alpha_pll_configure() (which selects the
+	 * configure routine from ->regs) would misconfigure it. Keep the
+	 * explicit configuration here rather than the desc->driver_data path,
+	 * and enable runtime PM by hand so the register writes below run with
+	 * the power domain resumed.
+	 */
 	ret = devm_pm_runtime_enable(&pdev->dev);
 	if (ret)
 		return ret;
