@@ -1126,13 +1126,15 @@ static int imx363_power_on(struct device *dev)
 
 	usleep_range(400, 600);
 
-	gpiod_set_value_cansleep(imx363->reset_gpio, 0);
-
 	ret = clk_prepare_enable(imx363->clk);
 	if (ret) {
 		dev_err(dev, "failed to enable clock\n");
 		regulator_bulk_disable(IMX363_NUM_SUPPLIES, imx363->supplies);
+		return ret;
 	}
+
+	/* Release XCLR only once the rails and INCK are stable. */
+	gpiod_set_value_cansleep(imx363->reset_gpio, 0);
 
 	usleep_range(1000, 1200);
 
@@ -1472,9 +1474,9 @@ static int imx363_probe(struct i2c_client *client)
 
 	imx363->csi2_flags = ep.bus.mipi_csi2.flags;
 
-	/* request optional reset pin */
+	/* Request the reset line asserted (sensor held in reset). */
 	imx363->reset_gpio = devm_gpiod_get_optional(&client->dev, "reset",
-						     GPIOD_OUT_LOW);
+						     GPIOD_OUT_HIGH);
 	if (IS_ERR(imx363->reset_gpio)) {
 		ret = PTR_ERR(imx363->reset_gpio);
 		goto error_endpoint_free;
