@@ -763,7 +763,15 @@ static void smb_status_change_work(struct work_struct *work)
 		current_ua = CDP_CURRENT_UA;
 		break;
 	case POWER_SUPPLY_USB_TYPE_DCP:
-		current_ua = chip->batt_info->constant_charge_current_max_ua;
+		/*
+		 * This is the USBIN *input* current limit, not a pack charge
+		 * current. Seed it from the pack's constant-charge-current-max
+		 * when the battery node declares one, else fall back to the
+		 * DCP default; AICL then ramps to what the adapter can hold.
+		 */
+		current_ua = chip->batt_info->constant_charge_current_max_ua > 0 ?
+			chip->batt_info->constant_charge_current_max_ua :
+			DCP_CURRENT_UA;
 		break;
 	case POWER_SUPPLY_USB_TYPE_SDP:
 	default:
@@ -1382,8 +1390,6 @@ static int smb_probe(struct platform_device *pdev)
 	if (rc)
 		return dev_err_probe(chip->dev, rc,
 				     "Failed to get battery info\n");
-	if (chip->batt_info->constant_charge_current_max_ua == -EINVAL)
-		chip->batt_info->constant_charge_current_max_ua = DCP_CURRENT_UA;
 
 	rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500 + 1;
 	rc = regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
