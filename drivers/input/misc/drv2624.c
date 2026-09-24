@@ -620,7 +620,7 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	/*
 	 * Open-loop LRA period. The chip uses this until the closed-loop
 	 * tracker locks on resonance. Register unit is 24.615 us (datasheet
-	 * Table 8-47); period_ticks ~ 41000 / f_Hz, and OL_LRA_PERIOD is
+	 * SLOS893D reg 0x2E/0x2F); period_ticks ~ 40626 / f_Hz, and OL_LRA_PERIOD is
 	 * 10 bits wide (bits [9:8] in PERIOD_H, [7:0] in PERIOD_L). The DT prop
 	 * ti,ol-lra-period overrides the computed value with the chip's
 	 * per-unit factory-calibrated period (Pixel devices ship this in
@@ -630,7 +630,7 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		if (h->ol_lra_period)
 			period = h->ol_lra_period;
 		else if (h->lra_freq_hz)
-			period = 41000U / h->lra_freq_hz;
+			period = DIV_ROUND_CLOSEST(40626U, h->lra_freq_hz);
 		else
 			period = 0;
 		if (period) {
@@ -700,7 +700,7 @@ static int drv2624_probe(struct i2c_client *client)
 
 	/*
 	 * Optional raw RATED_VOLT / OD_CLAMP register values. The chip's
-	 * reset defaults (0x3E / 0x89) are safe and usually correct, so
+	 * reset defaults (0x3F / 0x89) are safe and usually correct, so
 	 * these are only needed when a board's downstream HAL set
 	 * different values (e.g. a stronger or weaker LRA). Skip if zero.
 	 */
@@ -711,7 +711,7 @@ static int drv2624_probe(struct i2c_client *client)
 
 	/*
 	 * Optional per-unit factory-calibrated open-loop LRA period (raw
-	 * 9-bit register value, ~24.39 us/tick). Overrides the formula
+	 * 10-bit register value, ~24.615 us/tick). Overrides the formula
 	 * derived from ti,lra-frequency-hz. On Pixel sunfish this comes
 	 * from /persist/haptics/drv2624.cal "lra_period: 241".
 	 */
