@@ -145,6 +145,15 @@
 #define DRV2624_ROM_EFFECT_CLICK	1
 
 /*
+ * Magnitude at or above which the click plays at full (100 %) DIG_MEM_GAIN;
+ * below it drops to 50 %. play() passes strong/weak_magnitude >> 9, and
+ * ff-memless has already scaled the request by FF_GAIN (~3/4 at the default
+ * gain), so a full 0xffff request arrives as ~96 and a half-strength theme
+ * effect as ~48 -- the boundary is on the value that actually arrives.
+ */
+#define DRV2624_FULL_GAIN_MAG		48
+
+/*
  * How long after the RAM click starts we hand a still-running effect
  * over to RTP. A ~6 ms click plus this margin means a 15 ms theme tap
  * has already ended (play(0) has cleared the magnitude) and stays a pure
@@ -252,14 +261,13 @@ static int drv2624_write_ol_period(struct drv2624_data *h, u32 period)
  * the RAM click at 100 % gain. An earlier "50 % is best" measurement was
  * made in CLOSED loop with a 4x brake factor (both since dropped to match
  * stock), so it no longer applies and is superseded. Normal taps therefore
- * play at 100 %; only clearly light requests drop to 50 %. ff-memless hands
- * the driver about 3/4 of the requested magnitude (a 0xffff request arrives
- * as ~96 after >> 9), so a 0.5 theme value arrives as ~48; the threshold is
- * on the value that actually arrives.
+ * play at 100 %; only clearly light requests drop to 50 % (see
+ * DRV2624_FULL_GAIN_MAG for how the threshold relates to what play()
+ * receives).
  */
 static u8 drv2624_mag_to_gain(u8 mag)
 {
-	if (mag >= 48)
+	if (mag >= DRV2624_FULL_GAIN_MAG)
 		return 0;	/* 100 %: stock full-scale click */
 	return 2;		/* 50 % */
 }
