@@ -20,6 +20,11 @@ properties:
               - nxp,pn553
               - nxp,pn557
           - const: nxp,nxp-nci-i2c
+      - description:
+          STMicroelectronics ST54J. Not an NXP part, but it speaks the same
+          plain NCI transport and is served by this driver; it has no NXP
+          firmware-download mode.
+        const: st,st54j-nci
 
   enable-gpios:
     description: Output GPIO pin used for enabling/disabling the controller
