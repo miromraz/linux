@@ -180,7 +180,7 @@
 			status = "disabled";
 		};
 
-		pm6150_qgauge: qgauge@4800 {
+		pm6150_qgauge: battery@4800 {
 			compatible = "qcom,pm6150-qg";
 			reg = <0x4800>;
 
