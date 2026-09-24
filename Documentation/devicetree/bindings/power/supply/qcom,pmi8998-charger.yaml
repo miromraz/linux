@@ -11,11 +11,15 @@ maintainers:
 
 properties:
   compatible:
-    enum:
-      - qcom,pm7250b-charger
-      - qcom,pm8150b-charger
-      - qcom,pmi8998-charger
-      - qcom,pm660-charger
+    oneOf:
+      - enum:
+          - qcom,pm7250b-charger
+          - qcom,pm8150b-charger
+          - qcom,pmi8998-charger
+          - qcom,pm660-charger
+      - items:
+          - const: qcom,pm6150-charger
+          - const: qcom,pm8150b-charger
 
   reg:
     maxItems: 1
@@ -31,14 +35,18 @@ properties:
       - const: usbin-icl-change
 
   io-channels:
+    minItems: 2
     items:
       - description: USB in current in uA
       - description: USB in voltage in uV
+      - description: pack thermistor in millidegrees C
 
   io-channel-names:
+    minItems: 2
     items:
       - const: usbin_i
       - const: usbin_v
+      - const: batt-therm
 
   monitored-battery: true
 
