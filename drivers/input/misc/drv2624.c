@@ -326,11 +326,14 @@ static void drv2624_worker(struct work_struct *work)
 
 	if (!mag) {
 		/*
-		 * Stop, brake and re-park so the next tap fires a click. The
-		 * lock serialises us against the handover, so a handover that
-		 * fires after this rechecks magnitude (now 0) and does nothing
-		 * rather than re-arming GO.
+		 * Stop, brake and re-park so the next tap fires a click. Drop a
+		 * handover still armed from this effect so it cannot fire
+		 * against a later tap and switch it to RTP with the wrong
+		 * timing. The non-sync cancel is safe under the lock (it never
+		 * waits); a handover already past its timer is serialised behind
+		 * this lock and rechecks the magnitude when it finally runs.
 		 */
+		cancel_delayed_work(&h->handover);
 		error = regmap_write(h->regmap, DRV2624_REG_GO, 0);
 		if (error)
 			dev_err(dev, "GO clear failed: %d\n", error);
