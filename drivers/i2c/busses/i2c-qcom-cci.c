@@ -492,34 +492,8 @@ static int __maybe_unused cci_resume_runtime(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused cci_suspend(struct device *dev)
-{
-	if (!pm_runtime_suspended(dev))
-		return cci_suspend_runtime(dev);
-
-	return 0;
-}
-
-static int __maybe_unused cci_resume(struct device *dev)
-{
-	/*
-	 * cci_suspend() leaves the clocks alone when the device is already
-	 * runtime suspended, so resuming it here would take a clock reference
-	 * that nothing ever drops: the runtime PM status is still
-	 * RPM_SUSPENDED, which makes the pm_request_autosuspend() below a
-	 * no-op. Stay symmetric with the suspend side instead.
-	 */
-	if (pm_runtime_suspended(dev))
-		return 0;
-
-	cci_resume_runtime(dev);
-	pm_request_autosuspend(dev);
-
-	return 0;
-}
-
 static const struct dev_pm_ops qcom_cci_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(cci_suspend, cci_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(cci_suspend_runtime, cci_resume_runtime, NULL)
 };
 
