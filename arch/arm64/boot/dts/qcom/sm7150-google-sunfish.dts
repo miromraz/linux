@@ -1356,7 +1356,7 @@
 	};
 
 	sound {
-		compatible = "qcom,sm8250-sndcard";
+		compatible = "google,sunfish-sndcard";
 		pinctrl-0 = <&lpi_sec_mi2s_active>, <&ter_mi2s_active>;
 		pinctrl-names = "default";
 		model = "Google Pixel 4a";
