@@ -449,8 +449,17 @@ static int rt5514_dsp_voice_wake_up_put(struct snd_kcontrol *kcontrol,
 					0xe0220042);
 			}
 		} else {
-			regmap_multi_reg_write(rt5514->i2c_regmap,
-				rt5514_i2c_patch, ARRAY_SIZE(rt5514_i2c_patch));
+			const struct reg_sequence *patch;
+			int num;
+
+			if (rt5514->v_p) {
+				patch = rt5514p_i2c_patch;
+				num = ARRAY_SIZE(rt5514p_i2c_patch);
+			} else {
+				patch = rt5514_i2c_patch;
+				num = ARRAY_SIZE(rt5514_i2c_patch);
+			}
+			regmap_multi_reg_write(rt5514->i2c_regmap, patch, num);
 			regcache_mark_dirty(rt5514->regmap);
 			regcache_sync(rt5514->regmap);
 		}
