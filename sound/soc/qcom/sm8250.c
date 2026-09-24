@@ -40,6 +40,12 @@ struct sm8250_snd_data {
 	bool usb_offload_jack_setup;
 	struct snd_soc_jack dp_jack;
 	bool jack_setup;
+	bool is_sunfish;
+};
+
+struct sm8250_snd_match_data {
+	const char *driver_name;
+	bool is_sunfish;
 };
 
 static int sm8250_snd_init(struct snd_soc_pcm_runtime *rtd)
@@ -92,6 +98,7 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 
 	switch (cpu_dai->id) {
 	case PRIMARY_MI2S_RX:
@@ -115,6 +122,9 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 		 * @ 48 kHz (matches the stock sec TDM config: internal sync,
 		 * inverted fsync, 1 bit clock data delay). */
 		int j;
+
+		if (!data->is_sunfish)
+			break;
 
 		snd_soc_dai_set_sysclk(cpu_dai,
 			Q6AFE_LPASS_CLK_ID_SEC_TDM_IBIT,
@@ -142,6 +152,8 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 	case TERTIARY_TDM_TX_0:
 		/* sunfish: RT5514 mic on tertiary TDM, capture, 2 slots x
 		 * 16 bit @ 48 kHz (same stock TDM config as the sec TDM). */
+		if (!data->is_sunfish)
+			break;
 		snd_soc_dai_set_sysclk(cpu_dai,
 			Q6AFE_LPASS_CLK_ID_TER_TDM_IBIT,
 			TER_TDM_BCLK_RATE, SNDRV_PCM_STREAM_CAPTURE);
@@ -192,11 +204,14 @@ static int sm8250_snd_hw_params(struct snd_pcm_substream *substream,
 {
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 	unsigned int tdm_offset[2] = { 0, 2 };
 	int ret;
 
 	switch (cpu_dai->id) {
 	case SECONDARY_TDM_RX_0:
+		if (!data->is_sunfish)
+			break;
 		ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0, 0x3, 2, 16);
 		if (ret < 0) {
 			dev_err(rtd->dev, "failed to set tdm slots: %d\n", ret);
@@ -219,6 +234,9 @@ static int sm8250_snd_hw_params(struct snd_pcm_substream *substream,
 		unsigned int slot[2] = { 0, 2 };
 		struct snd_soc_dai *codec_dai;
 		int j;
+
+		if (!data->is_sunfish)
+			break;
 
 		ret = snd_soc_dai_set_tdm_slot(cpu_dai, 0x3, 0, 2, 16);
 		if (ret < 0) {
@@ -280,6 +298,7 @@ static int sm8250_platform_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card;
 	struct sm8250_snd_data *data;
+	const struct sm8250_snd_match_data *mdata;
 	struct device *dev = &pdev->dev;
 	int ret;
 
@@ -300,18 +319,33 @@ static int sm8250_platform_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	card->driver_name = of_device_get_match_data(dev);
+	mdata = of_device_get_match_data(dev);
+	if (mdata) {
+		card->driver_name = mdata->driver_name;
+		data->is_sunfish = mdata->is_sunfish;
+	}
 	sm8250_add_be_ops(card);
 	return devm_snd_soc_register_card(dev, card);
 }
 
+static const struct sm8250_snd_match_data fp4_data = { .driver_name = "sm7225" };
+static const struct sm8250_snd_match_data fp5_data = { .driver_name = "qcm6490" };
+static const struct sm8250_snd_match_data qrb2210_data = { .driver_name = "qcm2290" };
+static const struct sm8250_snd_match_data qrb4210_data = { .driver_name = "sm4250" };
+static const struct sm8250_snd_match_data sm8250_data = { .driver_name = "sm8250" };
+static const struct sm8250_snd_match_data sunfish_data = {
+	.driver_name = "sm7150",
+	.is_sunfish = true,
+};
+
 static const struct of_device_id snd_sm8250_dt_match[] = {
-	{ .compatible = "fairphone,fp4-sndcard", .data = "sm7225" },
-	{ .compatible = "fairphone,fp5-sndcard", .data = "qcm6490" },
-	{ .compatible = "qcom,qrb2210-sndcard", .data = "qcm2290" },
-	{ .compatible = "qcom,qrb4210-rb2-sndcard", .data = "sm4250" },
-	{ .compatible = "qcom,qrb5165-rb5-sndcard", .data = "sm8250" },
-	{ .compatible = "qcom,sm8250-sndcard", .data = "sm8250" },
+	{ .compatible = "fairphone,fp4-sndcard", .data = &fp4_data },
+	{ .compatible = "fairphone,fp5-sndcard", .data = &fp5_data },
+	{ .compatible = "google,sunfish-sndcard", .data = &sunfish_data },
+	{ .compatible = "qcom,qrb2210-sndcard", .data = &qrb2210_data },
+	{ .compatible = "qcom,qrb4210-rb2-sndcard", .data = &qrb4210_data },
+	{ .compatible = "qcom,qrb5165-rb5-sndcard", .data = &sm8250_data },
+	{ .compatible = "qcom,sm8250-sndcard", .data = &sm8250_data },
 	{}
 };
 
