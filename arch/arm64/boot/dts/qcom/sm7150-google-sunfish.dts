@@ -230,6 +230,24 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&camera_rear_vcm_en>;
 	};
+
+	/*
+	 * The SLG51000 camera PMIC does not answer on i2c until the buck feeding
+	 * its input rails is enabled off pm6150l GPIO6 (active high). It has to
+	 * be up ~5 ms before the chip select, so make it the SLG51000's input
+	 * supply: fw_devlink then holds the PMIC's probe until this is enabled.
+	 */
+	cam_pmic_buck: regulator-cam-pmic-buck {
+		compatible = "regulator-fixed";
+
+		regulator-name = "cam_pmic_buck";
+
+		gpio = <&pm6150l_gpios 6 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <5000>;
+
+		regulator-always-on;
+	};
 };
 
 &apps_rsc {
@@ -909,10 +927,12 @@
 	 * It does not answer on i2c out of reset. The vendor tree lists two chip
 	 * selects (pm6150l gpio4 and gpio6) and two enables (gpio1 and gpio5) as
 	 * flat lists with no indication of which does what; the vendor driver
-	 * shows that cs-gpios[1] is the enable of the buck feeding the chip and
-	 * has to go high 5 ms before cs-gpios[0], the actual chip select. Both
-	 * high in that order makes 0x75 answer; either one alone is not enough.
-	 * Keep the vendor's order here, the driver relies on it.
+	 * shows that gpio6 is the enable of the buck feeding the chip and has to
+	 * go high 5 ms before gpio4, the actual chip select. Both high in that
+	 * order makes 0x75 answer; either one alone is not enough. gpio6 is
+	 * modelled as cam_pmic_buck, wired as the input supply below so the core
+	 * enables it and waits out its ramp before this device probes; gpio4 is
+	 * the chip select the driver drives.
 	 *
 	 * Careful when re-testing: the chip stays latched on once it has
 	 * answered, so every later combination appears to work. Only the first
@@ -932,8 +952,13 @@
 	pmic@75 {
 		compatible = "dlg,slg51000";
 		reg = <0x75>;
-		dlg,cs-gpios = <&pm6150l_gpios 4 GPIO_ACTIVE_HIGH>,
-			       <&pm6150l_gpios 6 GPIO_ACTIVE_HIGH>;
+		dlg,cs-gpios = <&pm6150l_gpios 4 GPIO_ACTIVE_HIGH>;
+
+		vin3-supply = <&cam_pmic_buck>;
+		vin4-supply = <&cam_pmic_buck>;
+		vin5-supply = <&cam_pmic_buck>;
+		vin6-supply = <&cam_pmic_buck>;
+		vin7-supply = <&cam_pmic_buck>;
 
 		regulators {
 			/*
