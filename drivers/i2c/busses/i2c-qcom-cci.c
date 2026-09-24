@@ -646,14 +646,26 @@ disable_clocks:
 static void cci_remove(struct platform_device *pdev)
 {
 	struct cci *cci = platform_get_drvdata(pdev);
-	int i;
+	int ret, i;
+
+	/*
+	 * The controller is normally runtime suspended with its clocks off by
+	 * the time it is unbound, so resume it before writing CCI_HALT_REQ: an
+	 * unclocked register write faults the interconnect on Qualcomm SoCs.
+	 */
+	ret = pm_runtime_resume_and_get(&pdev->dev);
 
 	for (i = 0; i < cci->data->num_masters; i++) {
 		if (cci->master[i].cci) {
 			i2c_del_adapter(&cci->master[i].adap);
-			cci_halt(cci, i);
+			if (ret >= 0)
+				cci_halt(cci, i);
 		}
 	}
+
+	/* Runtime PM itself is torn down by the devm action from probe. */
+	if (ret >= 0)
+		pm_runtime_put_noidle(&pdev->dev);
 }
 
 static const struct cci_data cci_v1_data = {
