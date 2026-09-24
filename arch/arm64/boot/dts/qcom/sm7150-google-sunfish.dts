@@ -748,7 +748,7 @@
 	clock-frequency = <1000000>;
 
 	touchscreen@49 {
-		compatible = "st,stmfts5", "st,stmfts";
+		compatible = "st,stmfts5";
 		reg = <0x49>;
 
 		interrupts-extended = <&tlmm 9 IRQ_TYPE_LEVEL_LOW>;
