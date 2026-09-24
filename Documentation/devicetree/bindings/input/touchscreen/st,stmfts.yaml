@@ -54,6 +54,8 @@ properties:
     description: Switch between touchscreen SLPI and AP mode.
     maxItems: 1
 
+  panel: true
+
   reset-gpios:
     description: Reset GPIO (active-low)
     maxItems: 1
