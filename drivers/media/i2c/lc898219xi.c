@@ -374,6 +374,7 @@ static struct i2c_driver lc898219xi_i2c_driver = {
 };
 module_i2c_driver(lc898219xi_i2c_driver);
 
+MODULE_AUTHOR("Vasiliy Doylov <nekocwd@mainlining.org>");
 MODULE_AUTHOR("Frieder Hannenheim <git@fhannenheim.net>");
 MODULE_DESCRIPTION("Onsemi LC898219XI VCM driver");
 MODULE_LICENSE("GPL");
