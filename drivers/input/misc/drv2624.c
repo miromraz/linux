@@ -49,11 +49,13 @@
  * factor 1x and BEMF gain 0. The per-board numbers come from DT.
  */
 
+#include <linux/cleanup.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -163,6 +165,15 @@ struct drv2624_data {
 	struct work_struct work;
 	struct delayed_work handover;
 
+	/*
+	 * Serialises the worker, the delayed handover and the PM callbacks,
+	 * which otherwise run on different contexts and would race on the
+	 * cached parked/rtp_wave/gain state. play() only schedules work, so
+	 * it never takes this lock and stays safe in its atomic context.
+	 */
+	struct mutex lock;
+	bool suspended;		/* chip powered down; workers must not do I2C */
+
 	struct gpio_desc *enable_gpio;
 	struct regulator *vdd;
 
@@ -262,19 +273,24 @@ static void drv2624_worker(struct work_struct *work)
 {
 	struct drv2624_data *h = container_of(work, struct drv2624_data, work);
 	struct device *dev = &h->client->dev;
-	u8 mag = h->magnitude;
-	u8 gain;
+	u8 mag, gain;
 	int error;
+
+	guard(mutex)(&h->lock);
+
+	/* A play() that raced suspend must not touch a powered-down chip. */
+	if (h->suspended)
+		return;
+
+	mag = h->magnitude;
 
 	if (!mag) {
 		/*
-		 * Stop. Wait out a handover that may already be running on
-		 * another CPU (it never waits on this work, so this cannot
-		 * deadlock) -- otherwise it could re-arm GO right after we
-		 * clear it and leave the motor running. Then brake and re-park
-		 * so the next tap fires a click.
+		 * Stop, brake and re-park so the next tap fires a click. The
+		 * lock serialises us against the handover, so a handover that
+		 * fires after this rechecks magnitude (now 0) and does nothing
+		 * rather than re-arming GO.
 		 */
-		cancel_delayed_work_sync(&h->handover);
 		error = regmap_write(h->regmap, DRV2624_REG_GO, 0);
 		if (error)
 			dev_err(dev, "GO clear failed: %d\n", error);
@@ -366,9 +382,16 @@ static void drv2624_handover(struct work_struct *work)
 	struct drv2624_data *h = container_of(to_delayed_work(work),
 					      struct drv2624_data, handover);
 	struct device *dev = &h->client->dev;
-	u8 mag = h->magnitude;
+	u8 mag;
 	int error;
 
+	guard(mutex)(&h->lock);
+
+	if (h->suspended)
+		return;
+
+	/* Re-read under the lock: play(0) may have stopped the effect. */
+	mag = h->magnitude;
 	if (!mag)
 		return;
 
@@ -705,6 +728,10 @@ static int drv2624_probe(struct i2c_client *client)
 	INIT_WORK(&h->work, drv2624_worker);
 	INIT_DELAYED_WORK(&h->handover, drv2624_handover);
 
+	error = devm_mutex_init(dev, &h->lock);
+	if (error)
+		return error;
+
 	/* Actuator type (lra/erm), defaults to LRA */
 	h->actuator = DRV2624_ACTUATOR_LRA;
 	if (!device_property_read_string(dev, "ti,actuator", &actuator)) {
@@ -864,6 +891,13 @@ static int drv2624_suspend(struct device *dev)
 	if (!input_device_enabled(h->input_dev))
 		return 0;
 
+	/*
+	 * Mark the chip suspended first so a worker that is scheduled from
+	 * here on bails before doing any I2C, then wait out anything already
+	 * in flight before dropping power.
+	 */
+	scoped_guard(mutex, &h->lock)
+		h->suspended = true;
 	cancel_work_sync(&h->work);
 	cancel_delayed_work_sync(&h->handover);
 
@@ -902,7 +936,14 @@ static int drv2624_resume(struct device *dev)
 	 * init sequence on resume so the RAM library, calibration, and
 	 * WAV_SEQ park state are all restored.
 	 */
-	return drv2624_hw_init(h);
+	error = drv2624_hw_init(h);
+	if (error)
+		return error;
+
+	/* Chip is programmed again; let workers touch it. */
+	scoped_guard(mutex, &h->lock)
+		h->suspended = false;
+	return 0;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(drv2624_pm_ops, drv2624_suspend, drv2624_resume);
