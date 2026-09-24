@@ -27,11 +27,9 @@ allOf:
 
 properties:
   compatible:
-    oneOf:
-      - const: st,stmfts
-      - items:
-          - const: st,stmfts5
-          - const: st,stmfts
+    enum:
+      - st,stmfts
+      - st,stmfts5
 
   reg:
     maxItems: 1
