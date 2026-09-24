@@ -1279,20 +1279,6 @@
 	};
 };
 
-&q6asmdai {
-	dai@0 {
-		reg = <0>;
-	};
-
-	dai@1 {
-		reg = <1>;
-	};
-
-	dai@2 {
-		reg = <2>;
-	};
-};
-
 &rxmacro {
 	status = "okay";
 };
@@ -1526,13 +1512,6 @@
 		pins = "gpio53", "gpio54", "gpio55", "gpio56";
 		function = "ter_mi2s";
 		drive-strength = <8>;
-		bias-disable;
-	};
-
-	ter_mi2s_sleep: ter-mi2s-sleep-state {
-		pins = "gpio53", "gpio54", "gpio55", "gpio56";
-		function = "ter_mi2s";
-		drive-strength = <2>;
 		bias-disable;
 	};
 
