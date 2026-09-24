@@ -163,6 +163,7 @@ struct stmfts_chip_ops {
 	void (*parse_events)(struct stmfts_data *sdata);
 	int  (*set_hover)(struct stmfts_data *sdata, bool enable);
 	int  (*runtime_resume)(struct stmfts_data *sdata);
+	int  (*set_scan)(struct stmfts_data *sdata, u8 mode);
 };
 
 static int stmfts_brightness_set(struct led_classdev *led_cdev,
@@ -1088,15 +1089,25 @@ static int stmfts_panel_prepared(struct drm_panel_follower *follower)
 		return err;
 
 	/*
-	 * If userspace already has the input device open, the chip just
-	 * came back from a panel-driven power cycle and lost its scan
-	 * state (which input_open normally sets). Re-issue the start-scan
-	 * command so touch events resume without requiring a close+reopen
-	 * of the evdev — userspace compositors typically keep the fd open
-	 * across display blank/wake cycles.
+	 * If userspace already has the input device open, the chip just came
+	 * back from a panel-driven power cycle: stmfts_power_on() left it in
+	 * SLEEP_IN and it lost its calibration and scan state. Re-run the same
+	 * wake sequence that runtime PM / input_open drive in the non-follower
+	 * path (SLEEP_OUT, tuning, calibration, then start scanning) so touch
+	 * resumes calibrated, without requiring a close+reopen of the evdev —
+	 * userspace compositors keep the fd open across display blank/wake.
 	 */
-	if (sdata->running)
-		stmfts5_set_scan_mode(sdata, 0xff);
+	if (sdata->running) {
+		err = sdata->ops->runtime_resume(sdata);
+		if (err)
+			return err;
+
+		if (sdata->ops->set_scan) {
+			err = sdata->ops->set_scan(sdata, 0xff);
+			if (err)
+				return err;
+		}
+	}
 
 	return 0;
 }
@@ -1418,6 +1429,7 @@ static const struct stmfts_chip_ops stmfts5_ops = {
 	.input_close	= stmfts5_input_close,
 	.parse_events	= stmfts5_parse_events,
 	.runtime_resume	= stmfts5_chip_runtime_resume,
+	.set_scan	= stmfts5_set_scan_mode,
 };
 
 static const struct of_device_id stmfts_of_match[] = {
