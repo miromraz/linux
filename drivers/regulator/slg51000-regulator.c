@@ -439,29 +439,15 @@ static int slg51000_i2c_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct slg51000 *chip;
-	struct gpio_desc *cs_gpiod, *buck_gpiod;
+	struct gpio_desc *cs_gpiod;
 	int error, ret;
 
 	chip = devm_kzalloc(dev, sizeof(struct slg51000), GFP_KERNEL);
 	if (!chip)
 		return -ENOMEM;
 
-	/*
-	 * Some boards gate the buck feeding the chip with a second GPIO, listed
-	 * after the chip select. The chip does not answer on i2c until that one
-	 * is high, and it needs 5ms to come up before the chip select follows.
-	 */
-	buck_gpiod = devm_gpiod_get_index_optional(dev, "dlg,cs", 1,
-						   GPIOD_OUT_HIGH |
-						GPIOD_FLAGS_BIT_NONEXCLUSIVE);
-	if (IS_ERR(buck_gpiod))
-		return PTR_ERR(buck_gpiod);
-
-	if (buck_gpiod)
-		usleep_range(5000, 6000);
-
-	cs_gpiod = devm_gpiod_get_index_optional(dev, "dlg,cs", 0,
-						 GPIOD_OUT_HIGH |
+	cs_gpiod = devm_gpiod_get_optional(dev, "dlg,cs",
+					   GPIOD_OUT_HIGH |
 						GPIOD_FLAGS_BIT_NONEXCLUSIVE);
 	if (IS_ERR(cs_gpiod))
 		return PTR_ERR(cs_gpiod);
