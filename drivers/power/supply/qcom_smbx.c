@@ -230,7 +230,7 @@ enum smb_generation {
 #define FAST_CHARGE_CURRENT_UA				1950000
 
 /*
- * Pack temperature gate for FAST_CHARGE_CURRENT_9V_UA, deci-degrees C.
+ * Pack temperature gate for the raised 9V fast-charge ceiling, deci-degrees C.
  * Both limbs matter: 1.3C into a cold cell plates lithium, which is permanent
  * and a safety hazard, so a cold pack is derated exactly like a hot one. The
  * recovery band is inset at both ends to stop the gate flapping.
@@ -573,7 +573,7 @@ static int smb_set_fast_charge_current(struct smb_chip *chip, unsigned int val)
 
 /*
  * Decide whether the pack is outside the window where it may take
- * FAST_CHARGE_CURRENT_9V_UA. Fails closed: a board without a thermistor, or a
+ * the raised 9V ceiling. Fails closed: a board without a thermistor, or a
  * failed read, is treated as out of range and keeps the conservative default.
  */
 static bool smb_batt_temp_derate(struct smb_chip *chip)
@@ -1314,7 +1314,7 @@ static int smb_probe(struct platform_device *pdev)
 	 * Fail closed: a temperature reading has not happened yet, so treat
 	 * the pack as derated until smb_batt_temp_derate() proves otherwise.
 	 * Without this, a first call landing inside either hysteresis band
-	 * inherits the kzalloc'd false and allows FAST_CHARGE_CURRENT_9V_UA
+	 * inherits the kzalloc'd false and allows the raised 9V fast-charge ceiling
 	 * into a cell that has never been measured.
 	 */
 	chip->batt_derate = true;
