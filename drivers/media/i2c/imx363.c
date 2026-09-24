@@ -1180,6 +1180,13 @@ static int imx363_set_stream(struct v4l2_subdev *sd, int enable)
 		pm_runtime_put(&client->dev);
 	}
 
+	/*
+	 * HFLIP and VFLIP change the Bayer order of the frames, so they may
+	 * not change while the pipeline is running.
+	 */
+	__v4l2_ctrl_grab(imx363->vflip, enable);
+	__v4l2_ctrl_grab(imx363->hflip, enable);
+
 	mutex_unlock(&imx363->mutex);
 
 	return ret;
