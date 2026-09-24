@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2018 Intel Corporation
+//
+// Derived from the Intel imx355 driver and ported to the Sony IMX363 by
+// Joel Selvaraj <joelselvaraj.oss@gmail.com>.
 
-#include <linux/acpi.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
@@ -23,10 +25,8 @@
 #define IMX363_REG_CHIP_ID		CCI_REG16(0x0016)
 #define IMX363_CHIP_ID			0x0363
 
-/* V_TIMING internal */
-// basically frame length lines? from downstream
-#define IMX363_VTS_30FPS		3136 //0c40
-// #define IMX363_VTS_30FPS_2K		0x0638
+/* V_TIMING internal (frame length lines) */
+#define IMX363_VTS_30FPS		3136
 #define IMX363_VTS_30FPS_HD		1296
 /* 2x2 binned readout is half the lines, so half the minimum frame length */
 #define IMX363_VTS_MIN_BINNED		1568
@@ -200,8 +200,6 @@ static const struct cci_reg_sequence mipi_2300mbps_24mhz_4l[] = {
 	{ IMX363_REG_PLL_MULT_DRIV, 1 },
 
 	{ IMX363_REG_CSI_LANE_MODE, 3 },
-	// { IMX363_REG_REQ_LINK_BIT_RATE_MBPS_H, 2300 * 4 },
-	// { IMX363_REG_REQ_LINK_BIT_RATE_MBPS_L, 0 },
 };
 
 static const struct cci_reg_sequence mipi_642mbps_24mhz_2l[] = {
@@ -239,59 +237,6 @@ static const struct cci_reg_sequence mipi_642mbps_24mhz_4l[] = {
 };
 
 static const struct cci_reg_sequence mode_common_regs[] = {
-	//Magical IMX363 Regs & Values - Found in downstream. Doesnt affect output except for the few noted. So disable.
-	// { CCI_REG8(0x31a3), 0x00 },
-	// { CCI_REG8(0x64d4), 0x01 },
-	// { CCI_REG8(0x64d5), 0xaa },
-	// { CCI_REG8(0x64d6), 0x01 },
-	// { CCI_REG8(0x64d7), 0xa9 },
-	// { CCI_REG8(0x64d8), 0x01 },
-	// { CCI_REG8(0x64d9), 0xa5 },
-	// { CCI_REG8(0x64da), 0x01 },
-	// { CCI_REG8(0x64db), 0xa1 },
-	// { CCI_REG8(0x720a), 0x24 },
-	// { CCI_REG8(0x720b), 0x89 },
-	// { CCI_REG8(0x720c), 0x85 },
-	// { CCI_REG8(0x720d), 0xa1 },
-	// { CCI_REG8(0x720e), 0x6e },
-	// { CCI_REG8(0x729c), 0x59 },
-	// { CCI_REG8(0x817c), 0xff },
-	// { CCI_REG8(0x817d), 0x80 },
-	// { CCI_REG8(0x9348), 0x96 },
-	// { CCI_REG8(0x934b), 0x8c },
-	// { CCI_REG8(0x934c), 0x82 },
-	// { CCI_REG8(0x9353), 0xaa },
-	// { CCI_REG8(0x9354), 0xaa },
-	// { CCI_REG8(0x30F4), 0x02 },
-	// { CCI_REG8(0x30F5), 0x80 },
-	// { CCI_REG8(0x31A5), 0x00 }, //causes white output
-	// { CCI_REG8(0x31A6), 0x00 }, //causes white output
-	// { CCI_REG8(0x560F), 0xBE }, //causes cropped corrupted nonsensical output
-	// { CCI_REG8(0x5856), 0x08 },
-	// { CCI_REG8(0x58D0), 0x10 },
-	// { CCI_REG8(0x734A), 0x01 },
-	// { CCI_REG8(0x734F), 0x2B },
-	// { CCI_REG8(0x7441), 0x55 },
-	// { CCI_REG8(0x7914), 0x03 },
-	// { CCI_REG8(0x7928), 0x04 },
-	// { CCI_REG8(0x7929), 0x04 },
-	// { CCI_REG8(0x793F), 0x03 },
-	
-	// present in imx258. not present in android downstream logs. doesnt seem to affect output.
-	// {IMX363_REG_SCALE_MODE_EXT, 0}, 
-	// {IMX363_REG_SCALE_M_EXT, 16},
-	// {IMX363_REG_FORCE_FD_SUM, 1},
-	// {IMX363_REG_FRM_LENGTH_CTL, 0},
-	// {IMX363_REG_ANALOG_GAIN, 0},
-	// {IMX363_REG_GR_DIGITAL_GAIN, 256},
-	// {IMX363_REG_R_DIGITAL_GAIN, 256},
-	// {IMX363_REG_B_DIGITAL_GAIN, 256},
-	// {IMX363_REG_GB_DIGITAL_GAIN, 256},
-	// {IMX363_REG_HDR, 0},
-	
-	// Seems important. Probably will work even without specifying these. But let's just set it anyway.
-	// {IMX363_REG_CSI_DT_FMT, 0x0a0a},
-	// {IMX363_REG_LINE_LENGTH_PCK, IMX363_PPL_DEFAULT},
 	{CCI_REG8(0x0136), 0x18},
 	{CCI_REG8(0x0137), 0x00},
 	{CCI_REG8(0x31A3), 0x00},
@@ -320,25 +265,6 @@ static const struct cci_reg_sequence mode_common_regs[] = {
 };
 
 static const struct cci_reg_sequence mode_4032x3024_regs[] = {
-	// {IMX363_REG_BINNING_MODE, 0},
-	// {IMX363_REG_BINNING_TYPE_V, 0x11},
-	// // {IMX363_REG_SCALE_MODE, 1},
-	// // {IMX363_REG_SCALE_M, 64},
-	// {IMX363_REG_X_ADD_STA, 0}, // analog cropping
-	// {IMX363_REG_Y_ADD_STA, 0},
-	// {IMX363_REG_X_ADD_END, 4031},
-	// {IMX363_REG_Y_ADD_END, 3023},
-	// {IMX363_REG_X_EVN_INC, 1}, //subsampling
-	// {IMX363_REG_X_ODD_INC, 1},
-	// {IMX363_REG_Y_EVN_INC, 1},
-	// {IMX363_REG_Y_ODD_INC, 1},
-	// {IMX363_REG_DIG_CROP_X_OFFSET, 0}, // digital cropping
-	// {IMX363_REG_DIG_CROP_Y_OFFSET, 0},
-	// {IMX363_REG_DIG_CROP_IMAGE_WIDTH, 4032},
-	// {IMX363_REG_DIG_CROP_IMAGE_HEIGHT, 3024},
-	// {IMX363_REG_X_OUT_SIZE, 4032},
-	// {IMX363_REG_Y_OUT_SIZE, 3024},
-	// {IMX363_REG_FRM_LENGTH_LINES, IMX363_VTS_30FPS},
 	{CCI_REG8(0x0112), 0x0A},
 	{CCI_REG8(0x0113), 0x0A},
 	{CCI_REG8(0x0114), 0x03},
@@ -550,7 +476,7 @@ enum {
  * there is a FIFO between the pixel array pipeline and the MIPI serializer.
  * The recommendation from Sony is that the pixel array is always run with a
  * line length of 8832 pixels, which means that there is a large amount of
- * blanking time for the 1048x780 mode. There is no need to replicate this
+ * blanking time for the binned mode. There is no need to replicate this
  * blanking on the CSI2 bus, and the configuration of register 0x0301 allows the
  * divider to be altered.
  *
@@ -567,15 +493,9 @@ static u64 link_freq_to_pixel_rate(u64 f, const struct imx363_link_cfg *link_cfg
 	return f;
 }
 
-/* Menu items for LINK_FREQ V4L2 control */
-/* Configurations for supported link frequencies */
-// static const s64 link_freq_menu_items_19_2[] = {
-// 	633600000ULL,
-// 	320000000ULL,
-// };
-
+/* Menu items for LINK_FREQ V4L2 control, for a 24 MHz external clock */
 static const s64 link_freq_menu_items_24[] = {
-	636000000ULL, // NOT SURE HOW TO FIND THIS VALUE
+	636000000ULL,
 	321000000ULL,
 };
 
@@ -1288,7 +1208,6 @@ static int imx363_init_controls(struct imx363 *imx363)
 	link_cfg = &link_freq_cfgs->link_cfg[imx363->lane_mode_idx];
 	pixel_rate = link_freq_to_pixel_rate(imx363->link_freq_menu_items[0],
 					     link_cfg);
-	printk(KERN_INFO "imx363: pixel_rate: %lld\n", pixel_rate);
 
 	/* By default, PIXEL_RATE is read only */
 	imx363->pixel_rate = v4l2_ctrl_new_std(ctrl_hdlr, &imx363_ctrl_ops,
@@ -1412,24 +1331,14 @@ static int imx363_probe(struct i2c_client *client)
 	if (IS_ERR(imx363->clk))
 		return dev_err_probe(&client->dev, PTR_ERR(imx363->clk),
 				     "error getting clock\n");
-	// if (!imx363->clk) {
-	// 	dev_warn(&client->dev,
-	// 		"no clock provided, using clock-frequency property\n");
 
 	device_property_read_u32(&client->dev, "clock-frequency", &val);
-	// } else {
-		// val = clk_get_rate(imx363->clk);
-	// }
 	ret = clk_set_rate(imx363->clk, val);
 	if (ret)
 		return dev_err_probe(&client->dev, ret,
 						"failed to set clock rate\n");
 
 	switch (val) {
-	// case 19200000:
-	// 	imx363->link_freq_configs = link_freq_configs_19_2;
-	// 	imx363->link_freq_menu_items = link_freq_menu_items_19_2;
-	// 	break;
 	case 24000000:
 		imx363->link_freq_configs = link_freq_configs_24;
 		imx363->link_freq_menu_items = link_freq_menu_items_24;
@@ -1575,15 +1484,6 @@ static const struct dev_pm_ops imx363_pm_ops = {
 	SET_RUNTIME_PM_OPS(imx363_power_off, imx363_power_on, NULL)
 };
 
-#ifdef CONFIG_ACPI
-static const struct acpi_device_id imx363_acpi_ids[] = {
-	{ "SONY363A" },
-	{ /* sentinel */ }
-};
-
-MODULE_DEVICE_TABLE(acpi, imx363_acpi_ids);
-#endif
-
 static const struct of_device_id imx363_dt_ids[] = {
 	{ .compatible = "sony,imx363"},
 	{ /* sentinel */ }
@@ -1594,7 +1494,6 @@ static struct i2c_driver imx363_i2c_driver = {
 	.driver = {
 		.name = "imx363",
 		.pm = &imx363_pm_ops,
-		.acpi_match_table = ACPI_PTR(imx363_acpi_ids),
 		.of_match_table	= imx363_dt_ids,
 	},
 	.probe = imx363_probe,
@@ -1603,8 +1502,9 @@ static struct i2c_driver imx363_i2c_driver = {
 
 module_i2c_driver(imx363_i2c_driver);
 
+MODULE_AUTHOR("Joel Selvaraj <joelselvaraj.oss@gmail.com>");
 MODULE_AUTHOR("Yeh, Andy <andy.yeh@intel.com>");
 MODULE_AUTHOR("Chiang, Alan");
 MODULE_AUTHOR("Chen, Jason");
 MODULE_DESCRIPTION("Sony IMX363 sensor driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
