@@ -189,7 +189,11 @@ static int lc898219xi_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	if (ret)
 		return ret;
 
-	__v4l2_ctrl_handler_setup(&lc898219xi->ctrls);
+	ret = v4l2_ctrl_handler_setup(&lc898219xi->ctrls);
+	if (ret) {
+		pm_runtime_put_autosuspend(sd->dev);
+		return ret;
+	}
 
 	return 0;
 }
@@ -225,8 +229,12 @@ static int lc898219xi_init_controls(struct lc898219xi *lc898219xi)
 			  LC898219XI_MIN_FOCUS_POS, LC898219XI_MAX_FOCUS_POS,
 			  LC898219XI_FOCUS_STEPS, 0);
 
-	if (hdl->error)
-		return hdl->error;
+	if (hdl->error) {
+		int ret = hdl->error;
+
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
 
 	lc898219xi->sd.ctrl_handler = hdl;
 
