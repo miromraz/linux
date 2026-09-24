@@ -1267,8 +1267,8 @@ static int imx363_init_controls(struct imx363 *imx363)
 	imx363->link_freq = v4l2_ctrl_new_int_menu(ctrl_hdlr,
 				&imx363_ctrl_ops,
 				V4L2_CID_LINK_FREQ,
-				ARRAY_SIZE(link_freq_menu_items_24) - 1,
-				0,
+				__fls(imx363->link_freq_bitmap),
+				__ffs(imx363->link_freq_bitmap),
 				imx363->link_freq_menu_items);
 
 	if (imx363->link_freq)
