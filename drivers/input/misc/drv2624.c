@@ -41,12 +41,12 @@
  * factory autocal compensation; if absent the chip's internal
  * defaults are used.
  *
- * The register tuning mirrors what stock Android runs on the Pixel 4a
- * (sunfish), read from the stock dtbo and the Pixel haptics HAL: always
- * open loop; the click is a sine wave at the ~155 Hz open-loop period
- * played from RAM at 100 % gain; the long RTP buzz is a square wave at
- * the ~145 Hz open-loop period; RATED_VOLTAGE 109 / OD_CLAMP 161; brake
- * factor 1x and BEMF gain 0. The per-board numbers come from DT.
+ * The chip is always driven open loop: the click is a sine wave at the
+ * open-loop drive frequency played from RAM at up to 100 % gain, and the
+ * long RTP buzz is a square wave at its own open-loop frequency. The
+ * per-board voltages (vib-rated-mv / vib-overdrive-mv) and drive
+ * frequencies come from DT; the closed-loop smart-loop fields are left
+ * cleared because open-loop drive ignores them.
  */
 
 #include <linux/cleanup.h>
@@ -110,6 +110,24 @@
 
 /* Default LRA resonant frequency, Hz */
 #define DRV2624_DEF_LRA_HZ		205
+
+/*
+ * OL_LRA_PERIOD LSB is 24.615 us (SLOS893D reg 0x2E/0x2F), so the 10-bit
+ * period count for a drive frequency is 1 s / (f * 24.615 us).
+ */
+#define DRV2624_OL_LSB_NS		24615
+
+/*
+ * mV -> register scaling from SLOS893D section 7.6.2. RATED_VOLTAGE uses the
+ * LRA closed-loop coefficient (eq 7, 20.58 mV/LSB); the resonance-tracking
+ * correction is dropped because this driver runs open loop and never
+ * autocalibrates, so RATED_VOLTAGE only serves as the documented autocal
+ * seed. OD_CLAMP is the open-loop full-scale clamp and uses the LRA clamp
+ * relation (eq 11, 21.22 mV/LSB). ERM actuators would use 21.88/21.59; the
+ * ~3 % difference is within actuator tolerance for the LRA-first parts here.
+ */
+#define DRV2624_RATED_UV_PER_LSB	20580
+#define DRV2624_OD_CLAMP_UV_PER_LSB	21220
 
 /*
  * Waveform library layout, per the DRV2624 datasheet (SLOS893D section
@@ -187,14 +205,13 @@ struct drv2624_data {
 	struct regulator *vdd;
 
 	enum drv2624_actuator actuator;
-	u32 lra_freq_hz;
-	u32 ol_lra_period;	/* DT-supplied per-unit factory cal; 0 = derive from freq */
-	u32 rtp_ol_lra_period;	/* open-loop period used for RTP; 0 = use click period */
-	u32 ol_period_click;	/* open-loop period programmed for the click */
-	u8 rated_volt_raw;	/* raw register value; 0 = leave at chip default */
-	u8 od_clamp_raw;	/* raw register value; 0 = leave at chip default */
-	u8 fb_brake_factor;	/* CONTROL 0x23[6:4]; chip reset default 3 */
-	u8 bemf_gain;		/* CONTROL 0x23[1:0]; chip reset default 2 */
+	u32 lra_freq_hz;	/* resonant frequency */
+	u32 ol_freq_hz;		/* open-loop click drive freq; 0 = use lra_freq_hz */
+	u32 rtp_freq_hz;	/* open-loop RTP drive freq; 0 = use ol_freq_hz */
+	u32 ol_period_click;	/* OL_LRA_PERIOD programmed for the click */
+	u32 ol_period_rtp;	/* OL_LRA_PERIOD used for the RTP buzz */
+	u8 rated_volt;		/* RATED_VOLTAGE register value; 0 = leave default */
+	u8 od_clamp;		/* OD_CLAMP register value; 0 = leave default */
 	u8 autocal[2];
 	bool autocal_present;
 
@@ -252,6 +269,21 @@ static int drv2624_write_ol_period(struct drv2624_data *h, u32 period)
 		return error;
 	return regmap_write(h->regmap, DRV2624_REG_OL_LRA_PERIOD_L,
 			    period & 0xFF);
+}
+
+/* OL_LRA_PERIOD register value for an open-loop drive frequency (0 if freq is 0). */
+static u32 drv2624_ol_period(u32 freq_hz)
+{
+	if (!freq_hz)
+		return 0;
+	return min_t(u32, DIV_ROUND_CLOSEST(1000000000U, freq_hz * DRV2624_OL_LSB_NS),
+		     0x3FF);
+}
+
+/* Datasheet voltage register value for a millivolt request, clamped to 8 bits. */
+static u8 drv2624_mv_to_reg(u32 mv, u32 uv_per_lsb)
+{
+	return min_t(u32, DIV_ROUND_CLOSEST(mv * 1000, uv_per_lsb), 0xFF);
 }
 
 /*
@@ -415,8 +447,7 @@ static void drv2624_handover(struct work_struct *work)
 		dev_err(dev, "RTP wave-shape write failed: %d\n", error);
 		return;
 	}
-	error = drv2624_write_ol_period(h, h->rtp_ol_lra_period ?
-					h->rtp_ol_lra_period : h->ol_period_click);
+	error = drv2624_write_ol_period(h, h->ol_period_rtp);
 	if (error) {
 		dev_err(dev, "RTP OL period write failed: %d\n", error);
 		return;
@@ -522,7 +553,7 @@ static int drv2624_upload_rom(struct drv2624_data *h)
 static int drv2624_hw_init(struct drv2624_data *h)
 {
 	struct device *dev = &h->client->dev;
-	unsigned int chip_id, period, status;
+	unsigned int chip_id, status;
 	int error;
 
 	error = regmap_read(h->regmap, DRV2624_REG_CHIP_ID, &chip_id);
@@ -584,37 +615,31 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	h->gain = 0;
 
 	/*
-	 * Program rated and overdrive voltages if explicit raw register
-	 * values were supplied via DT. The chip reset defaults
-	 * (RATED_VOLT=0x3F, OD_CLAMP=0x89) are safe
-	 * for the LRAs we've seen and match what the downstream Pixel HAL
-	 * ends up with after autocal. Writing computed values from a
-	 * voltage-in-mV formula is dangerous: the closed-form encoding
-	 * depends on f_LRA, playback interval, OD_CLAMP_LATCH, and the
-	 * chip revision, and easy approximations clamp to 0xFF for
-	 * normal LRAs — which immediately over-currents on the next play.
+	 * Program rated and overdrive voltages, converted from the DT
+	 * millivolt values in probe. Left at the chip reset defaults
+	 * (RATED_VOLT=0x3F, OD_CLAMP=0x89) when the DT does not specify them.
+	 * OD_CLAMP is the full-scale reference for the open-loop drive this
+	 * driver uses; RATED_VOLTAGE is only an autocal input (ignored in
+	 * open loop) and is programmed for completeness.
 	 */
-	if (h->rated_volt_raw) {
+	if (h->rated_volt) {
 		error = regmap_write(h->regmap, DRV2624_REG_RATED_VOLT,
-				     h->rated_volt_raw);
+				     h->rated_volt);
 		if (error)
 			return error;
 	}
-	if (h->od_clamp_raw) {
+	if (h->od_clamp) {
 		error = regmap_write(h->regmap, DRV2624_REG_OD_CLAMP,
-				     h->od_clamp_raw);
+				     h->od_clamp);
 		if (error)
 			return error;
 	}
 
 	/*
 	 * Apply factory autocal compensation if present: A_CAL_COMP (0x21)
-	 * and A_CAL_BEMF (0x22) only. Pixel devices ship these two bytes
-	 * per-unit in /persist/haptics/drv2624.cal; userspace (or DT, via
-	 * the optional ti,autocal-comp property) passes them to the driver.
-	 * 0x23 holds NG_THRESH/FB_BRAKE_FACTOR/LOOP_GAIN/BEMF_GAIN and must
-	 * be left at its reset default. Without the bytes the chip falls
-	 * back to its internal calibration defaults — usable but less tuned.
+	 * and A_CAL_BEMF (0x22) only, passed as raw calibration bytes via the
+	 * optional ti,autocal-comp property. Without them the chip falls back
+	 * to its internal calibration defaults — usable but less tuned.
 	 */
 	if (h->autocal_present) {
 		error = regmap_write(h->regmap, DRV2624_REG_AUTOCAL_COMP + 0,
@@ -628,14 +653,14 @@ static int drv2624_hw_init(struct drv2624_data *h)
 	}
 
 	/*
-	 * LOOP_CONTROL (0x23): FB_BRAKE_FACTOR[6:4] and BEMF_GAIN[1:0] from DT
-	 * (chip reset defaults 3 and 2). LOOP_GAIN[3:2] and NG_THRESH[7] are
-	 * left untouched via the mask. Stock sunfish sets both to 0 (1x brake,
-	 * no BEMF gain), giving 0x04 with LOOP_GAIN at its reset value 1.
+	 * LOOP_CONTROL (0x23): FB_BRAKE_FACTOR[6:4] and BEMF_GAIN[1:0] only
+	 * affect closed-loop smart-loop behaviour, which this open-loop driver
+	 * never exercises. Clear both (leaving LOOP_GAIN[3:2] and NG_THRESH[7]
+	 * at reset via the mask) so the register reads back deterministically.
 	 */
 	error = regmap_update_bits(h->regmap, DRV2624_REG_LOOP_CONTROL,
 				   DRV2624_FB_BRAKE_FACTOR_MASK | DRV2624_BEMF_GAIN_MASK,
-				   (h->fb_brake_factor << 4) | h->bemf_gain);
+				   0);
 	if (error)
 		return error;
 
@@ -665,28 +690,16 @@ static int drv2624_hw_init(struct drv2624_data *h)
 		return error;
 
 	/*
-	 * Open-loop LRA period. The chip uses this until the closed-loop
-	 * tracker locks on resonance. Register unit is 24.615 us (datasheet
-	 * SLOS893D reg 0x2E/0x2F); period_ticks ~ 40626 / f_Hz, and OL_LRA_PERIOD is
-	 * 10 bits wide (bits [9:8] in PERIOD_H, [7:0] in PERIOD_L). The DT prop
-	 * ti,ol-lra-period overrides the computed value with the chip's
-	 * per-unit factory-calibrated period (Pixel devices ship this in
-	 * /persist/haptics/drv2624.cal as "lra_period: NNN").
+	 * Open-loop LRA period (OL_LRA_PERIOD, 24.615 us/LSB, 10 bits). The
+	 * click drives at ti,open-loop-frequency-hz when given, else at the
+	 * resonant frequency; the RTP buzz drives at ti,rtp-open-loop-frequency-hz
+	 * when given, else at the click frequency. Both frequencies were turned
+	 * into register values in probe.
 	 */
-	if (h->actuator == DRV2624_ACTUATOR_LRA) {
-		if (h->ol_lra_period)
-			period = h->ol_lra_period;
-		else if (h->lra_freq_hz)
-			period = DIV_ROUND_CLOSEST(40626U, h->lra_freq_hz);
-		else
-			period = 0;
-		if (period) {
-			period = min_t(u32, period, 0x3FF);
-			error = drv2624_write_ol_period(h, period);
-			if (error)
-				return error;
-			h->ol_period_click = period;
-		}
+	if (h->actuator == DRV2624_ACTUATOR_LRA && h->ol_period_click) {
+		error = drv2624_write_ol_period(h, h->ol_period_click);
+		if (error)
+			return error;
 	}
 	/* Init leaves the click's sine wave + period programmed. */
 	h->rtp_wave = false;
@@ -754,48 +767,33 @@ static int drv2624_probe(struct i2c_client *client)
 		h->lra_freq_hz = DRV2624_DEF_LRA_HZ;
 
 	/*
-	 * Optional raw RATED_VOLT / OD_CLAMP register values. The chip's
-	 * reset defaults (0x3F / 0x89) are safe and usually correct, so
-	 * these are only needed when a board's downstream HAL set
-	 * different values (e.g. a stronger or weaker LRA). Skip if zero.
+	 * Rated and overdrive voltages in millivolts (vib-rated-mv /
+	 * vib-overdrive-mv, as ti,drv260x uses), converted to register values.
+	 * Both are optional; the chip reset defaults are used when absent.
 	 */
-	if (!device_property_read_u32(dev, "ti,rated-voltage-reg", &val))
-		h->rated_volt_raw = val;
-	if (!device_property_read_u32(dev, "ti,od-clamp-reg", &val))
-		h->od_clamp_raw = val;
+	if (!device_property_read_u32(dev, "vib-rated-mv", &val))
+		h->rated_volt = drv2624_mv_to_reg(val, DRV2624_RATED_UV_PER_LSB);
+	if (!device_property_read_u32(dev, "vib-overdrive-mv", &val))
+		h->od_clamp = drv2624_mv_to_reg(val, DRV2624_OD_CLAMP_UV_PER_LSB);
 
 	/*
-	 * Optional per-unit factory-calibrated open-loop LRA period (raw
-	 * 10-bit register value, ~24.615 us/tick). Overrides the formula
-	 * derived from ti,lra-frequency-hz. On Pixel sunfish this comes
-	 * from /persist/haptics/drv2624.cal "lra_period: 241".
+	 * Open-loop drive frequencies. The click drives at
+	 * ti,open-loop-frequency-hz (default: the resonant frequency); the RTP
+	 * buzz at ti,rtp-open-loop-frequency-hz (default: the click frequency).
+	 * Convert both to OL_LRA_PERIOD register values up front.
 	 */
-	device_property_read_u32(dev, "ti,ol-lra-period", &h->ol_lra_period);
+	if (device_property_read_u32(dev, "ti,open-loop-frequency-hz",
+				     &h->ol_freq_hz))
+		h->ol_freq_hz = h->lra_freq_hz;
+	if (device_property_read_u32(dev, "ti,rtp-open-loop-frequency-hz",
+				     &h->rtp_freq_hz))
+		h->rtp_freq_hz = h->ol_freq_hz;
+	h->ol_period_click = drv2624_ol_period(h->ol_freq_hz);
+	h->ol_period_rtp = drv2624_ol_period(h->rtp_freq_hz);
 
 	/*
-	 * Open-loop period used for the long RTP buzz (stock sunfish drives it
-	 * at a lower frequency than the click). Defaults to the click period.
-	 */
-	if (device_property_read_u32(dev, "ti,rtp-ol-lra-period",
-				     &h->rtp_ol_lra_period))
-		h->rtp_ol_lra_period = h->ol_lra_period;
-
-	/*
-	 * FB_BRAKE_FACTOR (0x23[6:4]) and BEMF_GAIN (0x23[1:0]); default to the
-	 * chip reset values (3 and 2) when absent. Stock sunfish sets both 0.
-	 */
-	h->fb_brake_factor = 3;
-	if (!device_property_read_u32(dev, "ti,fb-brake-factor", &val))
-		h->fb_brake_factor = val;
-	h->bemf_gain = 2;
-	if (!device_property_read_u32(dev, "ti,bemf-gain", &val))
-		h->bemf_gain = val;
-
-	/*
-	 * Optional factory autocal compensation. The board's per-device
-	 * calibration file (e.g. /persist/haptics/drv2624.cal on Pixel
-	 * sunfish) carries an "autocal: X Y" line; pass those two bytes
-	 * (A_CAL_COMP, A_CAL_BEMF) via DT as ti,autocal-comp.
+	 * Optional factory autocal compensation: two raw calibration bytes
+	 * (A_CAL_COMP, A_CAL_BEMF) passed via ti,autocal-comp.
 	 */
 	if (!device_property_read_u8_array(dev, "ti,autocal-comp",
 					   h->autocal, sizeof(h->autocal)))
