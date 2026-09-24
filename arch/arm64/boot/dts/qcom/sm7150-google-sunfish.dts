@@ -717,7 +717,7 @@
 	clock-frequency = <400000>;
 
 	nfc@8 {
-		compatible = "st,st21nfc";
+		compatible = "st,st54j-nci";
 		reg = <0x08>;
 		interrupt-parent = <&tlmm>;
 		interrupts = <37 IRQ_TYPE_LEVEL_HIGH>;
