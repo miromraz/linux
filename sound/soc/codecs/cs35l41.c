@@ -1426,8 +1426,16 @@ static int cs35l41_runtime_resume(struct device *dev)
 	regcache_cache_only(cs35l41->regmap, false);
 
 	ret = cs35l41_exit_hibernate(cs35l41->dev, cs35l41->regmap);
-	if (ret)
+	if (ret) {
+		/*
+		 * The part is still asleep and unreachable. Put the cache back
+		 * into cache-only mode so we do not fault on the dead register
+		 * space and so a later resume can retry the wake sequence,
+		 * rather than leaving runtime PM wedged in an error state.
+		 */
+		regcache_cache_only(cs35l41->regmap, true);
 		return ret;
+	}
 
 	/* Test key needs to be unlocked to allow the OTP settings to re-apply */
 	cs35l41_test_key_unlock(cs35l41->dev, cs35l41->regmap);
