@@ -8,7 +8,7 @@ Build-Depends-Arch: bc, bison, flex,
  gcc-aarch64-linux-gnu <!pkg.linux-a52q.nokernelheaders>,
  kmod, libdw-dev:native, libelf-dev:native,
  libssl-dev:native, libssl-dev <!pkg.linux-a52q.nokernelheaders>,
- python3:native, rsync
+ python3:native, rsync, zstd
 Homepage: https://www.kernel.org/
 
 Package: linux-image-6.14.7-sm7125
