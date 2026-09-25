@@ -33,6 +33,7 @@ properties:
           - qcom,sc8280xp-qmp-usb43dp-phy
           - qcom,sdm845-qmp-usb3-dp-phy
           - qcom,sm6350-qmp-usb3-dp-phy
+          - qcom,sm7150-qmp-usb3-dp-phy
           - qcom,sm8150-qmp-usb3-dp-phy
           - qcom,sm8250-qmp-usb3-dp-phy
           - qcom,sm8350-qmp-usb3-dp-phy
@@ -190,6 +191,7 @@ allOf:
           enum:
             - qcom,sc7180-qmp-usb3-dp-phy
             - qcom,sdm845-qmp-usb3-dp-phy
+            - qcom,sm7150-qmp-usb3-dp-phy
     then:
       properties:
         clocks:
