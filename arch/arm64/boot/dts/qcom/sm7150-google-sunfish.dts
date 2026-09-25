@@ -248,6 +248,17 @@
 		enable-active-high;
 		vin-supply = <&vreg_l7c_3p0>;
 
+		/*
+		 * Which rail(s) the GPIO4 load switch actually gates (VDD 1.8V,
+		 * AVDD 3.0V, or both) is unmeasured, and the reset line must not
+		 * be released while the analog rail is still ramping or the
+		 * controller intermittently hangs the boot. Preserve the current
+		 * hardware behaviour: assert GPIO4 at boot and never drop it,
+		 * until the topology is measured.
+		 */
+		regulator-always-on;
+		regulator-boot-on;
+
 		pinctrl-names = "default";
 		pinctrl-0 = <&touch_power_default>;
 	};
