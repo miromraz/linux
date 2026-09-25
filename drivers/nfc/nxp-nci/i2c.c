@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/nfc.h>
 #include <linux/gpio/consumer.h>
+#include <linux/property.h>
 #include <linux/unaligned.h>
 
 #include <net/nfc/nfc.h>
@@ -309,7 +310,9 @@ static int nxp_nci_i2c_probe(struct i2c_client *client)
 	}
 
 	r = nxp_nci_probe(phy, &client->dev, &i2c_phy_ops,
-			  NXP_NCI_I2C_MAX_PAYLOAD, &phy->ndev);
+			  NXP_NCI_I2C_MAX_PAYLOAD,
+			  (enum nxp_nci_variant)(uintptr_t)device_get_match_data(dev),
+			  &phy->ndev);
 	if (r < 0)
 		return r;
 
@@ -357,19 +360,19 @@ MODULE_DEVICE_TABLE(i2c, nxp_nci_i2c_id_table);
 static const struct of_device_id of_nxp_nci_i2c_match[] = {
 	{ .compatible = "nxp,nxp-nci-i2c", },
 	/*
-	 * The ST54J (marketed as "st21nfc", as in Pixel 4a) is not an NXP part,
-	 * but this driver's core is protocol-generic despite its name: it is a
-	 * plain NCI transport that reads a 3-byte NCI control header followed by
-	 * plen payload bytes, which is exactly what the ST54J speaks. Probed on
-	 * sunfish, the chip answers CORE_RESET_NTF with manufacturer ID 0x02
-	 * (STMicroelectronics) and NCI version 0x20.
+	 * The ST54J (Google Pixel 4a) is not an NXP part, but this driver's core
+	 * is protocol-generic despite its name: it is a plain NCI transport that
+	 * reads a 3-byte NCI control header followed by plen payload bytes, which
+	 * is exactly what the ST54J speaks. Probed on sunfish, the chip answers
+	 * CORE_RESET_NTF with manufacturer ID 0x02 (STMicroelectronics) and NCI
+	 * version 0x20.
 	 *
-	 * Note the mainline ST drivers do NOT fit: st-nci wraps every frame in an
-	 * NDLC PCB byte (ST21NFCB generation) and st21nfca speaks HCI over HDLC.
-	 * The NXP-specific parts here are confined to the firmware-download mode,
-	 * which is only reachable through an NXP vendor command.
+	 * The mainline ST drivers do NOT fit: st-nci wraps every frame in an NDLC
+	 * PCB byte (ST21NFCB generation) and st21nfca speaks HCI over HDLC. The
+	 * NXP-specific firmware-download mode is kept away from the ST54J through
+	 * NXP_NCI_ST54J match data (see nxp_nci_probe()).
 	 */
-	{ .compatible = "st,st21nfc", },
+	{ .compatible = "st,st54j-nci", .data = (void *)NXP_NCI_ST54J },
 	{}
 };
 MODULE_DEVICE_TABLE(of, of_nxp_nci_i2c_match);
