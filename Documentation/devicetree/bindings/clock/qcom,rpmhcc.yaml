@@ -16,7 +16,6 @@ description: |
 
 properties:
   compatible:
-<<<<<<< HEAD
     oneOf:
       - enum:
         - qcom,eliza-rpmh-clk

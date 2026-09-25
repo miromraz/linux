@@ -284,6 +284,123 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&touch_power_default>;
 	};
+
+	wcd9375: audio-codec {
+		compatible = "qcom,wcd9375-codec", "qcom,wcd9370-codec";
+
+		reset-gpios = <&lpass_tlmm 24 GPIO_ACTIVE_LOW>;
+
+		vdd-buck-supply = <&vreg_l15a_1p8>;
+		vdd-rxtx-supply = <&vreg_l10a_1p8>;
+		vdd-px-supply = <&vreg_l10a_1p8>;
+		vdd-mic-bias-supply = <&vreg_bob>;
+
+		qcom,micbias1-microvolt = <1800000>;
+		qcom,micbias2-microvolt = <2700000>;
+		qcom,micbias3-microvolt = <1800000>;
+		qcom,micbias4-microvolt = <1800000>;
+
+		qcom,hphl-jack-type-normally-closed;
+		qcom,ground-jack-type-normally-closed;
+
+		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
+		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
+		qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
+
+		qcom,rx-device = <&wcd937x_rx>;
+		qcom,tx-device = <&wcd937x_tx>;
+
+		#sound-dai-cells = <1>;
+	};
+
+	sound {
+		compatible = "google,sunfish-sndcard";
+		pinctrl-0 = <&lpi_sec_mi2s_active>, <&ter_mi2s_active>;
+		pinctrl-names = "default";
+		model = "Google Pixel 4a";
+
+		audio-routing = "IN1_HPHL", "HPHL_OUT",
+				"IN2_HPHR", "HPHR_OUT",
+				"AMIC2", "MIC BIAS2",
+				"TX SWR_ADC1", "ADC2_OUTPUT";
+
+		mm1-dai-link {
+			link-name = "MultiMedia1";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+			};
+		};
+
+		mm2-dai-link {
+			link-name = "MultiMedia2";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+			};
+		};
+
+		mm3-dai-link {
+			link-name = "MultiMedia3";
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+			};
+		};
+
+		tdm-dai-link {
+			link-name = "Speakers Playback";
+			cpu {
+				sound-dai = <&q6afedai SECONDARY_TDM_RX_0>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&cs35l41_l 0>, <&cs35l41_r 0>;
+			};
+		};
+
+		tdm-capture-dai-link {
+			link-name = "TERT TDM Capture";
+			cpu {
+				sound-dai = <&q6afedai TERTIARY_TDM_TX_0>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&codec>;
+			};
+		};
+
+		wcd-playback-dai-link {
+			link-name = "WCD Playback";
+			cpu {
+				sound-dai = <&q6afedai RX_CODEC_DMA_RX_0>;
+			};
+			codec {
+				sound-dai = <&wcd9375 0>, <&swr1 0>, <&rxmacro 0>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+		};
+
+		wcd-capture-dai-link {
+			link-name = "WCD Capture";
+			cpu {
+				sound-dai = <&q6afedai TX_CODEC_DMA_TX_3>;
+			};
+			codec {
+				sound-dai = <&wcd9375 1>, <&swr2 0>, <&txmacro 0>;
+			};
+			platform {
+				sound-dai = <&q6routing>;
+			};
+		};
+	};
 };
 
 &apps_rsc {
@@ -1111,6 +1228,16 @@
 	status = "okay";
 };
 
+&pm6150_gpios {
+	touch_power_default: touch-power-default-state {
+		pins = "gpio4";
+		function = "normal";
+		qcom,drive-strength = <2>;
+		power-source = <1>;
+		bias-disable;
+	};
+};
+
 /*
  * The RTC has no way of its own to store the epoch: the PM6150 counter is
  * battery-backed and keeps counting, but the offset from it to Unix time is
@@ -1149,7 +1276,6 @@
  * 0x5a. Enabling pm6150_vib creates a phantom input device that
  * feedbackd would otherwise pick up and "drive" silently.
  */
-
 &pm6150_rtc {
 	nvmem-cells = <&rtc_offset>;
 	nvmem-cell-names = "offset";
@@ -1261,51 +1387,6 @@
 	};
 };
 
-&qfprom {
-	vcc-supply = <&vdd_qfprom>;
-};
-
-&qup_i2c7_default {
-	drive-strength = <2>;
-	bias-disable;
-};
-
-&qup_uart3_cts {
-	bias-pull-down;
-};
-
-&qup_uart3_rts {
-	drive-strength = <2>;
-	bias-disable;
-};
-
-&qup_uart3_tx {
-	drive-strength = <2>;
-	bias-disable;
-};
-
-&qup_uart3_rx {
-	bias-pull-up;
-};
-
-&qup_uart8_tx {
-	drive-strength = <2>;
-	bias-disable;
-};
-
-&qup_uart8_rx {
-	drive-strength = <2>;
-	bias-pull-up;
-};
-
-&qupv3_id_0 {
-	status = "okay";
-};
-
-&qupv3_id_1 {
-	status = "okay";
-};
-
 &q6afedai {
 	/* stock sec TDM: internal short sync, inverted fsync, 1 bclk delay */
 	dai@40 {
@@ -1330,16 +1411,81 @@
 	};
 };
 
+&qfprom {
+	vcc-supply = <&vdd_qfprom>;
+};
+
+&qup_i2c7_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&qup_uart3_cts {
+	bias-pull-down;
+};
+
+&qup_uart3_rts {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&qup_uart3_rx {
+	bias-pull-up;
+};
+
+&qup_uart3_tx {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&qup_uart8_rx {
+	drive-strength = <2>;
+	bias-pull-up;
+};
+
+&qup_uart8_tx {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&remoteproc_adsp {
+	firmware-name = "qcom/sm7150/google/sunfish/adsp.mbn";
+	status = "okay";
+};
+
+&remoteproc_cdsp {
+	firmware-name = "qcom/sm7150/google/sunfish/cdsp.mbn";
+	status = "okay";
+};
+
+&remoteproc_mpss {
+	firmware-name = "qcom/sm7150/google/sunfish/modem.mbn";
+	status = "okay";
+};
+
 &rxmacro {
 	status = "okay";
 };
 
-&txmacro {
+&spi0 {
 	status = "okay";
+
+	/* realtek,rt5514 codec@0 */
 };
 
-&vamacro {
+&spi1 {
 	status = "okay";
+
+	/* google,citadel @ 0 */
+	/* st,st54j_se @ 1 */
 };
 
 &swr1 {
@@ -1377,153 +1523,6 @@
 	};
 };
 
-/ {
-	wcd9375: audio-codec {
-		compatible = "qcom,wcd9375-codec", "qcom,wcd9370-codec";
-
-		reset-gpios = <&lpass_tlmm 24 GPIO_ACTIVE_LOW>;
-
-		vdd-buck-supply = <&vreg_l15a_1p8>;
-		vdd-rxtx-supply = <&vreg_l10a_1p8>;
-		vdd-px-supply = <&vreg_l10a_1p8>;
-		vdd-mic-bias-supply = <&vreg_bob>;
-
-		qcom,micbias1-microvolt = <1800000>;
-		qcom,micbias2-microvolt = <2700000>;
-		qcom,micbias3-microvolt = <1800000>;
-		qcom,micbias4-microvolt = <1800000>;
-
-		qcom,hphl-jack-type-normally-closed;
-		qcom,ground-jack-type-normally-closed;
-
-		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
-		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
-		qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
-
-		qcom,rx-device = <&wcd937x_rx>;
-		qcom,tx-device = <&wcd937x_tx>;
-
-		#sound-dai-cells = <1>;
-	};
-
-	sound {
-		compatible = "google,sunfish-sndcard";
-		pinctrl-0 = <&lpi_sec_mi2s_active>, <&ter_mi2s_active>;
-		pinctrl-names = "default";
-		model = "Google Pixel 4a";
-
-		audio-routing = "IN1_HPHL", "HPHL_OUT",
-				"IN2_HPHR", "HPHR_OUT",
-				"AMIC2", "MIC BIAS2",
-				"TX SWR_ADC1", "ADC2_OUTPUT";
-
-		mm1-dai-link {
-			link-name = "MultiMedia1";
-			cpu {
-				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
-			};
-		};
-
-		mm2-dai-link {
-			link-name = "MultiMedia2";
-			cpu {
-				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
-			};
-		};
-
-		mm3-dai-link {
-			link-name = "MultiMedia3";
-			cpu {
-				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
-			};
-		};
-
-		tdm-dai-link {
-			link-name = "Speakers Playback";
-			cpu {
-				sound-dai = <&q6afedai SECONDARY_TDM_RX_0>;
-			};
-
-			platform {
-				sound-dai = <&q6routing>;
-			};
-
-			codec {
-				sound-dai = <&cs35l41_l 0>, <&cs35l41_r 0>;
-			};
-		};
-
-		tdm-capture-dai-link {
-			link-name = "TERT TDM Capture";
-			cpu {
-				sound-dai = <&q6afedai TERTIARY_TDM_TX_0>;
-			};
-
-			platform {
-				sound-dai = <&q6routing>;
-			};
-
-			codec {
-				sound-dai = <&codec>;
-			};
-		};
-
-		wcd-playback-dai-link {
-			link-name = "WCD Playback";
-			cpu {
-				sound-dai = <&q6afedai RX_CODEC_DMA_RX_0>;
-			};
-			codec {
-				sound-dai = <&wcd9375 0>, <&swr1 0>, <&rxmacro 0>;
-			};
-			platform {
-				sound-dai = <&q6routing>;
-			};
-		};
-
-		wcd-capture-dai-link {
-			link-name = "WCD Capture";
-			cpu {
-				sound-dai = <&q6afedai TX_CODEC_DMA_TX_3>;
-			};
-			codec {
-				sound-dai = <&wcd9375 1>, <&swr2 0>, <&txmacro 0>;
-			};
-			platform {
-				sound-dai = <&q6routing>;
-			};
-		};
-	};
-};
-
-&remoteproc_adsp {
-	firmware-name = "qcom/sm7150/google/sunfish/adsp.mbn";
-	status = "okay";
-};
-
-&remoteproc_cdsp {
-	firmware-name = "qcom/sm7150/google/sunfish/cdsp.mbn";
-	status = "okay";
-};
-
-&remoteproc_mpss {
-	firmware-name = "qcom/sm7150/google/sunfish/modem.mbn";
-	status = "okay";
-};
-
-&spi0 {
-	status = "okay";
-
-	/* realtek,rt5514 codec@0 */
-};
-
-&spi1 {
-	status = "okay";
-
-	/* google,citadel @ 0 */
-	/* st,st54j_se @ 1 */
-};
-
 &tlmm {
 	gpio-reserved-ranges = <59 4>;
 
@@ -1557,13 +1556,6 @@
 			drive-strength = <2>;
 			bias-disable;
 		};
-	};
-
-	ter_mi2s_active: ter-mi2s-active-state {
-		pins = "gpio53", "gpio54", "gpio55", "gpio56";
-		function = "ter_mi2s";
-		drive-strength = <8>;
-		bias-disable;
 	};
 
 	haptic_en_default: haptic-en-default-state {
@@ -1606,6 +1598,13 @@
 		};
 	};
 
+	ter_mi2s_active: ter-mi2s-active-state {
+		pins = "gpio53", "gpio54", "gpio55", "gpio56";
+		function = "ter_mi2s";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
 	touch_irq_default: touch-irq-default-state {
 		pins = "gpio9";
 		function = "gpio";
@@ -1621,14 +1620,8 @@
 	};
 };
 
-&pm6150_gpios {
-	touch_power_default: touch-power-default-state {
-		pins = "gpio4";
-		function = "normal";
-		qcom,drive-strength = <2>;
-		power-source = <1>;
-		bias-disable;
-	};
+&txmacro {
+	status = "okay";
 };
 
 &uart3 {
@@ -1702,6 +1695,10 @@
 
 &usb_1_qmpphy_out {
 	remote-endpoint = <&pm6150_typec_mux_in>;
+};
+
+&vamacro {
+	status = "okay";
 };
 
 &venus {
