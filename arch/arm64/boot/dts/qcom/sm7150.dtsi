@@ -4842,7 +4842,7 @@
 					pins = "gpio27";
 					function = "dmic1_data";
 					drive-strength = <2>;
-					pull-down;
+					bias-pull-down;
 					input-enable;
 				};
 			};
@@ -4876,7 +4876,7 @@
 					pins = "gpio29";
 					function = "dmic2_data";
 					drive-strength = <2>;
-					pull-down;
+					bias-pull-down;
 					input-enable;
 				};
 			};
