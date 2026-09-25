@@ -62,7 +62,7 @@ required:
 allOf:
   - $ref: power-supply.yaml#
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |
