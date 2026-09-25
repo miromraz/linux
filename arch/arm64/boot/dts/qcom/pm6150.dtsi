@@ -163,7 +163,7 @@
 				label = "usb_in_v_div_16";
 			};
 
-			bat_therm@4a {
+			channel@4a {
 				reg = <ADC5_BAT_THERM_100K_PU>;
 				label = "bat_therm";
 				qcom,ratiometric;
