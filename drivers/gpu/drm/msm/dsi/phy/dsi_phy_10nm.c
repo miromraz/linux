@@ -80,6 +80,18 @@ struct dsi_pll_10nm {
 	struct pll_10nm_cached_state cached_state;
 
 	struct dsi_pll_10nm *slave;
+
+	/*
+	 * Set once dsi_10nm_phy_enable() has programmed the PHY, cleared on
+	 * disable. The VCO .prepare op locks the PLL and only works on an
+	 * already-configured PHY, but the clock framework can call it earlier:
+	 * dispcc's pixel clock source is flagged CLK_OPS_PARENT_ENABLE, so its
+	 * parent (this PLL) is prepare-enabled whenever that source is touched,
+	 * including during clk_disable_unused() at boot. Locking the PLL then
+	 * times out ("PLL(N) lock failed") and unwinds into clock-core
+	 * "already disabled/unprepared" warnings.
+	 */
+	bool phy_enabled;
 };
 
 #define to_pll_10nm(x)	container_of(x, struct dsi_pll_10nm, clk_hw)
@@ -337,6 +349,16 @@ static int dsi_pll_10nm_vco_prepare(struct clk_hw *hw)
 	struct dsi_pll_10nm *pll_10nm = to_pll_10nm(hw);
 	struct device *dev = &pll_10nm->phy->pdev->dev;
 	int rc;
+
+	/*
+	 * Do not touch the PLL until the PHY has been programmed. A .prepare
+	 * arriving before that comes from the clock framework enabling this
+	 * PLL as the CLK_OPS_PARENT_ENABLE parent of dispcc's pixel clock
+	 * source (e.g. during clk_disable_unused()), not from a display
+	 * bring-up; the real .prepare runs once the PHY is enabled.
+	 */
+	if (!pll_10nm->phy_enabled)
+		return 0;
 
 	dsi_pll_enable_pll_bias(pll_10nm);
 	if (pll_10nm->slave)
@@ -877,6 +899,9 @@ static int dsi_10nm_phy_enable(struct msm_dsi_phy *phy,
 	/* DSI lane settings */
 	dsi_phy_hw_v3_0_lane_settings(phy);
 
+	/* The PHY is now configured; the VCO .prepare op may lock the PLL. */
+	pll_10nm_list[phy->id]->phy_enabled = true;
+
 	DBG("DSI%d PHY enabled", phy->id);
 
 	return 0;
@@ -888,6 +913,8 @@ static void dsi_10nm_phy_disable(struct msm_dsi_phy *phy)
 	u32 data;
 
 	DBG("");
+
+	pll_10nm_list[phy->id]->phy_enabled = false;
 
 	if (dsi_phy_hw_v3_0_is_pll_on(phy))
 		pr_warn("Turning OFF PHY while PLL is on\n");
