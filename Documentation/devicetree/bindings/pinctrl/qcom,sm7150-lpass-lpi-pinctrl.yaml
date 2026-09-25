@@ -21,6 +21,13 @@ properties:
     items:
       - description: LPASS LPI TLMM Control and Status registers
 
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    items:
+      - const: core
+
 patternProperties:
   "-state$":
     oneOf:
