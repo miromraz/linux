@@ -487,7 +487,6 @@ examples:
                          "cam_sf_0_mnoc",
                          "cam_sf_icp_mnoc";
 
-
             ports {
                 #address-cells = <1>;
                 #size-cells = <0>;
