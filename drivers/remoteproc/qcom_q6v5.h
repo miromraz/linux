@@ -5,7 +5,6 @@
 
 #include <linux/kernel.h>
 #include <linux/completion.h>
-#include <linux/ratelimit_types.h>
 #include <linux/soc/qcom/qcom_aoss.h>
 
 struct icc_path;
@@ -31,7 +30,6 @@ struct qcom_q6v5 {
 	int stop_irq;
 
 	bool handover_issued;
-	struct ratelimit_state handover_rl;
 
 	struct completion start_done;
 	struct completion stop_done;

@@ -11,7 +11,6 @@
 #include <linux/interconnect.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/ratelimit.h>
 #include <linux/soc/qcom/qcom_aoss.h>
 #include <linux/soc/qcom/smem.h>
 #include <linux/soc/qcom/smem_state.h>
@@ -166,20 +165,7 @@ static irqreturn_t q6v5_handover_interrupt(int irq, void *data)
 	struct qcom_q6v5 *q6v5 = data;
 
 	if (q6v5->handover_issued) {
-		/*
-		 * Some firmware re-asserts the handover bit continuously - the
-		 * SM7150 ADSP does so at ~5 Hz for as long as a sensor client
-		 * is streaming. The repeat itself is harmless, the handover
-		 * resources are released exactly once, but the default
-		 * ratelimit still passes 2 lines/s and buries the log. One
-		 * line a minute, plus the suppressed count, is enough to see
-		 * that it is happening and how fast. The state is per-q6v5
-		 * (see qcom_q6v5_init) so an ADSP storm cannot swallow a
-		 * genuine modem or CDSP handover message.
-		 */
-		if (__ratelimit(&q6v5->handover_rl))
-			dev_err(q6v5->dev,
-				"Handover signaled, but it already happened\n");
+		dev_err(q6v5->dev, "Handover signaled, but it already happened\n");
 		return IRQ_HANDLED;
 	}
 
@@ -272,9 +258,6 @@ int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
 
 	init_completion(&q6v5->start_done);
 	init_completion(&q6v5->stop_done);
-
-	/* Per-instance so one remote's handover storm cannot mute another's */
-	ratelimit_state_init(&q6v5->handover_rl, 60 * HZ, 1);
 
 	q6v5->wdog_irq = platform_get_irq_byname(pdev, "wdog");
 	if (q6v5->wdog_irq < 0)
