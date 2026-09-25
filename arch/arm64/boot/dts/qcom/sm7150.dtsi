@@ -4909,14 +4909,16 @@
 		};
 
 		txmacro: codec@62ec0000 {
-			compatible = "qcom,sm8250-lpass-tx-macro";
+			compatible = "qcom,sm7150-lpass-tx-macro",
+				     "qcom,sm8250-lpass-tx-macro";
 			reg = <0 0x62ec0000 0 0x1000>;
 
 			clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
 				 <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
 				 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
+				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
 				 <&vamacro>;
-			clock-names = "mclk", "npl", "macro", "fsgen";
+			clock-names = "mclk", "npl", "macro", "dcodec", "fsgen";
 
 			pinctrl-names = "default", "sleep";
 			pinctrl-0 = <&tx_swr_active>;
@@ -4959,14 +4961,16 @@
 		};
 
 		rxmacro: codec@62ee0000 {
-			compatible = "qcom,sm8250-lpass-rx-macro";
+			compatible = "qcom,sm7150-lpass-rx-macro",
+				     "qcom,sm8250-lpass-rx-macro";
 			reg = <0 0x62ee0000 0 0x1000>;
 
 			clocks = <&q6afecc LPASS_CLK_ID_RX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
 				 <&q6afecc LPASS_CLK_ID_RX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
 				 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
+				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
 				 <&vamacro>;
-			clock-names = "mclk", "npl", "macro", "fsgen";
+			clock-names = "mclk", "npl", "macro", "dcodec", "fsgen";
 
 			pinctrl-names = "default", "sleep";
 			pinctrl-0 = <&rx_swr_active>;
@@ -5009,12 +5013,14 @@
 		};
 
 		vamacro: codec@62f20000 {
-			compatible = "qcom,sm8250-lpass-va-macro";
+			compatible = "qcom,sm7150-lpass-va-macro",
+				     "qcom,sm8250-lpass-va-macro";
 			reg = <0 0x62f20000 0 0x1000>;
 
 			clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
-				 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
-			clock-names = "mclk", "macro";
+				 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
+				 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
+			clock-names = "mclk", "macro", "dcodec";
 
 			/*
 			 * 9.6 MHz VA MCLK / 16 = 600 kHz DMIC clock, the same

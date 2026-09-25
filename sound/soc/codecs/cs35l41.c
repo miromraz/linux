@@ -1375,18 +1375,32 @@ EXPORT_SYMBOL_GPL(cs35l41_probe);
 
 void cs35l41_remove(struct cs35l41_private *cs35l41)
 {
-	pm_runtime_get_sync(cs35l41->dev);
+	int ret;
+
+	ret = pm_runtime_get_sync(cs35l41->dev);
+	if (ret < 0)
+		dev_warn(cs35l41->dev, "Failed to resume for removal: %d\n", ret);
 	pm_runtime_dont_use_autosuspend(cs35l41->dev);
 	pm_runtime_disable(cs35l41->dev);
 
-	regmap_write(cs35l41->regmap, CS35L41_IRQ1_MASK1, 0xFFFFFFFF);
-	if (cs35l41->hw_cfg.bst_type == CS35L41_SHD_BOOST_PASS ||
-	    cs35l41->hw_cfg.bst_type == CS35L41_SHD_BOOST_ACTV)
-		regmap_update_bits(cs35l41->regmap, CS35L41_IRQ1_MASK3, CS35L41_INT3_PLL_LOCK_MASK,
-				   1 << CS35L41_INT3_PLL_LOCK_SHIFT);
+	/*
+	 * If the resume failed the part is in an error state and its registers
+	 * are unreachable; skip the hardware teardown to avoid faulting on dead
+	 * register space (which oopses on unbind/rebind). wm_adsp2_remove() and
+	 * the software cleanup below are still safe and still required.
+	 */
+	if (ret >= 0) {
+		regmap_write(cs35l41->regmap, CS35L41_IRQ1_MASK1, 0xFFFFFFFF);
+		if (cs35l41->hw_cfg.bst_type == CS35L41_SHD_BOOST_PASS ||
+		    cs35l41->hw_cfg.bst_type == CS35L41_SHD_BOOST_ACTV)
+			regmap_update_bits(cs35l41->regmap, CS35L41_IRQ1_MASK3,
+					   CS35L41_INT3_PLL_LOCK_MASK,
+					   1 << CS35L41_INT3_PLL_LOCK_SHIFT);
+	}
 	kfree(cs35l41->dsp.system_name);
 	wm_adsp2_remove(&cs35l41->dsp);
-	cs35l41_safe_reset(cs35l41->regmap, cs35l41->hw_cfg.bst_type);
+	if (ret >= 0)
+		cs35l41_safe_reset(cs35l41->regmap, cs35l41->hw_cfg.bst_type);
 
 	pm_runtime_put_noidle(cs35l41->dev);
 
@@ -1426,8 +1440,16 @@ static int cs35l41_runtime_resume(struct device *dev)
 	regcache_cache_only(cs35l41->regmap, false);
 
 	ret = cs35l41_exit_hibernate(cs35l41->dev, cs35l41->regmap);
-	if (ret)
+	if (ret) {
+		/*
+		 * The part is still asleep and unreachable. Put the cache back
+		 * into cache-only mode so we do not fault on the dead register
+		 * space and so a later resume can retry the wake sequence,
+		 * rather than leaving runtime PM wedged in an error state.
+		 */
+		regcache_cache_only(cs35l41->regmap, true);
 		return ret;
+	}
 
 	/* Test key needs to be unlocked to allow the OTP settings to re-apply */
 	cs35l41_test_key_unlock(cs35l41->dev, cs35l41->regmap);

@@ -384,7 +384,7 @@ static int qcom_swrm_ahb_reg_write(struct qcom_swrm_ctrl *ctrl,
 static int qcom_swrm_cpu_reg_read(struct qcom_swrm_ctrl *ctrl, int reg,
 				  u32 *val)
 {
-	if (ctrl->adsp_down) {
+	if (READ_ONCE(ctrl->adsp_down)) {
 		*val = 0;
 		return SDW_CMD_FAIL;
 	}
@@ -396,7 +396,7 @@ static int qcom_swrm_cpu_reg_read(struct qcom_swrm_ctrl *ctrl, int reg,
 static int qcom_swrm_cpu_reg_write(struct qcom_swrm_ctrl *ctrl, int reg,
 				   int val)
 {
-	if (ctrl->adsp_down)
+	if (READ_ONCE(ctrl->adsp_down))
 		return SDW_CMD_FAIL;
 
 	writel(val, ctrl->mmio + reg);
@@ -742,7 +742,7 @@ static irqreturn_t qcom_swrm_irq_handler(int irq, void *dev_id)
 	int devnum;
 	int ret = IRQ_HANDLED;
 
-	if (ctrl->adsp_down) {
+	if (READ_ONCE(ctrl->adsp_down)) {
 		/*
 		 * The block that raises this interrupt is unclocked, so it
 		 * cannot deassert the line anymore.  Keep it masked instead of
@@ -1012,7 +1012,7 @@ static enum sdw_command_response qcom_swrm_xfer_msg(struct sdw_bus *bus,
 	 * Fail the whole message instead of letting every single command run
 	 * into the fifo timeouts below.
 	 */
-	if (ctrl->adsp_down)
+	if (READ_ONCE(ctrl->adsp_down))
 		return SDW_CMD_FAIL;
 
 	if (msg->flags == SDW_MSG_FLAG_READ) {
@@ -1575,7 +1575,7 @@ static int qcom_swrm_ssr_notify(struct notifier_block *nb, unsigned long action,
 	struct qcom_swrm_ctrl *ctrl = container_of(nb, struct qcom_swrm_ctrl,
 						   ssr_nb);
 
-	if (action != QCOM_SSR_BEFORE_SHUTDOWN || ctrl->adsp_down)
+	if (action != QCOM_SSR_BEFORE_SHUTDOWN || READ_ONCE(ctrl->adsp_down))
 		return NOTIFY_DONE;
 
 	/*
@@ -1585,7 +1585,17 @@ static int qcom_swrm_ssr_notify(struct notifier_block *nb, unsigned long action,
 	 * shut it down for good rather than fault on dead registers.
 	 */
 	dev_warn(ctrl->dev, "ADSP is going down, SoundWire link is now dead\n");
-	ctrl->adsp_down = true;
+	WRITE_ONCE(ctrl->adsp_down, true);
+
+	/*
+	 * Drain any handler or transfer that read adsp_down as false and is
+	 * already on its way to the (about to be dead) register space, so that
+	 * once this notifier returns nothing new touches the hardware.  The
+	 * flag is read with READ_ONCE() everywhere else for the same reason.
+	 */
+	synchronize_irq(ctrl->irq);
+	if (ctrl->wake_irq > 0)
+		synchronize_irq(ctrl->wake_irq);
 
 	return NOTIFY_DONE;
 }
@@ -1802,7 +1812,7 @@ static int __maybe_unused swrm_runtime_resume(struct device *dev)
 	 * out the same way, so the enable count stays put on a provider that no
 	 * longer exists - bookkeeping, not a live power vote.
 	 */
-	if (ctrl->adsp_down)
+	if (READ_ONCE(ctrl->adsp_down))
 		return 0;
 
 	if (ctrl->wake_irq > 0) {
@@ -1876,7 +1886,7 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
 	 * provider, so leave the clock alone here too and let its enable count
 	 * rest on that defunct provider.
 	 */
-	if (ctrl->adsp_down)
+	if (READ_ONCE(ctrl->adsp_down))
 		return 0;
 
 	swrm_wait_for_wr_fifo_done(ctrl);

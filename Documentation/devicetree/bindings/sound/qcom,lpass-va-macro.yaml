@@ -20,6 +20,9 @@ properties:
           - qcom,sm8550-lpass-va-macro
           - qcom,sc8280xp-lpass-va-macro
       - items:
+          - const: qcom,sm7150-lpass-va-macro
+          - const: qcom,sm8250-lpass-va-macro
+      - items:
           - enum:
               - qcom,glymur-lpass-va-macro
               - qcom,kaanapali-lpass-va-macro
