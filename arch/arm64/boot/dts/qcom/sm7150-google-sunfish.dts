@@ -1559,13 +1559,6 @@
 		};
 	};
 
-	ter_mi2s_active: ter-mi2s-active-state {
-		pins = "gpio53", "gpio54", "gpio55", "gpio56";
-		function = "ter_mi2s";
-		drive-strength = <8>;
-		bias-disable;
-	};
-
 	haptic_en_default: haptic-en-default-state {
 		pins = "gpio11";
 		function = "gpio";
@@ -1604,6 +1597,13 @@
 			function = "gpio";
 			bias-pull-up;
 		};
+	};
+
+	ter_mi2s_active: ter-mi2s-active-state {
+		pins = "gpio53", "gpio54", "gpio55", "gpio56";
+		function = "ter_mi2s";
+		drive-strength = <8>;
+		bias-disable;
 	};
 
 	touch_irq_default: touch-irq-default-state {
