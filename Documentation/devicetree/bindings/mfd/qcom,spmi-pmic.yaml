@@ -151,6 +151,7 @@ patternProperties:
   "^battery@[0-9a-f]+$":
     type: object
     oneOf:
+      - $ref: /schemas/power/supply/qcom,pm6150-qg.yaml#
       - $ref: /schemas/power/supply/qcom,pm8916-bms-vm.yaml#
 
   "^charger@[0-9a-f]+$":

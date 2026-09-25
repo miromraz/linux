@@ -89,10 +89,14 @@
 	battery: battery {
 		compatible = "simple-battery";
 		/*
-		 * qcom_smbx programs the DCP (wall charger) input current
-		 * limit from this property; without it the field stays at
-		 * -EINVAL, smb_set_current_limit() rejects it and the limit
-		 * is never programmed at all.
+		 * Google's downstream fast-charge rating for this pack.
+		 * qcom_smbx clamps the pack fast-charge current to this, and
+		 * under a 9V PD contract with a healthy thermistor read it
+		 * raises the ceiling to this value. Raising it toward the
+		 * cell's ~1.3C limit (~4 A) is what would let a 9V adapter
+		 * deliver ~18 W, but that exceeds the vendor rating and must be
+		 * validated on hardware (charge current and pack temperature)
+		 * before it is trusted.
 		 */
 		constant-charge-current-max-microamp = <1500000>;
 		voltage-min-design-microvolt = <3300000>;
