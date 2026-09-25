@@ -492,34 +492,8 @@ static int __maybe_unused cci_resume_runtime(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused cci_suspend(struct device *dev)
-{
-	if (!pm_runtime_suspended(dev))
-		return cci_suspend_runtime(dev);
-
-	return 0;
-}
-
-static int __maybe_unused cci_resume(struct device *dev)
-{
-	/*
-	 * cci_suspend() leaves the clocks alone when the device is already
-	 * runtime suspended, so resuming it here would take a clock reference
-	 * that nothing ever drops: the runtime PM status is still
-	 * RPM_SUSPENDED, which makes the pm_request_autosuspend() below a
-	 * no-op. Stay symmetric with the suspend side instead.
-	 */
-	if (pm_runtime_suspended(dev))
-		return 0;
-
-	cci_resume_runtime(dev);
-	pm_request_autosuspend(dev);
-
-	return 0;
-}
-
 static const struct dev_pm_ops qcom_cci_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(cci_suspend, cci_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(cci_suspend_runtime, cci_resume_runtime, NULL)
 };
 
@@ -669,17 +643,27 @@ disable_clocks:
 static void cci_remove(struct platform_device *pdev)
 {
 	struct cci *cci = platform_get_drvdata(pdev);
-	int i;
+	int ret, i;
+
+	/*
+	 * The controller is normally runtime suspended with its clocks off by
+	 * the time it is unbound, so resume it before writing CCI_HALT_REQ: an
+	 * unclocked register write faults the interconnect on Qualcomm SoCs.
+	 */
+	ret = pm_runtime_resume_and_get(&pdev->dev);
 
 	for (i = 0; i < cci->data->num_masters; i++) {
 		if (cci->master[i].cci) {
 			i2c_del_adapter(&cci->master[i].adap);
 			of_node_put(cci->master[i].adap.dev.of_node);
-			cci_halt(cci, i);
+			if (ret >= 0)
+				cci_halt(cci, i);
 		}
 	}
 
 	pm_runtime_disable(&pdev->dev);
+	if (ret >= 0)
+		pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
 }
 

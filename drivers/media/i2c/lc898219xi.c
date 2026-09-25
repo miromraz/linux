@@ -48,14 +48,14 @@ static int lc898219xi_set_dac(struct lc898219xi *lc898219xi, u16 val)
 	struct i2c_client *client = v4l2_get_subdevdata(&lc898219xi->sd);
 	int ret;
 
-	// Value ranges from -2047 (max focus) to 2048 in hardware
+	/* Value ranges from -2047 (max focus) to 2048 in hardware. */
 	s16 actuator_val = ((s16)val - 2048) * -1;
 
-	// Focus driver expects a 2s complement 12 bit signed integer
-	u16 actuator_val_s12 = (actuator_val >> 4) & LC898219XI_MAX_FOCUS_POS;
+	/* The coil expects a two's-complement 12-bit signed value. */
+	u16 actuator_val_s12 = actuator_val & LC898219XI_MAX_FOCUS_POS;
 
 	ret = cci_write(lc898219xi->regmap, LC898219XI_DAC_ADDR,
-			cpu_to_le16(actuator_val_s12), NULL);
+			actuator_val_s12, NULL);
 	if (ret)
 		dev_err(&client->dev, "failed to set DAC: %d\n", ret);
 
@@ -189,7 +189,11 @@ static int lc898219xi_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	if (ret)
 		return ret;
 
-	__v4l2_ctrl_handler_setup(&lc898219xi->ctrls);
+	ret = v4l2_ctrl_handler_setup(&lc898219xi->ctrls);
+	if (ret) {
+		pm_runtime_put_autosuspend(sd->dev);
+		return ret;
+	}
 
 	return 0;
 }
@@ -225,8 +229,12 @@ static int lc898219xi_init_controls(struct lc898219xi *lc898219xi)
 			  LC898219XI_MIN_FOCUS_POS, LC898219XI_MAX_FOCUS_POS,
 			  LC898219XI_FOCUS_STEPS, 0);
 
-	if (hdl->error)
-		return hdl->error;
+	if (hdl->error) {
+		int ret = hdl->error;
+
+		v4l2_ctrl_handler_free(hdl);
+		return ret;
+	}
 
 	lc898219xi->sd.ctrl_handler = hdl;
 
@@ -366,6 +374,7 @@ static struct i2c_driver lc898219xi_i2c_driver = {
 };
 module_i2c_driver(lc898219xi_i2c_driver);
 
+MODULE_AUTHOR("Vasiliy Doylov <nekocwd@mainlining.org>");
 MODULE_AUTHOR("Frieder Hannenheim <git@fhannenheim.net>");
 MODULE_DESCRIPTION("Onsemi LC898219XI VCM driver");
 MODULE_LICENSE("GPL");
