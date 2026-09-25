@@ -865,12 +865,6 @@
 		};
 	};
 
-	smp2p-sleepstate {
-		compatible = "qcom,smp2p-sleepstate";
-		qcom,smem-states = <&smp2p_sleepstate_out 0>;
-		interrupts-extended = <&smp2p_sleepstate_in 0 IRQ_TYPE_EDGE_RISING>;
-	};
-
 	smp2p-cdsp {
 		compatible = "qcom,smp2p";
 		qcom,smem = <94>, <432>;
@@ -926,6 +920,12 @@
 			interrupt-controller;
 			#interrupt-cells = <2>;
 		};
+	};
+
+	smp2p-sleepstate {
+		compatible = "qcom,smp2p-sleepstate";
+		qcom,smem-states = <&smp2p_sleepstate_out 0>;
+		interrupts-extended = <&smp2p_sleepstate_in 0 IRQ_TYPE_EDGE_RISING>;
 	};
 
 	soc: soc@0 {
