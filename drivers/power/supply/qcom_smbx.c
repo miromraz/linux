@@ -1216,7 +1216,7 @@ static const struct smb_init_register smb2_init_seq[] = {
 	  .val = 20 },
 };
 
-struct smb_match_data pmi8998_match_data = {
+static const struct smb_match_data pmi8998_match_data = {
 	.init_seq = smb2_init_seq,
 	.init_seq_len = ARRAY_SIZE(smb2_init_seq),
 	.name = "pmi8998",
@@ -1225,7 +1225,7 @@ struct smb_match_data pmi8998_match_data = {
 	.current_limit_max_ua = 4800000,
 };
 
-struct smb_match_data pm660_match_data = {
+static const struct smb_match_data pm660_match_data = {
 	.init_seq = smb2_init_seq,
 	.init_seq_len = ARRAY_SIZE(smb2_init_seq),
 	.name = "pm660",
@@ -1234,7 +1234,7 @@ struct smb_match_data pm660_match_data = {
 	.current_limit_max_ua = 4800000,
 };
 
-struct smb_match_data pm8150b_match_data = {
+static const struct smb_match_data pm8150b_match_data = {
 	.init_seq = smb5_init_seq,
 	.init_seq_len = ARRAY_SIZE(smb5_init_seq),
 	.name = "pm8150b",
@@ -1243,7 +1243,7 @@ struct smb_match_data pm8150b_match_data = {
 	.current_limit_max_ua = 5000000,
 };
 
-struct smb_match_data pm7250b_match_data = {
+static const struct smb_match_data pm7250b_match_data = {
 	.init_seq = smb5_init_seq,
 	.init_seq_len = ARRAY_SIZE(smb5_init_seq),
 	.name = "pm7250b",
