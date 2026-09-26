@@ -112,6 +112,23 @@ allOf:
   - if:
       properties:
         compatible:
+          contains:
+            const: qcom,sm7150-lpass-tx-macro
+    then:
+      properties:
+        clocks:
+          minItems: 4
+          maxItems: 4
+        clock-names:
+          items:
+            - const: mclk
+            - const: npl
+            - const: macro
+            - const: fsgen
+
+  - if:
+      properties:
+        compatible:
           enum:
             - qcom,sm6115-lpass-tx-macro
     then:
