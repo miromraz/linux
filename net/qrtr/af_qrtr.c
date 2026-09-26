@@ -139,7 +139,7 @@ struct qrtr_node {
 
 	struct sk_buff_head rx_queue;
 	struct list_head item;
-	struct work_struct say_hello;
+	struct delayed_work say_hello;
 };
 
 /**
@@ -165,6 +165,7 @@ static int qrtr_bcast_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 			      struct sockaddr_qrtr *to);
 static struct qrtr_sock *qrtr_port_lookup(int port);
 static void qrtr_port_put(struct qrtr_sock *ipc);
+static int qrtr_node_hello_xmit(struct qrtr_node *node);
 
 /* Release node resources and free the node.
  *
@@ -193,7 +194,7 @@ static void __qrtr_node_release(struct kref *kref)
 	list_del(&node->item);
 	mutex_unlock(&qrtr_node_lock);
 
-	cancel_work_sync(&node->say_hello);
+	cancel_delayed_work_sync(&node->say_hello);
 
 	skb_queue_purge(&node->rx_queue);
 
@@ -349,11 +350,21 @@ static int qrtr_node_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 	size_t len = skb->len;
 	int rc, confirm_rx;
 
+	/* If the remote spoke first, its HELLO reply (e.g. NEW_SERVER from the
+	 * name server) reaches us before qrtr_hello_work() has run. Carry our
+	 * HELLO out inline, under the same ep_lock hold that gates the test, so
+	 * it is guaranteed to leave before this first non-HELLO packet. On
+	 * failure drop the packet and report the error rather than silently
+	 * succeeding; qrtr_hello_work() keeps retrying in the background.
+	 */
 	mutex_lock(&node->ep_lock);
 	if (!node->hello_sent && type != QRTR_TYPE_HELLO) {
-		mutex_unlock(&node->ep_lock);
-		kfree_skb(skb);
-		return 0;
+		rc = qrtr_node_hello_xmit(node);
+		if (rc) {
+			mutex_unlock(&node->ep_lock);
+			kfree_skb(skb);
+			return rc;
+		}
 	}
 	mutex_unlock(&node->ep_lock);
 
@@ -397,9 +408,6 @@ static int qrtr_node_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 	if (rc && confirm_rx)
 		qrtr_tx_flow_failed(node, to->sq_node, to->sq_port);
 
-	if (rc && type == QRTR_TYPE_HELLO)
-		schedule_work(&node->say_hello);
-
 	return rc;
 }
 
@@ -437,7 +445,7 @@ static void qrtr_node_assign(struct qrtr_node *node, unsigned int nid)
 	spin_lock_irqsave(&qrtr_nodes_lock, flags);
 	radix_tree_insert(&qrtr_nodes, nid, node);
 	if (node->nid == QRTR_EP_NID_AUTO)
-		node->nid = nid;
+		WRITE_ONCE(node->nid, nid);
 	spin_unlock_irqrestore(&qrtr_nodes_lock, flags);
 }
 
@@ -591,6 +599,55 @@ static struct sk_buff *qrtr_alloc_ctrl_packet(struct qrtr_ctrl_pkt **pkt,
 	return skb;
 }
 
+/* Build a control HELLO for @node and hand it straight to the endpoint.
+ *
+ * The caller must hold node->ep_lock so that the hello_sent test in
+ * qrtr_node_enqueue() is atomic with this xmit. On success the node is
+ * marked as having sent its HELLO. Returns 0 or a negative errno from the
+ * endpoint (e.g. -EAGAIN if the channel is not ready, -ENODEV if the
+ * endpoint has been unregistered).
+ */
+static int qrtr_node_hello_xmit(struct qrtr_node *node)
+{
+	struct qrtr_ctrl_pkt *pkt;
+	struct qrtr_hdr_v1 *hdr;
+	struct sk_buff *skb;
+	size_t len;
+	int rc;
+
+	skb = qrtr_alloc_ctrl_packet(&pkt, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+
+	len = skb->len;
+	pkt->cmd = cpu_to_le32(QRTR_TYPE_HELLO);
+
+	hdr = skb_push(skb, sizeof(*hdr));
+	hdr->version = cpu_to_le32(QRTR_PROTO_VER_1);
+	hdr->type = cpu_to_le32(QRTR_TYPE_HELLO);
+	hdr->src_node_id = cpu_to_le32(qrtr_local_nid);
+	hdr->src_port_id = cpu_to_le32(QRTR_PORT_CTRL);
+	hdr->dst_node_id = cpu_to_le32(READ_ONCE(node->nid));
+	hdr->dst_port_id = cpu_to_le32(QRTR_PORT_CTRL);
+	hdr->size = cpu_to_le32(len);
+	hdr->confirm_rx = cpu_to_le32(0);
+
+	rc = skb_put_padto(skb, ALIGN(len, 4) + sizeof(*hdr));
+	if (rc)
+		return rc;
+
+	rc = -ENODEV;
+	if (node->ep)
+		rc = node->ep->xmit(node->ep, skb);
+	else
+		kfree_skb(skb);
+
+	if (!rc)
+		node->hello_sent = true;
+
+	return rc;
+}
+
 static void qrtr_hello_work(struct work_struct *work)
 {
 	struct sockaddr_qrtr from = {AF_QIPCRTR, 0, QRTR_PORT_CTRL};
@@ -599,25 +656,43 @@ static void qrtr_hello_work(struct work_struct *work)
 	struct qrtr_node *node;
 	struct qrtr_sock *ctrl;
 	struct sk_buff *skb;
+	bool sent;
+	int rc;
 
-	node = container_of(work, struct qrtr_node, say_hello);
+	node = container_of(work, struct qrtr_node, say_hello.work);
 
-	/* NS must be bound before we can send */
-	ctrl = qrtr_port_lookup(QRTR_PORT_CTRL);
-	if (!ctrl)
+	/* A non-HELLO packet may already have carried the HELLO out inline. */
+	mutex_lock(&node->ep_lock);
+	sent = node->hello_sent;
+	mutex_unlock(&node->ep_lock);
+	if (sent)
 		return;
+
+	/* NS must be bound before we can send; back off and retry if not. */
+	ctrl = qrtr_port_lookup(QRTR_PORT_CTRL);
+	if (!ctrl) {
+		schedule_delayed_work(&node->say_hello, msecs_to_jiffies(100));
+		return;
+	}
 
 	skb = qrtr_alloc_ctrl_packet(&pkt, GFP_KERNEL);
 	if (!skb) {
 		qrtr_port_put(ctrl);
+		schedule_delayed_work(&node->say_hello, msecs_to_jiffies(100));
 		return;
 	}
 
 	pkt->cmd = cpu_to_le32(QRTR_TYPE_HELLO);
 	from.sq_node = qrtr_local_nid;
-	to.sq_node = node->nid;
-	qrtr_node_enqueue(node, skb, QRTR_TYPE_HELLO, &from, &to);
+	to.sq_node = READ_ONCE(node->nid);
+	rc = qrtr_node_enqueue(node, skb, QRTR_TYPE_HELLO, &from, &to);
 	qrtr_port_put(ctrl);
+
+	/* Retry only while the endpoint is not yet ready. After unregister the
+	 * enqueue returns -ENODEV, so we stop cleanly instead of spinning.
+	 */
+	if (rc == -EAGAIN)
+		schedule_delayed_work(&node->say_hello, msecs_to_jiffies(100));
 }
 
 /**
@@ -646,7 +721,7 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
 	node->ep = ep;
 
 	node->hello_sent = false;
-	INIT_WORK(&node->say_hello, qrtr_hello_work);
+	INIT_DELAYED_WORK(&node->say_hello, qrtr_hello_work);
 
 	xa_init(&node->qrtr_tx_flow);
 	mutex_init(&node->qrtr_tx_lock);
@@ -659,7 +734,7 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid)
 	ep->node = node;
 
 	/* Initiate HELLO handshake from the core layer */
-	schedule_work(&node->say_hello);
+	schedule_delayed_work(&node->say_hello, 0);
 
 	return 0;
 }
@@ -938,7 +1013,7 @@ static int qrtr_bcast_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 		/* Skip nodes whose node ID is not yet known; they cannot
 		 * receive broadcast packets before the HELLO handshake.
 		 */
-		if (node->nid == QRTR_EP_NID_AUTO)
+		if (READ_ONCE(node->nid) == QRTR_EP_NID_AUTO)
 			continue;
 		skbn = pskb_copy(skb, GFP_KERNEL);
 		if (!skbn)
