@@ -235,56 +235,6 @@
 		pinctrl-0 = <&camera_rear_vcm_en>;
 	};
 
-	/*
-	 * The SLG51000 camera PMIC does not answer on i2c until the buck feeding
-	 * its input rails is enabled off pm6150l GPIO6 (active high). It has to
-	 * be up ~5 ms before the chip select, so make it the SLG51000's input
-	 * supply: fw_devlink then holds the PMIC's probe until this is enabled.
-	 */
-	cam_pmic_buck: regulator-cam-pmic-buck {
-		compatible = "regulator-fixed";
-
-		regulator-name = "cam_pmic_buck";
-
-		gpio = <&pm6150l_gpios 6 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-		startup-delay-us = <5000>;
-
-		regulator-always-on;
-	};
-
-	/*
-	 * External load switch gating the FTM5 touch controller's 3.0V analog
-	 * rail, enabled by pm6150 GPIO 4. The touch and display form one bonded
-	 * in-cell assembly, so the analog source (vreg_l7c_3p0) is shared with
-	 * the panel and stays up; only the tap to the touch chip is switched.
-	 */
-	vreg_touch_avdd: regulator-touch-avdd {
-		compatible = "regulator-fixed";
-
-		regulator-name = "touch_avdd";
-		regulator-min-microvolt = <3000000>;
-		regulator-max-microvolt = <3000000>;
-
-		gpio = <&pm6150_gpios 4 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-		vin-supply = <&vreg_l7c_3p0>;
-
-		/*
-		 * Which rail(s) the GPIO4 load switch actually gates (VDD 1.8V,
-		 * AVDD 3.0V, or both) is unmeasured, and the reset line must not
-		 * be released while the analog rail is still ramping or the
-		 * controller intermittently hangs the boot. Preserve the current
-		 * hardware behaviour: assert GPIO4 at boot and never drop it,
-		 * until the topology is measured.
-		 */
-		regulator-always-on;
-		regulator-boot-on;
-
-		pinctrl-names = "default";
-		pinctrl-0 = <&touch_power_default>;
-	};
-
 	wcd9375: audio-codec {
 		compatible = "qcom,wcd9375-codec", "qcom,wcd9370-codec";
 
@@ -948,21 +898,21 @@
 
 		/*
 		 * VDD (digital, 1.8V) and AVDD (analog, 3.0V) are separate
-		 * physical supplies on the chip.  The rails are shared with the
-		 * OLED panel (touch and display are one bonded assembly): VDD
-		 * comes straight from vreg_l13a_1p8 (also the display vddio).
-		 * The analog rail is gated to the touch chip by an external load
-		 * switch enabled from pm6150 GPIO 4, modelled as vreg_touch_avdd
-		 * so the driver's regulator votes actually cut touch power.
+		 * physical supplies on the chip.  Downstream Android documents
+		 * the mapping in a commented-out hint in its sunfish DT, and
+		 * the rails are shared with the OLED panel (touch and display
+		 * are one bonded assembly).  pm6150 GPIO 4 enables an external
+		 * load switch upstream of these rails; it is asserted via
+		 * pinctrl below.
 		 */
 		vdd-supply  = <&vreg_l13a_1p8>;	/* 1.8V digital, shared with display vddio */
-		avdd-supply = <&vreg_touch_avdd>; /* 3.0V analog via the GPIO4 load switch */
+		avdd-supply = <&vreg_l7c_3p0>;	/* 3.0V analog,  shared with display vdda-3p3 */
 
 		touchscreen-size-x = <1080>;
 		touchscreen-size-y = <2340>;
 
 		pinctrl-names = "default";
-		pinctrl-0 = <&touch_irq_default &touch_reset_default>;
+		pinctrl-0 = <&touch_irq_default &touch_reset_default &touch_power_default>;
 	};
 };
 
@@ -1070,12 +1020,10 @@
 	 * It does not answer on i2c out of reset. The vendor tree lists two chip
 	 * selects (pm6150l gpio4 and gpio6) and two enables (gpio1 and gpio5) as
 	 * flat lists with no indication of which does what; the vendor driver
-	 * shows that gpio6 is the enable of the buck feeding the chip and has to
-	 * go high 5 ms before gpio4, the actual chip select. Both high in that
-	 * order makes 0x75 answer; either one alone is not enough. gpio6 is
-	 * modelled as cam_pmic_buck, wired as the input supply below so the core
-	 * enables it and waits out its ramp before this device probes; gpio4 is
-	 * the chip select the driver drives.
+	 * shows that cs-gpios[1] is the enable of the buck feeding the chip and
+	 * has to go high 5 ms before cs-gpios[0], the actual chip select. Both
+	 * high in that order makes 0x75 answer; either one alone is not enough.
+	 * Keep the vendor's order here, the driver relies on it.
 	 *
 	 * Careful when re-testing: the chip stays latched on once it has
 	 * answered, so every later combination appears to work. Only the first
@@ -1095,13 +1043,8 @@
 	pmic@75 {
 		compatible = "dlg,slg51000";
 		reg = <0x75>;
-		dlg,cs-gpios = <&pm6150l_gpios 4 GPIO_ACTIVE_HIGH>;
-
-		vin3-supply = <&cam_pmic_buck>;
-		vin4-supply = <&cam_pmic_buck>;
-		vin5-supply = <&cam_pmic_buck>;
-		vin6-supply = <&cam_pmic_buck>;
-		vin7-supply = <&cam_pmic_buck>;
+		dlg,cs-gpios = <&pm6150l_gpios 4 GPIO_ACTIVE_HIGH>,
+			       <&pm6150l_gpios 6 GPIO_ACTIVE_HIGH>;
 
 		regulators {
 			/*
@@ -1235,6 +1178,7 @@
 		qcom,drive-strength = <2>;
 		power-source = <1>;
 		bias-disable;
+		output-high;
 	};
 };
 
