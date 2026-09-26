@@ -142,6 +142,58 @@ static __u32 nxp_nci_st54j_get_rfprotocol(struct nci_dev *ndev,
 	return 0;
 }
 
+/*
+ * After CORE_INIT the ST54J must be switched to NFC mode ON with a proprietary
+ * command, as ST's own stack does. Without it the controller stays usable for a
+ * few seconds and then drops into a low-power state from which it no longer
+ * acknowledges its I2C address, so every later command fails with -ENXIO until
+ * VEN is cycled.
+ *
+ * The controller answers the command with a response and then resets itself,
+ * announcing it with CORE_RESET_NTF. The response therefore only completes the
+ * request on error; on success the core's CORE_RESET_NTF handler completes it,
+ * and the controller is then initialised again.
+ */
+#define ST54J_PROP_NFC_MODE_OID		0x02
+#define ST54J_PROP_NFC_MODE_SET		0x02
+#define ST54J_NFC_MODE_ON		0x01
+
+static int nxp_nci_st54j_prop_mode_rsp(struct nci_dev *ndev,
+				       struct sk_buff *skb)
+{
+	if (skb->data[0] != NCI_STATUS_OK)
+		nci_req_complete(ndev, skb->data[0]);
+
+	return 0;
+}
+
+static const struct nci_driver_ops nxp_nci_st54j_prop_ops[] = {
+	{
+		.opcode = nci_opcode_pack(NCI_GID_PROPRIETARY,
+					  ST54J_PROP_NFC_MODE_OID),
+		.rsp = nxp_nci_st54j_prop_mode_rsp,
+	},
+};
+
+static int nxp_nci_st54j_post_setup(struct nci_dev *ndev)
+{
+	static const __u8 mode_on[] = { ST54J_PROP_NFC_MODE_SET,
+					ST54J_NFC_MODE_ON };
+	struct nci_core_init_v2_cmd init = {
+		.feature1 = NCI_FEATURE_DISABLE,
+		.feature2 = NCI_FEATURE_DISABLE,
+	};
+	int r;
+
+	r = nci_prop_cmd(ndev, ST54J_PROP_NFC_MODE_OID, sizeof(mode_on),
+			 mode_on);
+	if (r)
+		return r;
+
+	return nci_core_cmd(ndev, NCI_OP_CORE_INIT_CMD, sizeof(init),
+			    (__u8 *)&init);
+}
+
 /* NXP controllers: reachable firmware-download mode, no vendor RF protocols. */
 static const struct nci_ops nxp_nci_ops = {
 	.open = nxp_nci_open,
@@ -155,13 +207,17 @@ static const struct nci_ops nxp_nci_ops = {
 /*
  * The ST54J has no NXP firmware-download mode, so .fw_download is left out and
  * the NFC core never offers it (a download would otherwise push NXP vendor
- * frames to the ST part). It does report a proprietary RF protocol to map.
+ * frames to the ST part). It does report a proprietary RF protocol to map, and
+ * needs NFC mode switched on after CORE_INIT.
  */
 static const struct nci_ops nxp_nci_st54j_ops = {
 	.open = nxp_nci_open,
 	.close = nxp_nci_close,
 	.send = nxp_nci_send,
+	.post_setup = nxp_nci_st54j_post_setup,
 	.get_rfprotocol = nxp_nci_st54j_get_rfprotocol,
+	.prop_ops = nxp_nci_st54j_prop_ops,
+	.n_prop_ops = ARRAY_SIZE(nxp_nci_st54j_prop_ops),
 	.core_ops = nxp_nci_core_ops,
 	.n_core_ops = ARRAY_SIZE(nxp_nci_core_ops),
 };
