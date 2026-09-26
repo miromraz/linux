@@ -280,15 +280,22 @@ void nxp_nci_remove(struct nci_dev *ndev)
 		nxp_nci_fw_work_complete(info, -ESHUTDOWN);
 	cancel_work_sync(&info->fw_info.work);
 
+	/*
+	 * Not under info_lock: if the device is up, unregistering closes it,
+	 * which resets the controller (the IRQ thread takes info_lock to
+	 * deliver the response) and then calls nxp_nci_close(), which takes
+	 * info_lock itself.
+	 */
+	nci_unregister_device(ndev);
+
 	mutex_lock(&info->info_lock);
 
 	if (info->phy_ops->set_mode)
 		info->phy_ops->set_mode(info->phy_id, NXP_NCI_MODE_COLD);
 
-	nci_unregister_device(ndev);
-	nci_free_device(ndev);
-
 	mutex_unlock(&info->info_lock);
+
+	nci_free_device(ndev);
 }
 EXPORT_SYMBOL(nxp_nci_remove);
 
