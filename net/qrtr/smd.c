@@ -23,12 +23,8 @@ static int qcom_smd_qrtr_callback(struct rpmsg_device *rpdev,
 	struct qrtr_smd_dev *qdev = dev_get_drvdata(&rpdev->dev);
 	int rc;
 
-	if (!qdev) {
-		dev_warn_ratelimited(&rpdev->dev,
-				     "dropping %d-byte packet before probe completed\n",
-				     len);
+	if (!qdev)
 		return -EAGAIN;
-	}
 
 	rc = qrtr_endpoint_post(&qdev->ep, data, len);
 	if (rc == -EINVAL) {
