@@ -61,6 +61,17 @@
 		};
 	};
 
+	fingerprint {
+		compatible = "fpc,fpc1020";
+		/* The sensor's SPI bus (QUP1 SE0, gpio59-62) belongs to TrustZone. */
+		firmware-name = "qcom/sm7150/google/sunfish/fpctzappfingerprint.mdt";
+		irq-gpios = <&tlmm 90 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&tlmm 91 GPIO_ACTIVE_LOW>;
+
+		pinctrl-0 = <&fp_irq_default>, <&fp_reset_default>;
+		pinctrl-names = "default";
+	};
+
 	gpio_keys: gpio-keys {
 		compatible = "gpio-keys";
 
@@ -1556,6 +1567,20 @@
 			drive-strength = <2>;
 			bias-disable;
 		};
+	};
+
+	fp_irq_default: fp-irq-default-state {
+		pins = "gpio90";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	fp_reset_default: fp-reset-default-state {
+		pins = "gpio91";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
 	};
 
 	haptic_en_default: haptic-en-default-state {
