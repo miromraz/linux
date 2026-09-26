@@ -317,14 +317,21 @@ static int fpc1020_load_trustlet_locked(struct fpc1020 *fpc1020)
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot load %s\n", fpc1020->firmware);
 
+	/* The image's class is the trustlet's, not QSEE's: both run. */
 	ehdr = (const struct elf32_hdr *)mdt->data;
-	if (mdt->size < sizeof(*ehdr) || memcmp(ehdr->e_ident, ELFMAG, SELFMAG) ||
-	    ehdr->e_ident[EI_CLASS] != ELFCLASS32) {
-		ret = dev_err_probe(dev, -EINVAL, "%s is not a 32-bit ELF\n",
+	if (mdt->size >= sizeof(struct elf64_hdr) &&
+	    !memcmp(ehdr->e_ident, ELFMAG, SELFMAG) &&
+	    ehdr->e_ident[EI_CLASS] == ELFCLASS64) {
+		phnum = ((const struct elf64_hdr *)mdt->data)->e_phnum;
+	} else if (mdt->size >= sizeof(*ehdr) &&
+		   !memcmp(ehdr->e_ident, ELFMAG, SELFMAG) &&
+		   ehdr->e_ident[EI_CLASS] == ELFCLASS32) {
+		phnum = ehdr->e_phnum;
+	} else {
+		ret = dev_err_probe(dev, -EINVAL, "%s is not an ELF\n",
 				    fpc1020->firmware);
 		goto release_mdt;
 	}
-	phnum = ehdr->e_phnum;
 
 	segs = kcalloc(phnum, sizeof(*segs), GFP_KERNEL);
 	if (!segs) {
