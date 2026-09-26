@@ -122,7 +122,26 @@ allOf:
       properties:
         compatible:
           contains:
+            const: qcom,sm7150-lpass-va-macro
+    then:
+      properties:
+        clocks:
+          minItems: 2
+          maxItems: 2
+        clock-names:
+          items:
+            - const: mclk
+            - const: macro
+  - if:
+      properties:
+        compatible:
+          contains:
             const: qcom,sm8250-lpass-va-macro
+      not:
+        properties:
+          compatible:
+            contains:
+              const: qcom,sm7150-lpass-va-macro
     then:
       properties:
         clocks:
