@@ -75,11 +75,9 @@
 					  "wdog-bark",
 					  "usbin-icl-change";
 			io-channels = <&pm6150_adc ADC5_USB_IN_I>,
-				      <&pm6150_adc ADC5_USB_IN_V_16>,
-				      <&pm6150_adc ADC5_BAT_THERM_100K_PU>;
+				      <&pm6150_adc ADC5_USB_IN_V_16>;
 			io-channel-names = "usbin_i",
-					   "usbin_v",
-					   "batt-therm";
+					   "usbin_v";
 			status = "disabled";
 		};
 
@@ -163,7 +161,7 @@
 				label = "usb_in_v_div_16";
 			};
 
-			channel@4a {
+			bat_therm@4a {
 				reg = <ADC5_BAT_THERM_100K_PU>;
 				label = "bat_therm";
 				qcom,ratiometric;
@@ -182,7 +180,7 @@
 			status = "disabled";
 		};
 
-		pm6150_qgauge: battery@4800 {
+		pm6150_qgauge: qgauge@4800 {
 			compatible = "qcom,pm6150-qg";
 			reg = <0x4800>;
 
