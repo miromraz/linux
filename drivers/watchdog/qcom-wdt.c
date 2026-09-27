@@ -297,11 +297,21 @@ static int qcom_wdt_probe(struct platform_device *pdev)
 	return 0;
 }
 
+/*
+ * A watchdog the bootloader left running (WDOG_HW_RUNNING) is pinged by the
+ * watchdog core's worker even when no one has opened it. That worker is frozen
+ * in system sleep, so stop the hardware then too, or it bites mid-suspend.
+ */
+static bool qcom_wdt_needs_pm(struct qcom_wdt *wdt)
+{
+	return watchdog_active(&wdt->wdd) || watchdog_hw_running(&wdt->wdd);
+}
+
 static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&wdt->wdd))
+	if (qcom_wdt_needs_pm(wdt))
 		qcom_wdt_stop(&wdt->wdd);
 
 	return 0;
@@ -311,7 +321,7 @@ static int __maybe_unused qcom_wdt_resume(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&wdt->wdd))
+	if (qcom_wdt_needs_pm(wdt))
 		qcom_wdt_start(&wdt->wdd);
 
 	return 0;
