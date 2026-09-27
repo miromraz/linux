@@ -32,6 +32,10 @@
 #define CAMSS_CLOCK_MARGIN_NUMERATOR 105
 #define CAMSS_CLOCK_MARGIN_DENOMINATOR 100
 
+#define CAMSS_COMMON_PHY_DIVIDENT 16
+#define CAMSS_CPHY_DIVISOR 7
+#define CAMSS_DPHY_DIVISOR 16
+
 static const struct parent_dev_ops vfe_parent_dev_ops;
 
 static const struct camss_subdev_resources csiphy_res_8x16[] = {
@@ -2291,10 +2295,11 @@ struct media_entity *camss_find_sensor(struct media_entity *entity)
  * Return link frequency on success or a negative error code otherwise
  */
 s64 camss_get_link_freq(struct media_entity *entity, unsigned int bpp,
-			unsigned int lanes)
+			unsigned int lanes, const bool cphy)
 {
 	struct media_entity *sensor;
 	struct v4l2_subdev *subdev;
+	unsigned int div = lanes * 2 * (cphy ? CAMSS_CPHY_DIVISOR : CAMSS_DPHY_DIVISOR);
 
 	sensor = camss_find_sensor(entity);
 	if (!sensor)
@@ -2302,7 +2307,7 @@ s64 camss_get_link_freq(struct media_entity *entity, unsigned int bpp,
 
 	subdev = media_entity_to_v4l2_subdev(sensor);
 
-	return v4l2_get_link_freq(subdev->ctrl_handler, bpp, 2 * lanes);
+	return v4l2_get_link_freq(subdev->ctrl_handler, CAMSS_COMMON_PHY_DIVIDENT * bpp, div);
 }
 
 /*
@@ -2420,12 +2425,25 @@ static int camss_of_parse_endpoint_node(struct device *dev,
 	if (ret)
 		return ret;
 
+	switch (vep.bus_type) {
+	case V4L2_MBUS_CSI2_CPHY:
+	case V4L2_MBUS_CSI2_DPHY:
+		break;
+	default:
+		dev_err(dev, "Unsupported bus type %d\n", vep.bus_type);
+		return -EINVAL;
+	}
+
 	csd->interface.csiphy_id = vep.base.port;
 
 	mipi_csi2 = &vep.bus.mipi_csi2;
-	lncfg->clk.pos = mipi_csi2->clock_lane;
-	lncfg->clk.pol = mipi_csi2->lane_polarities[0];
 	lncfg->num_data = mipi_csi2->num_data_lanes;
+	lncfg->phy_cfg = vep.bus_type;
+
+	if (lncfg->phy_cfg != V4L2_MBUS_CSI2_CPHY) {
+		lncfg->clk.pos = mipi_csi2->clock_lane;
+		lncfg->clk.pol = mipi_csi2->lane_polarities[0];
+	}
 
 	lncfg->data = devm_kcalloc(dev,
 				   lncfg->num_data, sizeof(*lncfg->data),

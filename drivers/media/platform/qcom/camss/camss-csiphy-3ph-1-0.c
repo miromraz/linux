@@ -478,6 +478,131 @@ csiphy_reg_t lane_regs_sc7180[5][23] = {
 	},
 };
 
+/* GEN2 v1.2 3PH (C-PHY) - from Samsung atoll downstream csiphy_3ph_v1_2_reg */
+static const struct
+csiphy_reg_t lane_regs_sc7180_cphy[3][38] = {
+	{
+		{0x015C, 0x66, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0990, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0994, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0998, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0990, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0994, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0998, 0x1A, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x098C, 0xAF, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0168, 0xAC, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x016C, 0xAD, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0104, 0x06, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x010C, 0x07, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
+		{0x0108, 0x00, 0x00, CSIPHY_SETTLE_CNT_HIGHER_BYTE},
+		{0x0114, 0x20, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0150, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0188, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x018C, 0x7f, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0190, 0x7f, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0118, 0x3e, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x011C, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0120, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0124, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0128, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x012C, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0144, 0x22, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0160, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x01CC, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0164, 0x33, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x01DC, 0x50, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x09C0, 0x80, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x09C4, 0x7D, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x09C8, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0984, 0x20, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0988, 0x05, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0980, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x09B0, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x09B4, 0x03, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0800, 0x0E, 0x00, CSIPHY_DEFAULT_PARAMS},
+	},
+	{
+		{0x035C, 0x66, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A90, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A94, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A98, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A90, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A94, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A98, 0x1F, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A8C, 0xBF, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0368, 0xAC, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x036C, 0xAD, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0304, 0x06, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x030C, 0x07, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
+		{0x0308, 0x00, 0x00, CSIPHY_SETTLE_CNT_HIGHER_BYTE},
+		{0x0314, 0x20, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0350, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0388, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x038C, 0x7f, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0390, 0x7f, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0318, 0x3e, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x031C, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0320, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0324, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0328, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x032C, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0344, 0x22, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0360, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x03CC, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0364, 0x33, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x03DC, 0x50, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0AC0, 0x80, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0AC4, 0x7D, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0AC8, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A84, 0x20, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A88, 0x05, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0A80, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0AB0, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0AB4, 0x03, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0800, 0x0E, 0x00, CSIPHY_DEFAULT_PARAMS},
+	},
+	{
+		{0x055C, 0x66, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B90, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B94, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B98, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B90, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B94, 0x08, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B98, 0x1A, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B8C, 0xAF, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0568, 0xAC, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x056C, 0xAD, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0504, 0x06, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x050C, 0x07, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
+		{0x0508, 0x00, 0x00, CSIPHY_SETTLE_CNT_HIGHER_BYTE},
+		{0x0514, 0x20, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0550, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0588, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x058C, 0x7f, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0590, 0x7f, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0518, 0x3e, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x051C, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0520, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0524, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0528, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x052C, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0544, 0x22, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0560, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x05CC, 0x41, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0564, 0x33, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x05DC, 0x50, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0BC0, 0x80, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0BC4, 0x7D, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0BC8, 0x7F, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B84, 0x20, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B88, 0x05, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0B80, 0x60, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0BB0, 0x01, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0BB4, 0x03, 0x00, CSIPHY_DEFAULT_PARAMS},
+		{0x0800, 0x0E, 0x00, CSIPHY_DEFAULT_PARAMS},
+	},
+};
+
 static void csiphy_hw_version_read(struct csiphy_device *csiphy,
 				   struct device *dev)
 {
@@ -628,16 +753,25 @@ static void csiphy_gen1_config_lanes(struct csiphy_device *csiphy,
 }
 
 static void csiphy_gen2_config_lanes(struct csiphy_device *csiphy,
+				     struct csiphy_lanes_cfg *lane_cfg,
 				     u8 settle_cnt)
 {
 	const struct csiphy_reg_t *r;
 	int i, l, array_size;
+	int num_lanes = 5;
+	bool cphy = (lane_cfg->phy_cfg == V4L2_MBUS_CSI2_CPHY);
 	u32 val;
 
 	switch (csiphy->camss->res->version) {
 	case CAMSS_7180:
-		r = &lane_regs_sc7180[0][0];
-		array_size = ARRAY_SIZE(lane_regs_sc7180[0]);
+		if (cphy) {
+			r = &lane_regs_sc7180_cphy[0][0];
+			array_size = ARRAY_SIZE(lane_regs_sc7180_cphy[0]);
+			num_lanes = 3;
+		} else {
+			r = &lane_regs_sc7180[0][0];
+			array_size = ARRAY_SIZE(lane_regs_sc7180[0]);
+		}
 		break;
 	case CAMSS_7280:
 		r = &lane_regs_sm8250[0][0];
@@ -660,7 +794,7 @@ static void csiphy_gen2_config_lanes(struct csiphy_device *csiphy,
 		return;
 	}
 
-	for (l = 0; l < 5; l++) {
+	for (l = 0; l < num_lanes; l++) {
 		for (i = 0; i < array_size; i++, r++) {
 			switch (r->csiphy_param_type) {
 			case CSIPHY_SETTLE_CNT_LOWER_BYTE:
@@ -679,13 +813,23 @@ static void csiphy_gen2_config_lanes(struct csiphy_device *csiphy,
 
 static u8 csiphy_get_lane_mask(struct csiphy_lanes_cfg *lane_cfg)
 {
-	u8 lane_mask;
+	u8 lane_mask = 0;
+	u8 offset = 0;
 	int i;
 
-	lane_mask = CSIPHY_3PH_CMN_CSI_COMMON_CTRL5_CLK_ENABLE;
+	switch (lane_cfg->phy_cfg) {
+	case V4L2_MBUS_CSI2_CPHY:
+		offset = 1;
+		break;
+	case V4L2_MBUS_CSI2_DPHY:
+		lane_mask = CSIPHY_3PH_CMN_CSI_COMMON_CTRL5_CLK_ENABLE;
+		break;
+	default:
+		break;
+	}
 
 	for (i = 0; i < lane_cfg->num_data; i++)
-		lane_mask |= 1 << lane_cfg->data[i].pos;
+		lane_mask |= BIT((lane_cfg->data[i].pos * 2) + offset);
 
 	return lane_mask;
 }
@@ -718,23 +862,20 @@ static void csiphy_lanes_enable(struct csiphy_device *csiphy,
 
 	settle_cnt = csiphy_settle_cnt_calc(link_freq, csiphy->timer_clk_rate);
 
-	val = CSIPHY_3PH_CMN_CSI_COMMON_CTRL5_CLK_ENABLE;
-	for (i = 0; i < c->num_data; i++)
-		val |= BIT(c->data[i].pos * 2);
-
+	val = csiphy_get_lane_mask(c);
 	writel_relaxed(val, csiphy->base + CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(5));
 
 	val = CSIPHY_3PH_CMN_CSI_COMMON_CTRL6_COMMON_PWRDN_B;
 	writel_relaxed(val, csiphy->base + CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(6));
 
-	val = 0x02;
+	val = (c->phy_cfg == V4L2_MBUS_CSI2_CPHY) ? 0x52 : 0x02;
 	writel_relaxed(val, csiphy->base + CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(7));
 
 	val = 0x00;
 	writel_relaxed(val, csiphy->base + CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(0));
 
 	if (csiphy_is_gen2(csiphy->camss->res->version))
-		csiphy_gen2_config_lanes(csiphy, settle_cnt);
+		csiphy_gen2_config_lanes(csiphy, c, settle_cnt);
 	else
 		csiphy_gen1_config_lanes(csiphy, cfg, settle_cnt);
 
