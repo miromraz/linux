@@ -37,8 +37,6 @@
 #define SM5714_FG_ADDR_SRAM_CURRENT_AVG	  0x09
 #define SM5714_FG_ADDR_SRAM_STATE         0x15
 
-#define FIXED_POINT_8_8_EXTEND_TO_INT(fp_value, extend_orders) ((((fp_value & 0xff00) >> 8) * extend_orders) + (((fp_value & 0xff) * extend_orders) / 256))
-
 struct sm5714_fg {
 	struct power_supply *psy;
 	struct i2c_client *i2c;
@@ -73,59 +71,60 @@ static int sm5714_fg_get_status(int *status)
 	return ret;
 }
 
+static int sm5714_fg_read_sram(struct sm5714_fg *drv, u8 addr)
+{
+	int ret;
+
+	ret = i2c_smbus_write_word_data(drv->i2c, SM5714_FG_REG_SRAM_RADDR, addr);
+	if (ret < 0)
+		return ret;
+
+	return i2c_smbus_read_word_data(drv->i2c, SM5714_FG_REG_SRAM_RDATA);
+}
+
+/* SRAM words are sign-magnitude: bit 15 is the sign. */
+static int sm5714_fg_sign(int raw, int mag)
+{
+	return (raw & 0x8000) ? -mag : mag;
+}
+
 static int sm5714_fg_get_property(struct power_supply *psy,
 				   enum power_supply_property psp,
 				   union power_supply_propval *val)
 {
-	int error;
-	unsigned int value;
-	struct sm5714_fg *drv;
+	struct sm5714_fg *drv = power_supply_get_drvdata(psy);
+	int raw;
 
-	drv = power_supply_get_drvdata(psy);
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
-		error = sm5714_fg_get_status(&value);
-		val->intval = value;
-		break;
+		return sm5714_fg_get_status(&val->intval);
 	case POWER_SUPPLY_PROP_TEMP:
-		i2c_smbus_write_word_data(drv->i2c, SM5714_FG_REG_SRAM_RADDR, SM5714_FG_ADDR_SRAM_TEMPERATURE);
-		value = i2c_smbus_read_word_data(drv->i2c, SM5714_FG_REG_SRAM_RDATA);
-		if (value < 0)
-			return value;
-		// Convert to decicelcius
-		value &= 0x7fff;
-		value = FIXED_POINT_8_8_EXTEND_TO_INT((unsigned short)value, 10);
-		val->intval = value;
+		raw = sm5714_fg_read_sram(drv, SM5714_FG_ADDR_SRAM_TEMPERATURE);
+		if (raw < 0)
+			return raw;
+		/* decidegrees C, scale from the vendor driver */
+		val->intval = sm5714_fg_sign(raw, ((raw & 0x7fff) * 10 * 2989) >> 19);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
-		i2c_smbus_write_word_data(drv->i2c, SM5714_FG_REG_SRAM_RADDR, SM5714_FG_ADDR_SRAM_SOC);
-		value = i2c_smbus_read_word_data(drv->i2c, SM5714_FG_REG_SRAM_RDATA);
-		if (value < 0)
-			return value;
-		// Convert to %
-		value = FIXED_POINT_8_8_EXTEND_TO_INT((unsigned short)value, 10);
-		value /= 10;
-		val->intval = value;
+		raw = sm5714_fg_read_sram(drv, SM5714_FG_ADDR_SRAM_SOC);
+		if (raw < 0)
+			return raw;
+		/* 8.8 fixed point percent */
+		val->intval = min((raw * 10) >> 8, 1000) / 10;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-		i2c_smbus_write_word_data(drv->i2c, SM5714_FG_REG_SRAM_RADDR, SM5714_FG_ADDR_SRAM_OCV);
-		value = i2c_smbus_read_word_data(drv->i2c, SM5714_FG_REG_SRAM_RDATA);
-		if (value < 0)
-			return value;
-		// Convert to uV
-		value &= 0x7ff;
-		value = FIXED_POINT_8_8_EXTEND_TO_INT((unsigned short)value, 1000000);
-		val->intval = value;
+		raw = sm5714_fg_read_sram(drv, SM5714_FG_ADDR_SRAM_VBAT);
+		if (raw < 0)
+			return raw;
+		/* mV = 2700 +/- raw * 10 / 109 */
+		val->intval = (2700 + sm5714_fg_sign(raw, ((raw & 0x7fff) * 10) / 109)) * 1000;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
-		i2c_smbus_write_word_data(drv->i2c, SM5714_FG_REG_SRAM_RADDR, SM5714_FG_ADDR_SRAM_CURRENT);
-		value = i2c_smbus_read_word_data(drv->i2c, SM5714_FG_REG_SRAM_RDATA);
-		if (value < 0)
-			return value;
-		// Convert to mA
-		value &= 0x7ff;
-		value = FIXED_POINT_8_8_EXTEND_TO_INT((unsigned short)value, 1000);
-		val->intval = value;
+		raw = sm5714_fg_read_sram(drv, SM5714_FG_ADDR_SRAM_CURRENT);
+		if (raw < 0)
+			return raw;
+		/* mA = raw * 1000 / 2044, negative while discharging */
+		val->intval = sm5714_fg_sign(raw, ((raw & 0x7fff) * 1000) / 2044) * 1000;
 		break;
 	default:
 		return -EINVAL;
