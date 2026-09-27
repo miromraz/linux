@@ -6,6 +6,9 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
+#include <linux/leds.h>
+#include <linux/mutex.h>
+#include <linux/regulator/driver.h>
 #include <linux/module.h>
 #include <linux/property.h>
 #include <linux/of_gpio.h>
@@ -21,15 +24,34 @@
 #define SM5714_CHG_REG_STATUS5            0x11
 
 #define SM5714_CHG_REG_CNTL1              0x13
+#define SM5714_CHG_REG_CNTL2              0x14	/* bits 3:0 operating mode */
 #define SM5714_CHG_REG_VBUSCNTL           0x15
 #define SM5714_CHG_REG_CHGCNTL2           0x18
 #define SM5714_CHG_REG_CHGCNTL4           0x1A
 #define SM5714_CHG_REG_CHGCNTL5           0x1B
+#define SM5714_CHG_REG_BSTCNTL1           0x23	/* 3:0 boost voltage, 7:6 OTG current */
+#define SM5714_CHG_REG_FLEDCNTL1          0x41	/* 1:0 LED mode */
+#define SM5714_CHG_REG_FLEDCNTL2          0x42	/* 6:4 torch current */
+
+#define SM5714_OP_MODE_CHG_ON_VBUS        0x5
+#define SM5714_OP_MODE_USB_OTG            0x7
+#define SM5714_OP_MODE_FLASH_BOOST        0x8
+#define SM5714_BSTOUT_4500MV              0x1
+#define SM5714_BSTOUT_5100MV              0x6
+#define SM5714_OTG_CURRENT_500MA          0x0
+#define SM5714_OTG_CURRENT_900MA          0x1
+#define SM5714_FLED_MODE_OFF              0x0
+#define SM5714_FLED_MODE_TORCH            0x1
+#define SM5714_TORCH_MAX_BRIGHTNESS       8	/* 50..225 mA in 25 mA steps */
 
 struct sm5714_charger {
 	struct power_supply *psy;
 	struct regmap *regmap;
 	bool use_autostop;
+	struct mutex lock;	/* otg/torch state and the operating mode */
+	bool otg;
+	bool torch;
+	struct led_classdev torch_led;
 };
 
 static enum power_supply_property sm5714_charger_props[] = {
@@ -80,6 +102,108 @@ static int chg_set_topoff_current(struct sm5714_charger *charger, int mA)
 		offset = 0x1C;              /* Topoff = 800mA */
 
 	return regmap_update_bits(charger->regmap, SM5714_CHG_REG_CHGCNTL5, (0x1F << 0), (offset << 0));
+}
+
+/*
+ * The boost converter is shared by USB OTG and the flash LED; one operating
+ * mode covers both (vendor op-mode table, reduced to the states used here).
+ */
+static int sm5714_update_op_mode(struct sm5714_charger *drv)
+{
+	unsigned int st1, mode, bst = SM5714_BSTOUT_5100MV, cur = SM5714_OTG_CURRENT_900MA;
+	int ret;
+
+	ret = regmap_read(drv->regmap, SM5714_CHG_REG_STATUS1, &st1);
+	if (ret)
+		return ret;
+
+	/* ponytail: re-evaluated only when OTG/torch change, not on VBUS plug events */
+	if ((st1 & 0x1) || (!drv->otg && !drv->torch)) {
+		/* a valid VBUS powers the torch directly */
+		mode = SM5714_OP_MODE_CHG_ON_VBUS;
+		bst = SM5714_BSTOUT_4500MV;
+		cur = SM5714_OTG_CURRENT_500MA;
+	} else if (drv->otg) {
+		mode = SM5714_OP_MODE_USB_OTG;
+	} else {
+		mode = SM5714_OP_MODE_FLASH_BOOST;
+	}
+
+	ret = regmap_update_bits(drv->regmap, SM5714_CHG_REG_BSTCNTL1,
+				 0xCF, (cur << 6) | bst);
+	if (ret)
+		return ret;
+
+	return regmap_update_bits(drv->regmap, SM5714_CHG_REG_CNTL2, 0xF, mode);
+}
+
+static int sm5714_otg_set(struct regulator_dev *rdev, bool on)
+{
+	struct sm5714_charger *drv = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&drv->lock);
+	drv->otg = on;
+	ret = sm5714_update_op_mode(drv);
+	mutex_unlock(&drv->lock);
+
+	return ret;
+}
+
+static int sm5714_otg_enable(struct regulator_dev *rdev)
+{
+	return sm5714_otg_set(rdev, true);
+}
+
+static int sm5714_otg_disable(struct regulator_dev *rdev)
+{
+	return sm5714_otg_set(rdev, false);
+}
+
+static int sm5714_otg_is_enabled(struct regulator_dev *rdev)
+{
+	struct sm5714_charger *drv = rdev_get_drvdata(rdev);
+
+	return drv->otg;
+}
+
+static const struct regulator_ops sm5714_otg_ops = {
+	.enable = sm5714_otg_enable,
+	.disable = sm5714_otg_disable,
+	.is_enabled = sm5714_otg_is_enabled,
+};
+
+static const struct regulator_desc sm5714_otg_desc = {
+	.name = "usb-otg-vbus",
+	.of_match = "usb-otg-vbus",
+	.type = REGULATOR_VOLTAGE,
+	.owner = THIS_MODULE,
+	.ops = &sm5714_otg_ops,
+	.fixed_uV = 5100000,
+	.n_voltages = 1,
+};
+
+static int sm5714_torch_set(struct led_classdev *led, enum led_brightness b)
+{
+	struct sm5714_charger *drv = container_of(led, struct sm5714_charger, torch_led);
+	int ret;
+
+	mutex_lock(&drv->lock);
+	if (b) {
+		ret = regmap_update_bits(drv->regmap, SM5714_CHG_REG_FLEDCNTL2,
+					 0x7 << 4, (b - 1) << 4);
+		if (ret)
+			goto out;
+	}
+	drv->torch = b;
+	ret = sm5714_update_op_mode(drv);
+	if (ret)
+		goto out;
+	ret = regmap_update_bits(drv->regmap, SM5714_CHG_REG_FLEDCNTL1, 0x3,
+				 b ? SM5714_FLED_MODE_TORCH : SM5714_FLED_MODE_OFF);
+out:
+	mutex_unlock(&drv->lock);
+	return ret;
 }
 
 static int sm5714_charger_get_property(struct power_supply *psy,
@@ -161,6 +285,8 @@ static int sm5714_charger_probe(struct i2c_client *i2c)
 	struct device *dev = &i2c->dev;
 	struct power_supply_config charger_cfg = {};
 	struct sm5714_charger *drv;
+	struct regulator_config reg_cfg = {};
+	struct regulator_dev *rdev;
 	int input_current_limit = 500, charging_current = 500, topoff_current = 100;
 
 	drv = devm_kzalloc(&i2c->dev, sizeof(*drv), GFP_KERNEL);
@@ -210,6 +336,21 @@ static int sm5714_charger_probe(struct i2c_client *i2c)
 		dev_err(dev, "failed to register power supply\n");
 		return PTR_ERR(drv->psy);
 	}
+
+	mutex_init(&drv->lock);
+
+	reg_cfg.dev = dev;
+	reg_cfg.driver_data = drv;
+	rdev = devm_regulator_register(dev, &sm5714_otg_desc, &reg_cfg);
+	if (IS_ERR(rdev))
+		return dev_err_probe(dev, PTR_ERR(rdev), "failed to register OTG VBUS regulator\n");
+
+	drv->torch_led.name = "white:torch";
+	drv->torch_led.max_brightness = SM5714_TORCH_MAX_BRIGHTNESS;
+	drv->torch_led.brightness_set_blocking = sm5714_torch_set;
+	error = devm_led_classdev_register(dev, &drv->torch_led);
+	if (error)
+		return dev_err_probe(dev, error, "failed to register torch LED\n");
 
 	return 0;
 }
