@@ -90,6 +90,15 @@ config VIDEO_GC08A3
 	  To compile this driver as a module, choose M here: the
 	  module will be called gc08a3.
 
+config VIDEO_GC5035
+	tristate "GalaxyCore gc5035 sensor support"
+	help
+	  This is a Video4Linux2 sensor driver for the GalaxyCore gc5035
+	  camera.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called gc5035.
+
 config VIDEO_GC2145
 	select V4L2_CCI_I2C
 	tristate "GalaxyCore GC2145 sensor support"
@@ -234,6 +243,15 @@ config VIDEO_IMX335
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx335.
+
+config VIDEO_IMX616
+	tristate "Sony IMX616 sensor support"
+	help
+	  This is a Video4Linux2 sensor driver for the Sony IMX616
+	  camera (Samsung Galaxy A52 front camera).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called imx616.
 
 config VIDEO_IMX355
 	tristate "Sony IMX355 sensor support"
@@ -687,6 +705,24 @@ config VIDEO_S5C73M3
 	help
 	  This is a V4L2 sensor driver for Samsung S5C73M3
 	  8 Mpixel camera.
+
+config VIDEO_S5K3L6XX
+	tristate "Samsung S5K3L6XX sensor support"
+	help
+	  This is a Video4Linux2 sensor driver for the Samsung S5K3L6XX
+	  13MP camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5k3l6xx.
+
+config VIDEO_S5KGW1P
+	tristate "Samsung S5KGW1P sensor support"
+	help
+	  This is a Video4Linux2 sensor driver for the Samsung S5KGW1P
+	  64MP camera sensor (Samsung Galaxy A52 main camera).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5kgw1p.
 
 config VIDEO_S5K5BAF
 	tristate "Samsung S5K5BAF sensor support"
