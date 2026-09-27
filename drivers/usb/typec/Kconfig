@@ -114,4 +114,12 @@ source "drivers/usb/typec/mux/Kconfig"
 
 source "drivers/usb/typec/altmodes/Kconfig"
 
+config TYPEC_SM5714_CC
+	tristate "Silicon Mitus SM5714 Type-C attach detection"
+	depends on I2C && USB_ROLE_SWITCH && REGULATOR
+	select REGMAP_I2C
+	help
+	  Switch the USB controller between device and host role based on
+	  the SM5714 Type-C CC attach state, powering VBUS in host role.
+
 endif # TYPEC
