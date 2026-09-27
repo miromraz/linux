@@ -7,12 +7,115 @@
 
 /dts-v1/;
 
+#include <dt-bindings/clock/qcom,camcc-sc7180.h>
+#include <dt-bindings/media/video-interfaces.h>
 #include "sm7125-samsung-common.dtsi"
 
 / {
 	model = "Samsung Galaxy A52";
 	compatible = "samsung,a52q", "qcom,sm7125";
 	qcom,board-id = <0x22 0x6>;
+
+	/* NFC PVDD LDO (downstream sec-nfc,pvdd-gpio); s3fwrn5 takes no supply */
+	vreg_nfc_pvdd: regulator-nfc-pvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "nfc_pvdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 68 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-always-on;
+	};
+
+	/* S2MPB03 camera PMIC sits on a bit-banged bus (gpio25 SDA, gpio26 SCL) */
+	i2c-cam-pmic {
+		compatible = "i2c-gpio";
+		sda-gpios = <&tlmm 25 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 26 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		pmic@56 {
+			compatible = "samsung,s2mpb03";
+			reg = <0x56>;
+
+			regulators {
+				vreg_cam_l1: ldo1 {	/* front vdig */
+					regulator-min-microvolt = <1050000>;
+					regulator-max-microvolt = <1050000>;
+				};
+				vreg_cam_l2: ldo2 {	/* main vdig */
+					regulator-min-microvolt = <1100000>;
+					regulator-max-microvolt = <1100000>;
+				};
+				vreg_cam_l3: ldo3 {	/* vio, all sensors */
+					regulator-min-microvolt = <1800000>;
+					regulator-max-microvolt = <1800000>;
+				};
+				vreg_cam_l4: ldo4 {	/* UW/depth/macro vdig */
+					regulator-min-microvolt = <1200000>;
+					regulator-max-microvolt = <1200000>;
+				};
+				vreg_cam_l5: ldo5 {	/* main vana */
+					regulator-min-microvolt = <2800000>;
+					regulator-max-microvolt = <2800000>;
+				};
+				vreg_cam_l6: ldo6 {	/* front vana */
+					regulator-min-microvolt = <2800000>;
+					regulator-max-microvolt = <2800000>;
+				};
+				vreg_cam_l7: ldo7 {	/* main vaf (actuator, OIS) */
+					regulator-min-microvolt = <2800000>;
+					regulator-max-microvolt = <2800000>;
+				};
+			};
+		};
+	};
+
+	/* GPIO-switched camera LDOs */
+	vreg_cam0_avdd18: regulator-cam0-avdd18 {
+		compatible = "regulator-fixed";
+		regulator-name = "cam0_avdd_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 63 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	vreg_cam2_vana: regulator-cam2-vana {
+		compatible = "regulator-fixed";
+		regulator-name = "cam2_vana";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 65 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	vreg_cam3_vana: regulator-cam3-vana {
+		compatible = "regulator-fixed";
+		regulator-name = "cam3_vana";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 64 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	vreg_cam4_vana: regulator-cam4-vana {
+		compatible = "regulator-fixed";
+		regulator-name = "cam4_vana";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 74 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	/* AP sleep state for the ADSP sensor framework, see smp2p_sleepstate.c */
+	smp2p-sleepstate {
+		compatible = "qcom,smp2p-sleepstate";
+		qcom,smem-states = <&sleepstate_smp2p_out 0>;
+		interrupts-extended = <&sleepstate_smp2p_in 0 IRQ_TYPE_EDGE_RISING>;
+	};
 
 	reserved-memory {
 		#address-cells = <2>;
@@ -70,4 +173,298 @@
 
 &venus {
 	firmware-name = "qcom/sm7125/a52q/venus.mbn";
+};
+
+&i2c0 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	/* Samsung S3NRN4V (downstream "sec-nfc", bootloader_ver 6) */
+	nfc@27 {
+		compatible = "samsung,s3fwrn5-i2c";
+		reg = <0x27>;
+
+		interrupts-extended = <&tlmm 37 IRQ_TYPE_EDGE_RISING>;
+		en-gpios = <&tlmm 12 GPIO_ACTIVE_HIGH>;
+		wake-gpios = <&tlmm 36 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-0 = <&nfc_default>;
+		pinctrl-names = "default";
+	};
+};
+
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&tlmm {
+	nfc_default: nfc-default-state {
+		int-pins {
+			pins = "gpio31", "gpio37";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		ctrl-pins {
+			pins = "gpio12", "gpio36";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+};
+
+&{/smp2p-lpass} {
+	sleepstate_smp2p_out: sleepstate-out {
+		qcom,entry-name = "sleepstate";
+		#qcom,smem-state-cells = <1>;
+	};
+
+	sleepstate_smp2p_in: sleepstate-in {
+		qcom,entry-name = "sleepstate_see";
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
+};
+
+&tlmm {
+	cam_mclk0_default: cam-mclk0-default-state {
+		pins = "gpio13";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk1_default: cam-mclk1-default-state {
+		pins = "gpio14";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk2_default: cam-mclk2-default-state {
+		pins = "gpio15";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk3_default: cam-mclk3-default-state {
+		pins = "gpio16";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk4_default: cam-mclk4-default-state {
+		pins = "gpio23";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+&camcc {
+	status = "okay";
+};
+
+&cci0 {
+	status = "okay";
+};
+
+/* main: Samsung S5KGW1P, 3-lane RAW10, CSIPHY0. MCLK 19.2 MHz to match the
+ * vendor power sequence / init PLL (like the UW s5k3l6xx path). */
+&cci0_i2c0 {
+	camera@2d {
+		compatible = "samsung,s5kgw1p";
+		reg = <0x2d>;
+		vio-supply = <&vreg_cam_l3>;
+		vana-supply = <&vreg_cam_l5>;
+		vdig-supply = <&vreg_cam_l2>;
+		vaf-supply = <&vreg_cam_l7>;
+		vcustom-supply = <&vreg_cam0_avdd18>;
+		clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		clock-names = "mclk";
+		clock-frequency = <19200000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		assigned-clock-rates = <19200000>;
+		reset-gpios = <&tlmm 30 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk0_default>;
+		pinctrl-names = "default";
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		port {
+			cam_s5kgw1p_ep: endpoint {
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <0 1 2>;
+				link-frequencies = /bits/ 64 <1000000000>;
+				remote-endpoint = <&csiphy0_ep>;
+			};
+		};
+	};
+};
+
+/* UW: Samsung S5K3L6, 4-lane, CSIPHY3. MCLK 19.2 MHz to match the vendor init PLL. */
+&cci0_i2c1 {
+	camera@2d {
+		compatible = "samsung,s5k3l6xx";
+		reg = <0x2d>;
+		mipi-sel-gpios = <&tlmm 66 GPIO_ACTIVE_LOW>;	/* MIPI_SEL: UW = low */
+		vddio-supply = <&vreg_cam_l3>;
+		vdda-supply = <&vreg_cam2_vana>;
+		vddd-supply = <&vreg_cam_l1>;
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		clock-names = "mclk";
+		/* Vendor tables (4000x3000@30) are tuned for a 19.2MHz MCLK. */
+		clock-frequency = <19200000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <19200000>;
+		rstn-gpios = <&tlmm 29 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk2_default>;
+		pinctrl-names = "default";
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		/* UW and macro share CSIPHY3 through the gpio66 MIPI switch (UW
+		 * selects it LOW); only one links to CAMSS per DTB, and only UW is
+		 * linked here. */
+		port {
+			cam_s5k3l6_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				link-frequencies = /bits/ 64 <259200000 480000000 595200000>;
+				remote-endpoint = <&csiphy3_ep>;
+			};
+		};
+	};
+};
+
+&cci1 {
+	status = "okay";
+};
+
+&cci1_i2c0 {
+	/* front: Sony IMX616, 4-lane RAW10, CSIPHY2, MCLK 24 MHz. */
+	camera@1a {
+		compatible = "sony,imx616";
+		reg = <0x1a>;
+		vio-supply = <&vreg_cam_l3>;
+		vana-supply = <&vreg_cam_l6>;
+		vdig-supply = <&vreg_cam_l1>;
+		clocks = <&camcc CAM_CC_MCLK4_CLK>;
+		clock-names = "mclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK4_CLK>;
+		assigned-clock-rates = <24000000>;
+		reset-gpios = <&tlmm 21 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk4_default>;
+		pinctrl-names = "default";
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		port {
+			cam_imx616_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				link-frequencies = /bits/ 64 <1028000000>;
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
+
+	/* depth: GalaxyCore GC5035, 2-lane, CSIPHY1 */
+	camera@37 {
+		compatible = "galaxycore,gc5035";
+		reg = <0x37>;
+		iovdd-supply = <&vreg_cam_l3>;
+		dvdd12-supply = <&vreg_cam_l4>;
+		avdd28-supply = <&vreg_cam3_vana>;
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		clock-names = "mclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <24000000>;
+		resetb-gpios = <&tlmm 42 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk1_default>;
+		pinctrl-names = "default";
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		port {
+			cam_gc5035_depth_ep: endpoint {
+				data-lanes = <0 1>;
+				link-frequencies = /bits/ 64 <438000000>;
+				remote-endpoint = <&csiphy1_ep>;
+			};
+		};
+	};
+
+	/* macro: GalaxyCore GC5035, 2-lane. Shares CSIPHY3 with the UW sensor
+	 * through the gpio66 MIPI switch, so only one is wired to CAMSS per DTB;
+	 * UW is linked here, so this node has no CAMSS endpoint. */
+	camera@3f {
+		compatible = "galaxycore,gc5035";
+		reg = <0x3f>;
+		iovdd-supply = <&vreg_cam_l3>;
+		dvdd12-supply = <&vreg_cam_l4>;
+		/* VANA is gpio64 (vreg_cam3_vana), shared with the depth camera
+		 * per the downstream r02 override; refcounted, so sharing is fine. */
+		avdd28-supply = <&vreg_cam3_vana>;
+		clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		clock-names = "mclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		assigned-clock-rates = <24000000>;
+		resetb-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk3_default>;
+		pinctrl-names = "default";
+		power-domains = <&camcc TITAN_TOP_GDSC>;
+
+		port {
+			cam_gc5035_macro_ep: endpoint {
+				data-lanes = <0 1>;
+				link-frequencies = /bits/ 64 <438000000>;
+			};
+		};
+	};
+};
+
+&camss {
+	vdda-phy-supply = <&vreg_l4a_0p9>;
+	vdda-pll-supply = <&vreg_l3c_1p2>;
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			csiphy0_ep: endpoint {
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <0 1 2>;
+				remote-endpoint = <&cam_s5kgw1p_ep>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			csiphy1_ep: endpoint {
+				data-lanes = <0 1>;
+				remote-endpoint = <&cam_gc5035_depth_ep>;
+			};
+		};
+
+		port@2 {
+			reg = <2>;
+			csiphy2_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&cam_imx616_ep>;
+			};
+		};
+
+		port@3 {
+			reg = <3>;
+			csiphy3_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&cam_s5k3l6_ep>;
+			};
+		};
+	};
 };
