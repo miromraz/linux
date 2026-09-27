@@ -1329,6 +1329,14 @@ config REGULATOR_S2MPA01
 	 This driver controls Samsung S2MPA01 voltage output regulator
 	 via I2C bus. S2MPA01 has 10 Bucks and 26 LDO outputs.
 
+config REGULATOR_S2MPB03
+	tristate "Samsung S2MPB03 camera PMIC regulators"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Driver for the seven LDOs of the Samsung S2MPB03 camera power
+	  management IC, found on e.g. the Samsung Galaxy A52 (SM7125).
+
 config REGULATOR_S2MPS11
 	tristate "Samsung S2MPS11/13/14/15/S2MPU02 voltage regulator"
 	depends on MFD_SEC_CORE || COMPILE_TEST
