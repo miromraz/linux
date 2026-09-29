@@ -375,13 +375,50 @@
 	};
 };
 
-&dispcc {
-	/* HACK: disable until a panel driver is ready to retain simplefb */
-	status = "disabled";
-};
-
 &ipa {
 	memory-region = <&ipa_fw_mem>;
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l3c_1p2>;
+
+	status = "okay";
+
+	display_panel: panel@0 {
+		reg = <0>;
+
+		pinctrl-names = "default", "sleep";
+		pinctrl-0 = <&mdss_dsi_active>, <&mdss_te_active>;
+		pinctrl-1 = <&mdss_dsi_suspend>, <&mdss_te_suspend>;
+
+		vddio-supply = <&vreg_l13a_1p8>;
+		vci-supply = <&vreg_l18a_3p0>;
+
+		reset-gpios = <&tlmm 8 GPIO_ACTIVE_LOW>;
+
+		status = "disabled";
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&panel_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l4a_0p9>;
+
+	status = "okay";
 };
 
 &pm6150l_gpios {
@@ -451,6 +488,34 @@
 
 &tlmm {
 	gpio-reserved-ranges = <59 4>; /* Fingerprint sensor SPI */
+
+	mdss_dsi_active: mdss-dsi-active-state {
+		pins = "gpio8";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	mdss_dsi_suspend: mdss-dsi-suspend-state {
+		pins = "gpio8";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	mdss_te_active: mdss-te-active-state {
+		pins = "gpio10";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	mdss_te_suspend: mdss-te-suspend-state {
+		pins = "gpio10";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
 
 	qup_uart3_sleep: qup-uart3-sleep-state {
 		cts-pins {
