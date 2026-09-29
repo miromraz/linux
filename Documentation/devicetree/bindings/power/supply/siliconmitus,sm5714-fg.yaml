@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/siliconmitus,sm5714-fg.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Silicon Mitus SM5714 fuel gauge
+
+maintainers:
+  - Miroslav Mráz <miroslav.mraz@techmania.cz>
+
+description:
+  The SM5714 is a combo PMIC integrating a charger, a fuel gauge and a
+  Type-C/USB block. This binding describes the fuel gauge block, which is
+  exposed on its own I2C address and reports battery voltage, current,
+  temperature and state of charge.
+
+properties:
+  compatible:
+    const: siliconmitus,sm5714-fg
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        fuel-gauge@71 {
+            compatible = "siliconmitus,sm5714-fg";
+            reg = <0x71>;
+        };
+    };
+...
