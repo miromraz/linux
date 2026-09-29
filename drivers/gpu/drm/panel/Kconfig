@@ -1008,6 +1008,19 @@ config DRM_PANEL_SAMSUNG_S6E3FC2X01
 
 	    Samsung AMS641RW (found in the OnePlus 6T smartphone)
 
+config DRM_PANEL_SAMSUNG_S6E3FC3
+	tristate "Samsung S6E3FC3 DSI panel controller"
+	depends on GPIOLIB
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y or M here if you want to enable support for the
+	  Samsung S6E3FC3 DDIC and connected MIPI DSI panel.
+	  Currently supported panels:
+
+	    Samsung AMS646YD04 (found in the Samsung Galaxy A52 smartphone)
+
 config DRM_PANEL_SAMSUNG_S6E3HA2
 	tristate "Samsung S6E3HA2 DSI video mode panel"
 	depends on OF
