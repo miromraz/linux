@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/siliconmitus,sm5714-charger.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Silicon Mitus SM5714 charger
+
+maintainers:
+  - Miroslav Mráz <miroslav.mraz@techmania.cz>
+
+description:
+  The SM5714 is a combo PMIC integrating a charger, a fuel gauge and a
+  Type-C/USB block. This binding describes the charger block, which is
+  exposed on its own I2C address. It controls battery charging, provides
+  the USB OTG VBUS boost regulator and a torch LED output.
+
+properties:
+  compatible:
+    const: siliconmitus,sm5714-charger
+
+  reg:
+    maxItems: 1
+
+  siliconmitus,enable-autostop:
+    type: boolean
+    description:
+      Stop charging automatically once the top-off condition is reached.
+
+  siliconmitus,input-current-limit:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Input (VBUS) current limit in mA.
+    minimum: 100
+    maximum: 3000
+
+  siliconmitus,charging-current:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Fast-charging current in mA.
+    minimum: 100
+    maximum: 3500
+
+  siliconmitus,topoff-current:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Top-off (charge termination) current in mA.
+    minimum: 100
+    maximum: 675
+
+  usb-otg-vbus:
+    type: object
+    $ref: /schemas/regulator/regulator.yaml#
+    description: USB OTG VBUS boost regulator provided by the charger.
+    unevaluatedProperties: false
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        charger@49 {
+            compatible = "siliconmitus,sm5714-charger";
+            reg = <0x49>;
+
+            siliconmitus,enable-autostop;
+            siliconmitus,input-current-limit = <1300>;
+            siliconmitus,charging-current = <1300>;
+            siliconmitus,topoff-current = <225>;
+
+            usb-otg-vbus {
+                regulator-name = "usb_otg_vbus";
+            };
+        };
+    };
+...
