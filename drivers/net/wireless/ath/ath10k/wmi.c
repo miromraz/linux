@@ -2735,8 +2735,18 @@ static void ath10k_wmi_event_chan_info_unpaired(struct ath10k *ar,
 
 	idx = freq_to_idx(ar, params->freq);
 	if (idx >= ARRAY_SIZE(ar->survey)) {
-		ath10k_warn(ar, "chan info: invalid frequency %d (idx %d out of bounds)\n",
-			    params->freq, idx);
+		/*
+		 * Some firmware emits a chan_info event with freq 0 on every
+		 * scan; it maps to no survey channel and is harmless, so log
+		 * only that case at debug level (as commit 8a952a955de7 did for
+		 * the sibling warning). Keep the warning for other bad freqs.
+		 */
+		if (params->freq)
+			ath10k_warn(ar, "chan info: invalid frequency %d (idx %d out of bounds)\n",
+				    params->freq, idx);
+		else
+			ath10k_dbg(ar, ATH10K_DBG_WMI, "chan info: invalid frequency %d (idx %d out of bounds)\n",
+				   params->freq, idx);
 		return;
 	}
 
@@ -2766,8 +2776,18 @@ static void ath10k_wmi_event_chan_info_paired(struct ath10k *ar,
 
 	idx = freq_to_idx(ar, params->freq);
 	if (idx >= ARRAY_SIZE(ar->survey)) {
-		ath10k_warn(ar, "chan info: invalid frequency %d (idx %d out of bounds)\n",
-			    params->freq, idx);
+		/*
+		 * Some firmware emits a chan_info event with freq 0 on every
+		 * scan; it maps to no survey channel and is harmless, so log
+		 * only that case at debug level (as commit 8a952a955de7 did for
+		 * the sibling warning). Keep the warning for other bad freqs.
+		 */
+		if (params->freq)
+			ath10k_warn(ar, "chan info: invalid frequency %d (idx %d out of bounds)\n",
+				    params->freq, idx);
+		else
+			ath10k_dbg(ar, ATH10K_DBG_WMI, "chan info: invalid frequency %d (idx %d out of bounds)\n",
+				   params->freq, idx);
 		return;
 	}
 
