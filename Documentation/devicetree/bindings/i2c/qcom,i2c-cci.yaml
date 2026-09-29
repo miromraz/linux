@@ -61,6 +61,12 @@ properties:
     minItems: 2
     maxItems: 6
 
+  interconnects:
+    maxItems: 1
+
+  interconnect-names:
+    const: cci-camnoc
+
   interrupts:
     maxItems: 1
 
