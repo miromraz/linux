@@ -5,6 +5,7 @@
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/i2c.h>
+#include <linux/interconnect.h>
 #include <linux/io.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
@@ -71,6 +72,14 @@
 #define NUM_MASTERS	2
 #define NUM_QUEUES	2
 
+/*
+ * Small CAMNOC bandwidth vote (kBps) held whenever CCI's clocks are enabled, to
+ * keep the shared cam_cc_camnoc_axi_clk physically clocked while its branch is
+ * gated. Matches camss' idle vote magnitude.
+ */
+#define CCI_ICC_AVG_BW	38400
+#define CCI_ICC_PEAK_BW	76800
+
 #define CCI_I2C_SET_PARAM	1
 #define CCI_I2C_REPORT		8
 #define CCI_I2C_WRITE		9
@@ -127,6 +136,7 @@ struct cci {
 	const struct cci_data *data;
 	struct clk_bulk_data *clocks;
 	int nclocks;
+	struct icc_path *icc_path;
 	struct cci_master master[NUM_MASTERS];
 };
 
@@ -463,12 +473,30 @@ static const struct i2c_algorithm cci_algo = {
 
 static int cci_enable_clocks(struct cci *cci)
 {
-	return clk_bulk_prepare_enable(cci->nclocks, cci->clocks);
+	int ret;
+
+	/*
+	 * Vote CAMNOC bandwidth before enabling clocks: the CAMNOC bus must be
+	 * clocked for the shared cam_cc_camnoc_axi_clk branch halt FSM to
+	 * settle. Without this vote, when CCI drops the last clock refcount the
+	 * gate happens with no bus vote and the NoC wedges "stuck at on".
+	 * icc_set_bw() is a no-op when icc_path is NULL (no DT interconnect).
+	 */
+	ret = icc_set_bw(cci->icc_path, CCI_ICC_AVG_BW, CCI_ICC_PEAK_BW);
+	if (ret)
+		return ret;
+
+	ret = clk_bulk_prepare_enable(cci->nclocks, cci->clocks);
+	if (ret)
+		icc_set_bw(cci->icc_path, 0, 0);
+
+	return ret;
 }
 
 static void cci_disable_clocks(struct cci *cci)
 {
 	clk_bulk_disable_unprepare(cci->nclocks, cci->clocks);
+	icc_set_bw(cci->icc_path, 0, 0);
 }
 
 static int __maybe_unused cci_suspend_runtime(struct device *dev)
@@ -576,6 +604,12 @@ static int cci_probe(struct platform_device *pdev)
 	else if (!ret)
 		return dev_err_probe(dev, -EINVAL, "not enough clocks in DT\n");
 	cci->nclocks = ret;
+
+	/* Optional: keeps the shared CAMNOC bus clocked while CCI runs. */
+	cci->icc_path = devm_of_icc_get(dev, NULL);
+	if (IS_ERR(cci->icc_path))
+		return dev_err_probe(dev, PTR_ERR(cci->icc_path),
+				     "failed to get icc path\n");
 
 	ret = cci_enable_clocks(cci);
 	if (ret < 0)
