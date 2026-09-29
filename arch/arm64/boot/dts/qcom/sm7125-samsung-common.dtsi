@@ -380,6 +380,10 @@
 	status = "disabled";
 };
 
+&ipa {
+	memory-region = <&ipa_fw_mem>;
+};
+
 &pm6150l_gpios {
 	key_vol_up_default: key-vol-up-default-state {
 		pins = "gpio8";
@@ -422,6 +426,18 @@
 	vcc-supply = <&vreg_l11a_1p8>;
 };
 
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&remoteproc_adsp {
+	memory-region = <&adsp_mem>;
+};
+
 &sdhc_2 {
 	vmmc-supply = <&vreg_l9c_2p95>;
 	vqmmc-supply = <&vreg_l6c_3p0>;
@@ -435,6 +451,51 @@
 
 &tlmm {
 	gpio-reserved-ranges = <59 4>; /* Fingerprint sensor SPI */
+
+	qup_uart3_sleep: qup-uart3-sleep-state {
+		cts-pins {
+			/*
+			 * Configure a pull-down on CTS to match the pull of
+			 * the Bluetooth module.
+			 */
+			pins = "gpio38";
+			function = "gpio";
+			bias-pull-down;
+		};
+
+		rts-pins {
+			/*
+			 * Configure pull-down on RTS. As RTS is active low
+			 * signal, pull it low to indicate the BT SoC that it
+			 * can wakeup the system anytime from suspend state by
+			 * pulling RX low (by sending wakeup bytes).
+			 */
+			pins = "gpio39";
+			function = "gpio";
+			bias-pull-down;
+		};
+
+		tx-pins {
+			/*
+			 * Configure pull-up on TX when it isn't actively driven
+			 * to prevent BT SoC from receiving garbage during sleep.
+			 */
+			pins = "gpio40";
+			function = "gpio";
+			bias-pull-up;
+		};
+
+		rx-pins {
+			/*
+			 * Configure a pull-up on RX. This is needed to avoid
+			 * garbage data when the TX pin of the Bluetooth module
+			 * is floating which may cause spurious wakeups.
+			 */
+			pins = "gpio41";
+			function = "gpio";
+			bias-pull-up;
+		};
+	};
 
 	sdc2_on: sdc2-on-state {
 		clk-pins {
@@ -491,6 +552,31 @@
 	};
 };
 
+&uart3 {
+	/delete-property/interrupts;
+	interrupts-extended = <&intc GIC_SPI 604 IRQ_TYPE_LEVEL_HIGH>,
+			      <&tlmm 41 IRQ_TYPE_EDGE_FALLING>;
+
+	pinctrl-names = "default", "sleep";
+	pinctrl-1 = <&qup_uart3_sleep>;
+
+	status = "okay";
+
+	bluetooth: bluetooth {
+		compatible = "qcom,wcn3988-bt";
+
+		local-bd-address = [ 22 00 00 00 5a ad ];
+
+		vddio-supply = <&vreg_l10a_1p8>;
+		vddxo-supply = <&vreg_l1c_1p8>;
+		vddrf-supply = <&vreg_l2c_1p3>;
+		vddch0-supply = <&vreg_l10c_3p3>;
+		swctrl-gpios = <&tlmm 73 GPIO_ACTIVE_HIGH>;
+
+		max-speed = <3200000>;
+	};
+};
+
 &ufs_mem_hc {
 	vcc-supply = <&vreg_l19a_2p85>;
 	vcc-max-microamp = <600000>;
@@ -531,6 +617,16 @@
 &usb_1_qmpphy {
 	vdda-phy-supply = <&vreg_l4a_0p9>;
 	vdda-pll-supply = <&vreg_l3c_1p2>;
+
+	status = "okay";
+};
+
+&wifi {
+	vdd-0.8-cx-mx-supply = <&vreg_l9a_0p8>;
+	vdd-1.8-xo-supply = <&vreg_l1c_1p8>;
+	vdd-1.3-rfa-supply = <&vreg_l2c_1p3>;
+	vdd-3.3-ch0-supply = <&vreg_l10c_3p3>;
+	vdd-3.3-ch1-supply = <&vreg_l11c_3p3>;
 
 	status = "okay";
 };
