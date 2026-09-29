@@ -20,6 +20,14 @@
 	reg = <0x0 0xf4f00000 0x0 0x202000>;
 };
 
+&bluetooth {
+	firmware-name = "sm7125/a52q/apnv11.bin";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm7125/a52q/a615_zap.mbn";
+};
+
 &i2c4 {
 	status = "okay";
 
@@ -74,6 +82,24 @@
 	};
 };
 
+&ipa {
+	firmware-name = "qcom/sm7125/a52q/ipa_fws.mbn";
+
+	status = "okay";
+};
+
+&remoteproc_adsp {
+	firmware-name = "qcom/sm7125/a52q/adsp.mbn";
+
+	status = "okay";
+};
+
+&remoteproc_mpss {
+	firmware-name = "qcom/sm7125/a52q/modem.mbn";
+
+	status = "okay";
+};
+
 &tlmm {
 	tsp_int: tsp-int-state {
 		pins = "gpio9";
@@ -81,4 +107,8 @@
 		bias-disable;
 		drive-strength = <2>;
 	};
+};
+
+&venus {
+	firmware-name = "qcom/sm7125/a52q/venus.mbn";
 };
