@@ -3,6 +3,7 @@
  * Copyright (c) 2024, map220v <map220v300@gmail.com>
  */
 
+#include <linux/bits.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
@@ -15,16 +16,23 @@
 #include <linux/regmap.h>
 
 #define SM5714_CHG_REG_STATUS1            0x0D
+#define SM5714_CHG_STATUS1_VBUSOK         BIT(0)
+#define SM5714_CHG_STATUS1_VBUSOVP        BIT(2)
 #define SM5714_CHG_REG_STATUS2            0x0E
+#define SM5714_CHG_STATUS2_NOBAT          BIT(2)
+#define SM5714_CHG_STATUS2_CHGON          BIT(3)
+#define SM5714_CHG_STATUS2_TOPOFF         BIT(5)
 #define SM5714_CHG_REG_STATUS3            0x0F
 #define SM5714_CHG_REG_STATUS4            0x10
 #define SM5714_CHG_REG_STATUS5            0x11
 
 #define SM5714_CHG_REG_CNTL1              0x13
+#define SM5714_CHG_CNTL1_ENCHG            BIT(3)
 #define SM5714_CHG_REG_CNTL2              0x14	/* bits 3:0 operating mode */
 #define SM5714_CHG_REG_VBUSCNTL           0x15
 #define SM5714_CHG_REG_CHGCNTL2           0x18
 #define SM5714_CHG_REG_CHGCNTL4           0x1A
+#define SM5714_CHG_CHGCNTL4_AUTOSTOP      BIT(6)
 #define SM5714_CHG_REG_CHGCNTL5           0x1B
 #define SM5714_CHG_REG_BSTCNTL1           0x23	/* 3:0 boost voltage, 7:6 OTG current */
 #define SM5714_CHG_REG_FLEDCNTL1          0x41	/* 1:0 LED mode */
@@ -227,13 +235,13 @@ static int sm5714_charger_get_property(struct power_supply *psy,
 		error = regmap_read(drv->regmap, SM5714_CHG_REG_STATUS2, &value);
 		if (error)
 			return error;
-		val->intval = (value & (0x1 << 2)) ? 0 : 1;
+		val->intval = (value & SM5714_CHG_STATUS2_NOBAT) ? 0 : 1;
 		break;
 	case POWER_SUPPLY_PROP_ONLINE:
 		error = regmap_read(drv->regmap, SM5714_CHG_REG_STATUS1, &value);
 		if (error)
 			return error;
-		val->intval = value & 0x1 ? 1 : 0;
+		val->intval = value & SM5714_CHG_STATUS1_VBUSOK ? 1 : 0;
 		break;
 	case POWER_SUPPLY_PROP_STATUS:
 		error = regmap_read(drv->regmap, SM5714_CHG_REG_STATUS1, &reg_st1);
@@ -243,11 +251,11 @@ static int sm5714_charger_get_property(struct power_supply *psy,
 		if (error)
 			return error;
 
-		if (reg_st2 & (0x1 << 5))
+		if (reg_st2 & SM5714_CHG_STATUS2_TOPOFF)
 			status = POWER_SUPPLY_STATUS_FULL;
-		else if (reg_st2 & (0x1 << 3))
+		else if (reg_st2 & SM5714_CHG_STATUS2_CHGON)
 			status = POWER_SUPPLY_STATUS_CHARGING;
-		else if (reg_st1 & (0x1 << 0))
+		else if (reg_st1 & SM5714_CHG_STATUS1_VBUSOK)
 			status = POWER_SUPPLY_STATUS_NOT_CHARGING;
 		else
 			status = POWER_SUPPLY_STATUS_DISCHARGING;
@@ -257,9 +265,9 @@ static int sm5714_charger_get_property(struct power_supply *psy,
 		error = regmap_read(drv->regmap, SM5714_CHG_REG_STATUS1, &value);
 		if (error)
 			return error;
-		if (value & (0x1 << 0))
+		if (value & SM5714_CHG_STATUS1_VBUSOK)
 			health = POWER_SUPPLY_HEALTH_GOOD;
-		else if (value & (0x1 << 2))
+		else if (value & SM5714_CHG_STATUS1_VBUSOVP)
 			health = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
 		/* else: undervoltage is not distinguished, leave as UNKNOWN */
 		val->intval = health;
@@ -307,8 +315,9 @@ static int sm5714_charger_probe(struct i2c_client *i2c)
 
 	drv->use_autostop = device_property_read_bool(dev, "siliconmitus,enable-autostop");
 
-	error = regmap_update_bits(drv->regmap, SM5714_CHG_REG_CHGCNTL4, (0x1 << 6),
-				   (drv->use_autostop << 6));
+	error = regmap_update_bits(drv->regmap, SM5714_CHG_REG_CHGCNTL4,
+				   SM5714_CHG_CHGCNTL4_AUTOSTOP,
+				   drv->use_autostop ? SM5714_CHG_CHGCNTL4_AUTOSTOP : 0);
 	if (error)
 		return dev_err_probe(dev, error, "Unable to set autostop register\n");
 
@@ -330,7 +339,8 @@ static int sm5714_charger_probe(struct i2c_client *i2c)
 	if (error)
 		return dev_err_probe(dev, error, "Unable to set topoff current\n");
 
-	error = regmap_update_bits(drv->regmap, SM5714_CHG_REG_CNTL1, (0x1 << 3), (1 << 3));
+	error = regmap_update_bits(drv->regmap, SM5714_CHG_REG_CNTL1,
+				   SM5714_CHG_CNTL1_ENCHG, SM5714_CHG_CNTL1_ENCHG);
 	if (error)
 		return dev_err_probe(dev, error, "Unable to enable charging\n");
 
