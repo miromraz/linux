@@ -1251,6 +1251,17 @@ config TOUCHSCREEN_STMFTS
 	  To compile this driver as a module, choose M here: the
 	  module will be called stmfts.
 
+config TOUCHSCREEN_STMFTS_FTS5CU56A
+	tristate "STMicroelectronics FTS5CU56A touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you want support for the STMicroelectronics
+	  FTS5CU56A touchscreen controller, found on the Samsung Galaxy
+	  A52 (a52q) and similar devices.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called stmfts_fts5cu56a.
+
 config TOUCHSCREEN_STMPE
 	tristate "STMicroelectronics STMPE touchscreens"
 	depends on MFD_STMPE

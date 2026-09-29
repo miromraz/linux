@@ -25935,6 +25935,13 @@ L:	linux-spi@vger.kernel.org
 S:	Maintained
 F:	drivers/spi/spi-stm32.c
 
+ST STMFTS FTS5CU56A TOUCHSCREEN DRIVER
+M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
+L:	linux-input@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/input/touchscreen/st,fts5cu56a.yaml
+F:	drivers/input/touchscreen/stmfts_fts5cu56a.c
+
 ST STPDDC60 DRIVER
 M:	Daniel Nilsson <daniel.nilsson@flex.com>
 L:	linux-hwmon@vger.kernel.org
