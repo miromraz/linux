@@ -251,6 +251,18 @@ config BATTERY_SM5714
 	  This driver can also be built as a module. If so, the module will be
 	  called sm5714-fg.
 
+config CHARGER_SM5714
+	tristate "Silicon Mitus SM5714 charger driver"
+	depends on I2C
+	help
+	  Say Y here to enable support for the charger block of the Silicon
+	  Mitus SM5714 combo PMIC, found on some Samsung phones. It controls
+	  battery charging, provides the USB OTG VBUS boost regulator and a
+	  torch LED output.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called sm5714-charger.
+
 config BATTERY_COLLIE
 	tristate "Sharp SL-5500 (collie) battery"
 	depends on SA1100_COLLIE && MCP_UCB1200
