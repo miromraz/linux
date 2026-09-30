@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/siliconmitus,sm5714-muic.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Silicon Mitus SM5714 MUIC USB data switch
+
+maintainers:
+  - Miroslav Mráz <miroslav.mraz@techmania.cz>
+
+description:
+  The SM5714 is a combo PMIC integrating a charger, a fuel gauge and a
+  Type-C/USB block. This binding describes the MUIC (Micro USB Interface
+  Controller) block, which is exposed on its own I2C address and contains the
+  analog switch for the USB D+/D- data lines. It is used as a Type-C mode
+  switch, driven by the Type-C CC detection block through the connector graph,
+  to force the data lines onto the USB path while operating as a host.
+
+properties:
+  compatible:
+    const: siliconmitus,sm5714-muic
+
+  reg:
+    maxItems: 1
+
+  mode-switch: true
+
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+    description:
+      A port node to link the MUIC to the SM5714 Type-C CC detection block,
+      which drives the USB data path switching.
+
+required:
+  - compatible
+  - reg
+  - mode-switch
+  - port
+
+additionalProperties: false
+
+examples:
+  - |
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        typec-mux@25 {
+            compatible = "siliconmitus,sm5714-muic";
+            reg = <0x25>;
+
+            mode-switch;
+
+            port {
+                sm5714_muic_ept: endpoint {
+                    remote-endpoint = <&sm5714_cc_ept>;
+                };
+            };
+        };
+    };
+...

@@ -25081,6 +25081,12 @@ S:	Supported
 F:	Documentation/devicetree/bindings/net/wireless/silabs,wfx.yaml
 F:	drivers/net/wireless/silabs/
 
+SILICON MITUS SM5714 MUIC DRIVER
+M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
+L:	linux-usb@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/usb/siliconmitus,sm5714-muic.yaml
+
 SILICON MITUS SM5714 TYPE-C CC DRIVER
 M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
 L:	linux-usb@vger.kernel.org
