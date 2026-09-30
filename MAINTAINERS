@@ -25100,6 +25100,7 @@ M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
 L:	linux-usb@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/usb/siliconmitus,sm5714-muic.yaml
+F:	drivers/usb/typec/mux/sm5714-muic.c
 
 SILICON MITUS SM5714 TYPE-C CC DRIVER
 M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
