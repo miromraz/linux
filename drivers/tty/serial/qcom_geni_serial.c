@@ -289,6 +289,10 @@ static struct qcom_geni_serial_port *get_port_from_line(int line, bool console, 
 	} else {
 		int max_alias_num = of_alias_get_highest_id("serial");
 
+		/* no serial aliases at all: allocate from line 0 */
+		if (max_alias_num < 0)
+			max_alias_num = -1;
+
 		if (line < 0 || line >= nr_ports)
 			line = ida_alloc_range(&port_ida, max_alias_num + 1,
 					       nr_ports - 1, GFP_KERNEL);
