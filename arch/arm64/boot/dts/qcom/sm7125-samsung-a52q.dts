@@ -37,6 +37,18 @@
 &i2c4 {
 	status = "okay";
 
+	usb-switch@25 {
+		compatible = "siliconmitus,sm5714-muic";
+		reg = <0x25>;
+		mode-switch;
+
+		port {
+			sm5714_muic_ep: endpoint {
+				remote-endpoint = <&sm5714_mux_ep>;
+			};
+		};
+	};
+
 	charger@49 {
 		compatible = "siliconmitus,sm5714-charger";
 		reg = <0x49>;
@@ -54,18 +66,6 @@
 	fuel-gauge@71 {
 		compatible = "siliconmitus,sm5714-fg";
 		reg = <0x71>;
-	};
-
-	usb-switch@25 {
-		compatible = "siliconmitus,sm5714-muic";
-		reg = <0x25>;
-		mode-switch;
-
-		port {
-			sm5714_muic_ep: endpoint {
-				remote-endpoint = <&sm5714_mux_ep>;
-			};
-		};
 	};
 };
 
