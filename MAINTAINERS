@@ -24388,6 +24388,7 @@ M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/i2c/samsung,s5k3l6xx.yaml
+F:	drivers/media/i2c/s5k3l6xx.c
 
 SAMSUNG S5K3M5 CAMERA DRIVER
 M:	Vladimir Zapolskiy <vladimir.zapolskiy@linaro.org>
