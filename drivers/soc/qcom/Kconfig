@@ -202,6 +202,16 @@ config QCOM_SMP2P
 	  Say yes here to support the Qualcomm Shared Memory Point to Point
 	  protocol.
 
+config QCOM_SMP2P_SLEEPSTATE
+	tristate "Qualcomm SMP2P AP sleep state notifier"
+	depends on QCOM_SMP2P
+	help
+	  Publish whether the application processor is suspended on the
+	  "sleepstate" SMP2P entry. The ADSP sensor framework (SEE) on some
+	  platforms, e.g. SM7125, watches this entry and faults on system
+	  suspend without it, taking the whole ADSP down. Say M/Y here to
+	  keep the sensor DSP alive across AP suspend on such platforms.
+
 config QCOM_SMSM
 	tristate "Qualcomm Shared Memory State Machine"
 	depends on MAILBOX
