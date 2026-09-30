@@ -25587,6 +25587,7 @@ M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/i2c/sony,imx616.yaml
+F:	drivers/media/i2c/imx616.c
 
 SONY IMX678 SENSOR DRIVER
 M:	Jai Luthra <jai.luthra@ideasonboard.com>
