@@ -14,6 +14,17 @@
 	model = "Samsung Galaxy A52";
 	compatible = "samsung,a52q", "qcom,sm7125";
 	qcom,board-id = <0x22 0x6>;
+
+	/*
+	 * Publish the AP sleep state to the ADSP sensor framework (SEE).
+	 * Without it the ADSP faults on system suspend, see
+	 * drivers/soc/qcom/smp2p_sleepstate.c.
+	 */
+	smp2p-sleepstate {
+		compatible = "qcom,smp2p-sleepstate";
+		qcom,smem-states = <&sleepstate_smp2p_out 12>;
+		interrupts-extended = <&sleepstate_smp2p_in 0 IRQ_TYPE_EDGE_RISING>;
+	};
 };
 
 &rmtfs_mem {
@@ -148,6 +159,20 @@
 	firmware-name = "qcom/sm7125/a52q/modem.mbn";
 
 	status = "okay";
+};
+
+/* SMP2P sleepstate entries on the ADSP edge, consumed by smp2p-sleepstate. */
+&{/smp2p-lpass} {
+	sleepstate_smp2p_out: sleepstate-out {
+		qcom,entry-name = "sleepstate";
+		#qcom,smem-state-cells = <1>;
+	};
+
+	sleepstate_smp2p_in: sleepstate-in {
+		qcom,entry-name = "sleepstate_see";
+		interrupt-controller;
+		#interrupt-cells = <2>;
+	};
 };
 
 &tlmm {
