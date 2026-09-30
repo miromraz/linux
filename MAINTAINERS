@@ -24408,6 +24408,7 @@ M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/i2c/samsung,s5kgw1p.yaml
+F:	drivers/media/i2c/s5kgw1p.c
 
 SAMSUNG S5KJN1 CAMERA DRIVER
 M:	Vladimir Zapolskiy <vladimir.zapolskiy@linaro.org>
