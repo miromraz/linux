@@ -76,6 +76,16 @@ config TYPEC_MUX_PTN36502
 	  Say Y or M if your system has a NXP PTN36502 Type-C redriver chip
 	  found on some devices with a Type-C port.
 
+config TYPEC_MUX_SM5714
+	tristate "Silicon Mitus SM5714 MUIC USB data switch driver"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Driver for the USB D+/D- data switch in the Silicon Mitus SM5714
+	  MUIC, used as a Type-C mode switch to force the data lines onto the
+	  USB path while the port operates as a host.
+	  If compiled as a module, the module will be named sm5714-muic.
+
 config TYPEC_MUX_TUSB1046
 	tristate "TI TUSB1046 Type-C crosspoint switch driver"
 	depends on I2C
