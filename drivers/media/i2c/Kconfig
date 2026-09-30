@@ -299,6 +299,17 @@ config VIDEO_IMX471
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx471.
 
+config VIDEO_IMX616
+	tristate "Sony IMX616 sensor support"
+	depends on OF
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the Sony
+	  IMX616 camera.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called imx616.
+
 config VIDEO_IMX678
 	tristate "Sony IMX678 sensor support"
 	depends on GPIOLIB
