@@ -299,6 +299,17 @@ config VIDEO_IMX471
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx471.
 
+config VIDEO_IMX616
+	tristate "Sony IMX616 sensor support"
+	depends on OF
+	select V4L2_CCI_I2C
+	help
+	  This is a Video4Linux2 sensor driver for the Sony
+	  IMX616 camera.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called imx616.
+
 config VIDEO_IMX678
 	tristate "Sony IMX678 sensor support"
 	depends on GPIOLIB
@@ -794,6 +805,17 @@ config VIDEO_S5C73M3
 	  This is a V4L2 sensor driver for Samsung S5C73M3
 	  8 Mpixel camera.
 
+config VIDEO_S5K3L6XX
+	tristate "Samsung S5K3L6XX sensor support"
+	depends on OF
+	select V4L2_CCI_I2C
+	help
+	  This is a V4L2 sensor driver for Samsung S5K3L6XX 13MP raw
+	  camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5k3l6xx.
+
 config VIDEO_S5K3M5
 	tristate "Samsung S5K3M5 sensor support"
 	select V4L2_CCI_I2C
@@ -815,6 +837,17 @@ config VIDEO_S5K6A3
 	help
 	  This is a V4L2 sensor driver for Samsung S5K6A3 raw
 	  camera sensor.
+
+config VIDEO_S5KGW1P
+	tristate "Samsung S5KGW1P sensor support"
+	depends on OF
+	select V4L2_CCI_I2C
+	help
+	  This is a V4L2 sensor driver for Samsung S5KGW1P 64MP raw
+	  camera sensor.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called s5kgw1p.
 
 config VIDEO_S5KJN1
 	tristate "Samsung S5KJN1 sensor support"

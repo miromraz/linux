@@ -24390,6 +24390,13 @@ S:	Supported
 F:	Documentation/devicetree/bindings/media/samsung,s5c73m3.yaml
 F:	drivers/media/i2c/s5c73m3/*
 
+SAMSUNG S5K3L6XX CAMERA DRIVER
+M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
+L:	linux-media@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/media/i2c/samsung,s5k3l6xx.yaml
+F:	drivers/media/i2c/s5k3l6xx.c
+
 SAMSUNG S5K3M5 CAMERA DRIVER
 M:	Vladimir Zapolskiy <vladimir.zapolskiy@linaro.org>
 S:	Maintained
@@ -24402,6 +24409,13 @@ M:	Sylwester Nawrocki <s.nawrocki@samsung.com>
 M:	Andrzej Hajda <andrzej.hajda@intel.com>
 S:	Supported
 F:	drivers/media/i2c/s5k5baf.c
+
+SAMSUNG S5KGW1P CAMERA DRIVER
+M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
+L:	linux-media@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/media/i2c/samsung,s5kgw1p.yaml
+F:	drivers/media/i2c/s5kgw1p.c
 
 SAMSUNG S5KJN1 CAMERA DRIVER
 M:	Vladimir Zapolskiy <vladimir.zapolskiy@linaro.org>
@@ -25588,6 +25602,13 @@ M:	Kate Hsuan <hpa@redhat.com>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	drivers/media/i2c/imx471.c
+
+SONY IMX616 SENSOR DRIVER
+M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
+L:	linux-media@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/media/i2c/sony,imx616.yaml
+F:	drivers/media/i2c/imx616.c
 
 SONY IMX678 SENSOR DRIVER
 M:	Jai Luthra <jai.luthra@ideasonboard.com>

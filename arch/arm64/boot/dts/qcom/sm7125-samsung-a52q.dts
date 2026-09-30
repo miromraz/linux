@@ -7,10 +7,12 @@
 
 /dts-v1/;
 
+#include <dt-bindings/clock/qcom,camcc-sc7180.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <dt-bindings/sound/qcom,q6asm.h>
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+#include <dt-bindings/media/video-interfaces.h>
 #include "sm7125-samsung-common.dtsi"
 
 / {
@@ -99,6 +101,115 @@
 		vdd-mic-bias-supply = <&vreg_bob>;
 
 		#sound-dai-cells = <1>;
+	};
+
+	/* S2MPB03 camera PMIC on a bit-banged bus (gpio25 SDA, gpio26 SCL) */
+	i2c-campmic {
+		compatible = "i2c-gpio";
+		sda-gpios = <&tlmm 25 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 26 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		pmic@56 {
+			compatible = "samsung,s2mpb03";
+			reg = <0x56>;
+
+			regulators {
+				vreg_cam_l1: ldo1 {	/* front/UW vdig */
+					regulator-min-microvolt = <1050000>;
+					regulator-max-microvolt = <1050000>;
+				};
+
+				vreg_cam_l2: ldo2 {	/* main vdig */
+					regulator-min-microvolt = <1100000>;
+					regulator-max-microvolt = <1100000>;
+				};
+
+				vreg_cam_l3: ldo3 {	/* vio, all sensors */
+					regulator-min-microvolt = <1800000>;
+					regulator-max-microvolt = <1800000>;
+				};
+
+				vreg_cam_l5: ldo5 {	/* main vana */
+					regulator-min-microvolt = <2800000>;
+					regulator-max-microvolt = <2800000>;
+				};
+
+				vreg_cam_l6: ldo6 {	/* front vana */
+					regulator-min-microvolt = <2800000>;
+					regulator-max-microvolt = <2800000>;
+				};
+
+				vreg_cam_l7: ldo7 {	/* main vaf (VCM) */
+					regulator-min-microvolt = <2800000>;
+					regulator-max-microvolt = <2800000>;
+				};
+			};
+		};
+	};
+
+	/* GPIO-switched camera LDOs */
+	vreg_cam0_avdd18: regulator-cam0-avdd18 {
+		compatible = "regulator-fixed";
+		regulator-name = "cam0_avdd_1p8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 63 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	vreg_cam2_vana: regulator-cam2-vana {
+		compatible = "regulator-fixed";
+		regulator-name = "cam2_vana";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 65 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	/*
+	 * The ultra-wide (S5K3L6XX) and macro (GC5035) cameras share CSIPHY3
+	 * through a gpio66 MIPI switch, modelled as a video-mux. gpio66 low
+	 * selects the ultra-wide (mux state 0), high the macro (state 1).
+	 */
+	cam_mipi_mux: mux-controller {
+		compatible = "gpio-mux";
+		#mux-control-cells = <0>;
+		mux-gpios = <&tlmm 66 GPIO_ACTIVE_HIGH>;
+	};
+
+	video-mux {
+		compatible = "video-mux";
+		mux-controls = <&cam_mipi_mux>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;	/* mux state 0: ultra-wide */
+			vmux_in_uw: endpoint {
+				remote-endpoint = <&cam_s5k3l6_ep>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;	/* mux state 1: macro */
+			/*
+			 * The macro camera is a GalaxyCore GC5035, which has
+			 * no mainline binding yet, so its sensor node and this
+			 * endpoint's remote are left to a later change.
+			 */
+			vmux_in_macro: endpoint {
+			};
+		};
+
+		port@2 {
+			reg = <2>;	/* output to CSIPHY3 */
+			vmux_out: endpoint {
+				remote-endpoint = <&csiphy3_ep>;
+			};
+		};
 	};
 };
 
@@ -457,4 +568,195 @@
 
 &vamacro {
 	status = "okay";
+};
+
+&camcc {
+	status = "okay";
+};
+
+&cci0 {
+	status = "okay";
+};
+
+/* main: Samsung S5KGW1P, 3-trio C-PHY, CSIPHY0, MCLK0 19.2 MHz */
+&cci0_i2c0 {
+	cam_main: camera@2d {
+		compatible = "samsung,s5kgw1p";
+		reg = <0x2d>;
+		vio-supply = <&vreg_cam_l3>;
+		vana-supply = <&vreg_cam_l5>;
+		vdig-supply = <&vreg_cam_l2>;
+		vaf-supply = <&vreg_cam_l7>;
+		vcustom-supply = <&vreg_cam0_avdd18>;
+		clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		clock-names = "mclk";
+		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		assigned-clock-rates = <19200000>;
+		reset-gpios = <&tlmm 30 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk0_default>;
+		pinctrl-names = "default";		orientation = <1>;
+		rotation = <270>;
+
+		port {
+			cam_s5kgw1p_ep: endpoint {
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <1 2 3>;
+				link-frequencies = /bits/ 64 <1000000000>;
+				remote-endpoint = <&csiphy0_ep>;
+			};
+		};
+	};
+};
+
+/* ultra-wide: Samsung S5K3L6XX, 4-lane D-PHY, CSIPHY3 via video-mux, MCLK2 */
+&cci0_i2c1 {
+	camera@2d {
+		compatible = "samsung,s5k3l6xx";
+		reg = <0x2d>;
+		vddio-supply = <&vreg_cam_l3>;
+		vdda-supply = <&vreg_cam2_vana>;
+		vddd-supply = <&vreg_cam_l1>;
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		clock-names = "mclk";
+		clock-frequency = <19200000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <19200000>;
+		rstn-gpios = <&tlmm 29 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk2_default>;
+		pinctrl-names = "default";		orientation = <1>;
+		rotation = <270>;
+
+		port {
+			cam_s5k3l6_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <259200000 480000000 595200000>;
+				remote-endpoint = <&vmux_in_uw>;
+			};
+		};
+	};
+};
+
+&cci1 {
+	status = "okay";
+};
+
+/* front: Sony IMX616, 4-lane D-PHY, CSIPHY2, MCLK4 24 MHz */
+&cci1_i2c0 {
+	camera@1a {
+		compatible = "sony,imx616";
+		reg = <0x1a>;
+		vio-supply = <&vreg_cam_l3>;
+		vana-supply = <&vreg_cam_l6>;
+		vdig-supply = <&vreg_cam_l1>;
+		clocks = <&camcc CAM_CC_MCLK4_CLK>;
+		clock-names = "mclk";
+		assigned-clocks = <&camcc CAM_CC_MCLK4_CLK>;
+		assigned-clock-rates = <24000000>;
+		reset-gpios = <&tlmm 21 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk4_default>;
+		pinctrl-names = "default";		orientation = <0>;
+		rotation = <90>;
+
+		port {
+			cam_imx616_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <516000000>;
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
+};
+
+&camss {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			csiphy0_ep: endpoint {
+				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
+				data-lanes = <0 1 2>;
+				remote-endpoint = <&cam_s5kgw1p_ep>;
+			};
+		};
+
+		port@2 {
+			reg = <2>;
+			csiphy2_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&cam_imx616_ep>;
+			};
+		};
+
+		port@3 {
+			reg = <3>;
+			csiphy3_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&vmux_out>;
+			};
+		};
+	};
+};
+
+&tlmm {
+	cam_mclk0_default: cam-mclk0-default-state {
+		pins = "gpio13";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk2_default: cam-mclk2-default-state {
+		pins = "gpio15";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk4_default: cam-mclk4-default-state {
+		pins = "gpio23";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};
+
+/*
+ * Main camera VCM (AK7374) and the module EEPROMs live on QUP i2c9: the
+ * main-module OTP at 0x50 and the front-module OTP at 0x51.
+ */
+&i2c9 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	cam_main_vcm: camera-lens@c {
+		compatible = "asahi-kasei,ak7374";
+		reg = <0x0c>;
+		vdd-supply = <&vreg_cam_l7>;
+		vio-supply = <&vreg_cam_l3>;
+	};
+
+	eeprom@50 {
+		compatible = "atmel,24c64";
+		reg = <0x50>;
+		pagesize = <32>;
+		read-only;
+		vcc-supply = <&vreg_cam_l3>;
+	};
+
+	eeprom@51 {
+		compatible = "onnn,n24s64b", "atmel,24c64";
+		reg = <0x51>;
+		pagesize = <32>;
+		read-only;
+		vcc-supply = <&vreg_cam_l3>;
+	};
+};
+
+/* Autofocus: the main sensor drives the AK7374 VCM. */
+&cam_main {
+	lens-focus = <&cam_main_vcm>;
 };
