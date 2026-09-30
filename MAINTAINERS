@@ -24361,6 +24361,7 @@ M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
 L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/media/i2c/samsung,ois-mcu.yaml
+F:	drivers/media/i2c/samsung-ois-mcu.c
 
 SAMSUNG S2MPB03 CAMERA PMIC REGULATOR DRIVER
 M:	Miroslav Mráz <miroslav.mraz@techmania.cz>
