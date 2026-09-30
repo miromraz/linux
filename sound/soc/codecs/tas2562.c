@@ -52,6 +52,7 @@ struct tas2562_data {
 	struct i2c_client *client;
 	int v_sense_slot;
 	int i_sense_slot;
+	int rx_slot_width;
 	int volume_lvl;
 	int model_id;
 	bool dac_powered;
@@ -397,11 +398,38 @@ static int tas2562_mute(struct snd_soc_dai *dai, int mute, int direction)
 static int tas2562_codec_probe(struct snd_soc_component *component)
 {
 	struct tas2562_data *tas2562 = snd_soc_component_get_drvdata(component);
+	int rxlen;
+	int ret;
 
 	tas2562->component = component;
 
 	if (tas2562->sdz_gpio)
 		gpiod_set_value_cansleep(tas2562->sdz_gpio, 1);
+
+	/*
+	 * The RX slot length defaults to 32 bits. On links where the frame
+	 * only carries narrower slots (e.g. a 16-bit I2S MI2S frame shared by
+	 * two amplifiers) the mismatch triggers a TDM clock error, so allow
+	 * the per-device slot length to be pinned from DT.
+	 */
+	switch (tas2562->rx_slot_width) {
+	case 16:
+		rxlen = TAS2562_TDM_CFG2_RXLEN_16B;
+		break;
+	case 24:
+		rxlen = TAS2562_TDM_CFG2_RXLEN_24B;
+		break;
+	case 32:
+		rxlen = TAS2562_TDM_CFG2_RXLEN_32B;
+		break;
+	default:
+		return 0;
+	}
+
+	ret = snd_soc_component_update_bits(component, TAS2562_TDM_CFG2,
+					    TAS2562_TDM_CFG2_RXLEN_MASK, rxlen);
+	if (ret < 0)
+		return ret;
 
 	return 0;
 }
@@ -735,6 +763,18 @@ static int tas2562_parse_dt(struct tas2562_data *tas2562)
 
 	if (tas2562->v_sense_slot < tas2562->i_sense_slot) {
 		dev_err(dev, "Vsense slot must be greater than Isense slot\n");
+		return -EINVAL;
+	}
+
+	ret = fwnode_property_read_u32(dev->fwnode, "ti,rx-slot-width",
+				       &tas2562->rx_slot_width);
+	if (ret) {
+		tas2562->rx_slot_width = 0;
+	} else if (tas2562->rx_slot_width != 16 &&
+		   tas2562->rx_slot_width != 24 &&
+		   tas2562->rx_slot_width != 32) {
+		dev_err(dev, "Invalid ti,rx-slot-width %d\n",
+			tas2562->rx_slot_width);
 		return -EINVAL;
 	}
 
