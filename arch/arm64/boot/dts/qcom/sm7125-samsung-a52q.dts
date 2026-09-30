@@ -443,3 +443,40 @@
 		bias-disable;
 	};
 };
+
+/*
+ * Main camera VCM (AK7374) and the module EEPROMs live on QUP i2c9: the
+ * main-module OTP at 0x50 and the front-module OTP at 0x51.
+ */
+&i2c9 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	cam_main_vcm: camera-lens@c {
+		compatible = "asahi-kasei,ak7374";
+		reg = <0x0c>;
+		vdd-supply = <&vreg_cam_l7>;
+		vio-supply = <&vreg_cam_l3>;
+	};
+
+	eeprom@50 {
+		compatible = "atmel,24c64";
+		reg = <0x50>;
+		pagesize = <32>;
+		read-only;
+		vcc-supply = <&vreg_cam_l3>;
+	};
+
+	eeprom@51 {
+		compatible = "onnn,n24s64b", "atmel,24c64";
+		reg = <0x51>;
+		pagesize = <32>;
+		read-only;
+		vcc-supply = <&vreg_cam_l3>;
+	};
+};
+
+/* Autofocus: the main sensor drives the AK7374 VCM. */
+&cam_main {
+	lens-focus = <&cam_main_vcm>;
+};
