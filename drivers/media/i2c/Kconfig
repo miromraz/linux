@@ -949,6 +949,15 @@ config VIDEO_DW9807_VCM
 	  capability. This is designed for linear control of
 	  voice coil motors, controlled via I2C serial interface.
 
+config VIDEO_SAMSUNG_OIS_MCU
+	tristate "Samsung OIS MCU support"
+	depends on OF
+	help
+	  This is a driver for the Samsung camera optical image stabilisation
+	  (OIS) MCU, an STM32G microcontroller running Samsung OIS firmware
+	  controlled via I2C. It stabilises a main camera module and is powered
+	  through runtime PM as a supplier of the image sensor it serves.
+
 endif
 
 menu "Flash devices"
