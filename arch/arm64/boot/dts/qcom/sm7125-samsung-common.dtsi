@@ -481,6 +481,13 @@
 
 &remoteproc_adsp {
 	memory-region = <&adsp_mem>;
+
+	glink-edge {
+		fastrpc {
+			/* the sensors (SEE) client runs in the unsigned PD */
+			qcom,non-secure-domain;
+		};
+	};
 };
 
 &sdhc_2 {
