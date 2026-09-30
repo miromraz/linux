@@ -111,14 +111,17 @@ config TYPEC_WUSB3801
 	  module will be called wusb3801.ko.
 
 config TYPEC_SM5714_CC
-	tristate "Silicon Mitus SM5714 Type-C attach detection"
-	depends on I2C && USB_ROLE_SWITCH && REGULATOR
+	tristate "Silicon Mitus SM5714 Type-C CC detection driver"
+	depends on I2C
+	depends on USB_ROLE_SWITCH
+	depends on REGULATOR
 	select REGMAP_I2C
 	help
 	  Say Y or M here if your system uses the CC detection block of the
-	  Silicon Mitus SM5714 combo PMIC to detect Type-C attach and detach.
-	  The driver switches the USB controller between device and host role
-	  and powers VBUS while in host role. USB Power Delivery is not handled.
+	  Silicon Mitus SM5714 combo PMIC. The driver registers a USB Type-C
+	  port, reports partner attach and detach, switches the USB controller
+	  between device and host role, drives the mode mux and powers VBUS
+	  while acting as a host. USB Power Delivery is not handled.
 
 	  If you choose to build this driver as a module, it will be called
 	  sm5714-cc.
