@@ -52,6 +52,14 @@ properties:
     $ref: /schemas/types.yaml#/definitions/uint32
     description: TDM TX current sense time slot.
 
+  ti,rx-slot-width:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [16, 24, 32]
+    description:
+      RX (playback) slot length in bits. Defaults to the hardware reset value
+      of 32 bits when absent. Set this to match the frame when the amplifier
+      shares an I2S/TDM link whose slots are narrower than 32 bits.
+
   '#sound-dai-cells':
     # The codec has a single DAI, the #sound-dai-cells=<1>; case is left in for backward
     # compatibility but is deprecated.
