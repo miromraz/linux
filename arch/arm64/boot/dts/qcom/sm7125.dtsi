@@ -14,3 +14,42 @@
 &cpu5 { compatible = "qcom,kryo465"; };
 &cpu6 { compatible = "qcom,kryo465"; };
 &cpu7 { compatible = "qcom,kryo465"; };
+
+/*
+ * The Adreno 618 on SM7125 (atoll) is fused to GPU speed-bin 159, which the
+ * driver maps to opp-supported-hw bit 3 (0x08). Add the NOM_L1 750 MHz top
+ * OPP this bin tops out at and extend the shared lower OPPs to it. The
+ * TURBO/TURBO_L1 800/825 MHz OPPs stay sc7180-only (no bit 3 set).
+ */
+&gpu_opp_table {
+	opp-750000000 {
+		opp-hz = /bits/ 64 <750000000>;
+		opp-level = <RPMH_REGULATOR_LEVEL_NOM_L1>;
+		opp-peak-kBps = <7216000>;
+		opp-supported-hw = <0x08>;
+	};
+
+	opp-650000000 {
+		opp-supported-hw = <0x0f>;
+	};
+
+	opp-565000000 {
+		opp-supported-hw = <0x0f>;
+	};
+
+	opp-430000000 {
+		opp-supported-hw = <0x0f>;
+	};
+
+	opp-355000000 {
+		opp-supported-hw = <0x0f>;
+	};
+
+	opp-267000000 {
+		opp-supported-hw = <0x0f>;
+	};
+
+	opp-180000000 {
+		opp-supported-hw = <0x0f>;
+	};
+};
