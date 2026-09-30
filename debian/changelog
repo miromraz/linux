@@ -1,0 +1,5 @@
+linux-a52q-mainline (7.3.0-rc5-sm7125-1) trixie; urgency=low
+
+  * Custom built Linux kernel (mainline a52q).
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Tue, 30 Sep 2026 12:00:00 +0200
