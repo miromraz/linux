@@ -30,18 +30,20 @@ properties:
     description:
       VBUS regulator, enabled while the port operates as a host (source).
 
-  usb-role-switch:
-    $ref: /schemas/types.yaml#/definitions/phandle
+  connector:
+    $ref: /schemas/connector/usb-connector.yaml#
     description:
-      Phandle to the USB role switch (the USB controller) that is toggled
-      between device and host role on CC attach.
+      Properties for the USB Type-C connector. The connector's port node is
+      linked, through the ports graph, to the USB role switch (the USB
+      controller) and to the mode mux that route USB data.
+    unevaluatedProperties: false
 
 required:
   - compatible
   - reg
   - interrupts
   - vbus-supply
-  - usb-role-switch
+  - connector
 
 additionalProperties: false
 
@@ -58,7 +60,35 @@ examples:
             reg = <0x33>;
             interrupts-extended = <&tlmm 104 IRQ_TYPE_LEVEL_LOW>;
             vbus-supply = <&vreg_usb_otg_vbus>;
-            usb-role-switch = <&usb_dwc3>;
+
+            connector {
+                compatible = "usb-c-connector";
+                power-role = "dual";
+                data-role = "dual";
+                try-power-role = "sink";
+                typec-power-opmode = "default";
+
+                ports {
+                    #address-cells = <1>;
+                    #size-cells = <0>;
+
+                    port@0 {
+                        reg = <0>;
+                        #address-cells = <1>;
+                        #size-cells = <0>;
+
+                        endpoint@0 {
+                            reg = <0>;
+                            remote-endpoint = <&usb_hs_ep>;
+                        };
+
+                        endpoint@1 {
+                            reg = <1>;
+                            remote-endpoint = <&usb_mux_ep>;
+                        };
+                    };
+                };
+            };
         };
     };
 ...
