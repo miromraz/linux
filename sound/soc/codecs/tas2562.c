@@ -307,6 +307,7 @@ static int tas2562_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	struct snd_soc_component *component = dai->component;
 	struct tas2562_data *tas2562 = snd_soc_component_get_drvdata(component);
 	u8 asi_cfg_1 = 0;
+	u8 frame_start = TAS2562_TDM_CFG0_FRAME_START_HIGH_TO_LOW;
 	u8 tdm_rx_start_slot = 0;
 	int ret;
 
@@ -317,10 +318,23 @@ static int tas2562_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	case SND_SOC_DAIFMT_IB_NF:
 		asi_cfg_1 |= TAS2562_TDM_CFG1_RX_FALLING;
 		break;
+	case SND_SOC_DAIFMT_NB_IF:
+		frame_start = 0;
+		break;
+	case SND_SOC_DAIFMT_IB_IF:
+		asi_cfg_1 |= TAS2562_TDM_CFG1_RX_FALLING;
+		frame_start = 0;
+		break;
 	default:
 		dev_err(tas2562->dev, "ASI format Inverse is not found\n");
 		return -EINVAL;
 	}
+
+	ret = snd_soc_component_update_bits(component, TAS2562_TDM_CFG0,
+					    TAS2562_TDM_CFG0_FRAME_START_MASK,
+					    frame_start);
+	if (ret < 0)
+		return ret;
 
 	ret = snd_soc_component_update_bits(component, TAS2562_TDM_CFG1,
 					    TAS2562_TDM_CFG1_RX_EDGE_MASK,
