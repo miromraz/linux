@@ -498,6 +498,10 @@
 	};
 };
 
+&remoteproc_cdsp {
+	memory-region = <&cdsp_mem>;
+};
+
 &sdhc_2 {
 	vmmc-supply = <&vreg_l9c_2p95>;
 	vqmmc-supply = <&vreg_l6c_3p0>;
