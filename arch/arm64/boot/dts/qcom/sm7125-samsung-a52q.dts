@@ -132,6 +132,11 @@
 					regulator-max-microvolt = <1800000>;
 				};
 
+				vreg_cam_l4: ldo4 {	/* depth/macro vdig */
+					regulator-min-microvolt = <1200000>;
+					regulator-max-microvolt = <1200000>;
+				};
+
 				vreg_cam_l5: ldo5 {	/* main vana */
 					regulator-min-microvolt = <2800000>;
 					regulator-max-microvolt = <2800000>;
@@ -169,6 +174,16 @@
 		enable-active-high;
 	};
 
+	/* avdd for both GC5035 modules (depth and macro), shared gpio64 rail */
+	vreg_cam3_vana: regulator-cam3-vana {
+		compatible = "regulator-fixed";
+		regulator-name = "cam3_vana";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 64 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
 	/*
 	 * The ultra-wide (S5K3L6XX) and macro (GC5035) cameras share CSIPHY3
 	 * through a gpio66 MIPI switch, modelled as a video-mux. gpio66 low
@@ -195,12 +210,8 @@
 
 		port@1 {
 			reg = <1>;	/* mux state 1: macro */
-			/*
-			 * The macro camera is a GalaxyCore GC5035, which has
-			 * no mainline binding yet, so its sensor node and this
-			 * endpoint's remote are left to a later change.
-			 */
 			vmux_in_macro: endpoint {
+				remote-endpoint = <&cam_gc5035_macro_ep>;
 			};
 		};
 
@@ -694,6 +705,65 @@
 			};
 		};
 	};
+
+	/* depth: GalaxyCore GC5035, 2-lane D-PHY, CSIPHY1, MCLK1 24 MHz */
+	camera@37 {
+		compatible = "galaxycore,gc5035";
+		reg = <0x37>;
+		iovdd-supply = <&vreg_cam_l3>;
+		dvdd12-supply = <&vreg_cam_l4>;
+		avdd28-supply = <&vreg_cam3_vana>;
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		clock-names = "mclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clock-rates = <24000000>;
+		resetb-gpios = <&tlmm 42 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk1_default>;
+		pinctrl-names = "default";
+		orientation = <1>;
+		rotation = <270>;
+
+		port {
+			cam_gc5035_depth_ep: endpoint {
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <438000000>;
+				remote-endpoint = <&csiphy1_ep>;
+			};
+		};
+	};
+
+	/*
+	 * macro: GalaxyCore GC5035, 2-lane D-PHY, MCLK3 24 MHz. Shares CSIPHY3
+	 * with the ultra-wide camera through the gpio66 MIPI switch (video-mux
+	 * input 1). "label" gives it a distinct entity name for its own tuning.
+	 */
+	camera@3f {
+		compatible = "galaxycore,gc5035";
+		reg = <0x3f>;
+		label = "gc5035_macro";
+		iovdd-supply = <&vreg_cam_l3>;
+		dvdd12-supply = <&vreg_cam_l4>;
+		avdd28-supply = <&vreg_cam3_vana>;
+		clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		clock-names = "mclk";
+		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		assigned-clock-rates = <24000000>;
+		resetb-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&cam_mclk3_default>;
+		pinctrl-names = "default";
+		orientation = <1>;
+		rotation = <270>;
+
+		port {
+			cam_gc5035_macro_ep: endpoint {
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <438000000>;
+				remote-endpoint = <&vmux_in_macro>;
+			};
+		};
+	};
 };
 
 &camss {
@@ -709,6 +779,14 @@
 				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
 				data-lanes = <0 1 2>;
 				remote-endpoint = <&cam_s5kgw1p_ep>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			csiphy1_ep: endpoint {
+				data-lanes = <0 1>;
+				remote-endpoint = <&cam_gc5035_depth_ep>;
 			};
 		};
 
@@ -738,8 +816,22 @@
 		bias-disable;
 	};
 
+	cam_mclk1_default: cam-mclk1-default-state {
+		pins = "gpio14";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
 	cam_mclk2_default: cam-mclk2-default-state {
 		pins = "gpio15";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk3_default: cam-mclk3-default-state {
+		pins = "gpio16";
 		function = "cam_mclk";
 		drive-strength = <2>;
 		bias-disable;
