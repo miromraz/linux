@@ -5261,6 +5261,48 @@ void camss_buf_done(struct camss *camss, int hw_id, int port_id)
 }
 
 /*
+ * camss_is_own_subdev - Tell whether a subdev belongs to CAMSS
+ * @camss: CAMSS device
+ * @sd: The subdev to test
+ *
+ * CAMSS registers a fixed set of subdevs for its internal blocks (CSIPHY,
+ * TPG, CSID, ISPIF and VFE lines). Return true if @sd is one of them. This
+ * lets a pipeline walk tell CAMSS' own subdevs apart from external ones (a
+ * sensor, a bridge or a video mux) regardless of how the drivers are built
+ * (module vs built-in). The subdevs are enumerated in the same way as in
+ * camss_register_entities().
+ */
+bool camss_is_own_subdev(struct camss *camss, struct v4l2_subdev *sd)
+{
+	unsigned int i, j;
+
+	for (i = 0; i < camss->res->csiphy_num; i++)
+		if (sd == &camss->csiphy[i].subdev)
+			return true;
+
+	if (camss->tpg)
+		for (i = 0; i < camss->res->tpg_num; i++)
+			if (sd == &camss->tpg[i].subdev)
+				return true;
+
+	for (i = 0; i < camss->res->csid_num; i++)
+		if (sd == &camss->csid[i].subdev)
+			return true;
+
+	if (camss->ispif)
+		for (i = 0; i < camss->ispif->line_num; i++)
+			if (sd == &camss->ispif->line[i].subdev)
+				return true;
+
+	for (i = 0; i < camss->res->vfe_num; i++)
+		for (j = 0; j < camss->vfe[i].res->line_num; j++)
+			if (sd == &camss->vfe[i].line[j].subdev)
+				return true;
+
+	return false;
+}
+
+/*
  * camss_register_entities - Register subdev nodes and create links
  * @camss: CAMSS device
  *
