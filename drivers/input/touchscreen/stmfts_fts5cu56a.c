@@ -695,7 +695,7 @@ static void stmfts_power_off(void *data)
 	u8 dis_scan_cmds[3] = { 0xA0, 0x00, 0x00 };
 
 	err = i2c_master_send(sdata->client, dis_scan_cmds, 3);
-	if (err)
+	if (err < 0)
 		dev_warn(&sdata->client->dev,
 			 "failed to disable touchscreen: %d\n", err);
 
