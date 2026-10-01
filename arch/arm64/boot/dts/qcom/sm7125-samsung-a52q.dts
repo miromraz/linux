@@ -405,6 +405,12 @@
 	status = "okay";
 };
 
+&remoteproc_cdsp {
+	firmware-name = "qcom/sm7125/a52q/cdsp.mbn";
+
+	status = "okay";
+};
+
 /* SMP2P sleepstate entries on the ADSP edge, consumed by smp2p-sleepstate. */
 &{/smp2p-lpass} {
 	sleepstate_smp2p_out: sleepstate-out {
