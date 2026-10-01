@@ -2,18 +2,22 @@
 # Copyright (c) 2019 MediaTek Inc.
 %YAML 1.2
 ---
-$id: http://devicetree.org/schemas/media/i2c/gc5035.yaml
+$id: http://devicetree.org/schemas/media/i2c/galaxycore,gc5035.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Galaxycore Inc. GC5035 CMOS Sensor Device Tree Bindings
+title: Galaxycore Inc. GC5035 CMOS Sensor
 
 maintainers:
   - Tomasz Figa <tfiga@chromium.org>
+  - Miroslav Mráz <miroslav.mraz@techmania.cz>
 
 description: |-
   The Galaxycore Inc. GC5035 is a 5 megapixel, 1/5 inch CMOS 10-bit Bayer image
   sensor that delivers 2592x1944 at 30fps. This chip is programmable through
   an I2C interface. The image output is available via a MIPI CSI-2 interface.
+
+allOf:
+  - $ref: /schemas/media/video-interface-devices.yaml#
 
 properties:
   compatible:
@@ -29,11 +33,17 @@ properties:
     description:
       Input clock for the sensor.
     items:
-      - const: inclk
+      - const: mclk
 
   clock-frequency:
     description:
-      Frequency of the inclk clock in Hz.
+      Frequency of the mclk clock in Hz.
+
+  label:
+    description:
+      Identifier to distinguish between multiple GC5035 modules fitted to the
+      same board (for example a macro and a depth camera). Userspace uses it to
+      select per-module tuning.
 
   iovdd-supply:
     description:
@@ -65,7 +75,7 @@ properties:
     description:
       A node containing an output port node with an endpoint definition
       as documented in
-      Documentation/devicetree/bindings/media/video-interfaces.txt
+      Documentation/devicetree/bindings/media/video-interfaces.yaml
 
     properties:
       endpoint:
@@ -99,10 +109,9 @@ required:
   - avdd28-supply
   - dvdd12-supply
   - resetb-gpios
-  - pwdn-gpios
   - port
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |
@@ -116,13 +125,13 @@ examples:
             compatible = "galaxycore,gc5035";
             reg = <0x10>;
 
-            reset-gpios = <&pio 111 GPIO_ACTIVE_LOW>;
+            resetb-gpios = <&pio 111 GPIO_ACTIVE_LOW>;
             pwdn-gpios = <&pio 112 GPIO_ACTIVE_LOW>;
             pinctrl-names = "default";
             pinctrl-0 = <&clk_24m_cam>;
 
             clocks = <&cam_osc>;
-            clock-names = "inclk";
+            clock-names = "mclk";
             clock-frequency = <24000000>;
 
             avdd28-supply = <&mt6358_vcama2_reg>;
@@ -139,4 +148,3 @@ examples:
         };
     };
 ...
-
