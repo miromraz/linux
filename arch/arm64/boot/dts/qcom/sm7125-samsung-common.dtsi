@@ -381,6 +381,14 @@
 	};
 };
 
+&gpi_dma0 {
+	status = "okay";
+};
+
+&gpi_dma1 {
+	status = "okay";
+};
+
 &ipa {
 	memory-region = <&ipa_fw_mem>;
 };
