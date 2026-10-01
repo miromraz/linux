@@ -4813,12 +4813,16 @@ struct media_pad *camss_find_sensor_pad(struct media_entity *entity)
 	struct media_pad *pad;
 
 	while (1) {
-		pad = &entity->pads[0];
-		if (!(pad->flags & MEDIA_PAD_FL_SINK))
-			return NULL;
-
-		pad = media_pad_remote_pad_first(pad);
-		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+		/*
+		 * Follow the enabled sink link rather than pads[0]: an
+		 * intermediate entity such as a video mux has several sink pads
+		 * and only the one for the selected input is enabled, so keying
+		 * on pads[0] would miss the active sensor (and return NULL for
+		 * any input other than the first). For an entity with a single
+		 * sink pad this resolves to the same pad as before.
+		 */
+		pad = media_entity_remote_source_pad_unique(entity);
+		if (IS_ERR(pad) || !is_media_entity_v4l2_subdev(pad->entity))
 			return NULL;
 
 		entity = pad->entity;
