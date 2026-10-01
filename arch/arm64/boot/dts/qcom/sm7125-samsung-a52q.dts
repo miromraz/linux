@@ -329,7 +329,7 @@
 	clock-frequency = <400000>;
 
 	touchscreen@49 {
-		compatible = "st,stmfts_fts5cu56a";
+		compatible = "st,fts5cu56a";
 		reg = <0x49>;
 
 		pinctrl-names = "default";
