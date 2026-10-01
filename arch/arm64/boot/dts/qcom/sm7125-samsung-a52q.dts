@@ -213,6 +213,21 @@
 	};
 };
 
+&q6afedai {
+	dai@113 {
+		reg = <RX_CODEC_DMA_RX_0>;
+	};
+
+	dai@120 {
+		reg = <TX_CODEC_DMA_TX_3>;
+	};
+
+	dai@127 {
+		reg = <QUINARY_MI2S_RX>;
+		qcom,sd-lines = <0>;
+	};
+};
+
 &q6asmdai {
 	dai@0 {
 		reg = <0>;
