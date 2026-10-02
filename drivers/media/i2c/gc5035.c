@@ -185,6 +185,7 @@ struct gc5035 {
 	struct v4l2_ctrl *hblank;
 	struct v4l2_ctrl *vblank;
 
+	u8 num_data_lanes;
 	bool otp_read;
 	u8 otp_id[GC5035_OTP_ID_SIZE];
 	struct gc5035_dpc dpc;
@@ -1551,12 +1552,24 @@ static const struct v4l2_subdev_video_ops gc5035_video_ops = {
 	.s_stream = gc5035_s_stream,
 };
 
+static int gc5035_get_mbus_config(struct v4l2_subdev *sd, unsigned int pad,
+				  struct v4l2_mbus_config *config)
+{
+	struct gc5035 *gc5035 = to_gc5035(sd);
+
+	config->type = V4L2_MBUS_CSI2_DPHY;
+	config->bus.mipi_csi2.num_data_lanes = gc5035->num_data_lanes;
+
+	return 0;
+}
+
 static const struct v4l2_subdev_pad_ops gc5035_pad_ops = {
 	.enum_mbus_code = gc5035_enum_mbus_code,
 	.enum_frame_size = gc5035_enum_frame_sizes,
 	.get_fmt = gc5035_get_fmt,
 	.set_fmt = gc5035_set_fmt,
 	.get_selection = gc5035_get_selection,
+	.get_mbus_config = gc5035_get_mbus_config,
 };
 
 static const struct v4l2_subdev_ops gc5035_subdev_ops = {
@@ -1832,6 +1845,8 @@ static int gc5035_get_hwcfg(struct gc5035 *gc5035)
 	ret = v4l2_fwnode_endpoint_alloc_parse(ep, &bus_cfg);
 	if (ret)
 		goto out;
+
+	gc5035->num_data_lanes = bus_cfg.bus.mipi_csi2.num_data_lanes;
 
 	dev_dbg(dev, "num of link freqs: %d", bus_cfg.nr_of_link_frequencies);
 	if (!bus_cfg.nr_of_link_frequencies) {

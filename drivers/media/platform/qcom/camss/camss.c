@@ -4833,6 +4833,48 @@ struct media_pad *camss_find_sensor_pad(struct media_entity *entity)
 }
 
 /**
+ * camss_get_num_lanes - CSI-2 data lane count of the active sensor
+ * @entity: Media entity in the current pipeline
+ * @max_lanes: Number of data lanes wired to the CAMSS port (CSIPHY DT endpoint)
+ *
+ * A board MIPI mux can route a sensor with fewer data lanes than the shared
+ * CSIPHY port declares (e.g. the a52q macro camera shares a 4-lane port with
+ * the ultra-wide sensor but drives only 2 lanes). Query the active sensor's
+ * media bus config and return its data lane count, capped to @max_lanes.
+ *
+ * Fall back to @max_lanes (the CSIPHY DT endpoint value) when the sensor does
+ * not implement .get_mbus_config or does not report a CSI-2 lane count.
+ *
+ * Return the number of data lanes to program for the current stream.
+ */
+unsigned int camss_get_num_lanes(struct media_entity *entity,
+				 unsigned int max_lanes)
+{
+	struct media_pad *sensor_pad = camss_find_sensor_pad(entity);
+	struct v4l2_mbus_config mbus = { 0 };
+	struct v4l2_subdev *sensor;
+	int ret;
+
+	if (!sensor_pad)
+		return max_lanes;
+
+	sensor = media_entity_to_v4l2_subdev(sensor_pad->entity);
+	ret = v4l2_subdev_call(sensor, pad, get_mbus_config,
+			       sensor_pad->index, &mbus);
+	if (ret)
+		return max_lanes;
+
+	if (mbus.type != V4L2_MBUS_CSI2_DPHY &&
+	    mbus.type != V4L2_MBUS_CSI2_CPHY)
+		return max_lanes;
+
+	if (!mbus.bus.mipi_csi2.num_data_lanes)
+		return max_lanes;
+
+	return min_t(unsigned int, mbus.bus.mipi_csi2.num_data_lanes, max_lanes);
+}
+
+/**
  * camss_get_link_freq - Get link frequency from sensor
  * @entity: Media entity in the current pipeline
  * @bpp: Number of bits per pixel for the current format

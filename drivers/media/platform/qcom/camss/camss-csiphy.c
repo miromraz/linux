@@ -266,19 +266,32 @@ static int csiphy_set_power(struct v4l2_subdev *sd, int on)
 static int csiphy_stream_on(struct csiphy_device *csiphy)
 {
 	struct csiphy_config *cfg = &csiphy->cfg;
+	struct csiphy_lanes_cfg *lane_cfg = &cfg->csi2->lane_cfg;
+	int dt_num_data = lane_cfg->num_data;
 	s64 link_freq;
-	u8 lane_mask = csiphy->res->hw_ops->get_lane_mask(&cfg->csi2->lane_cfg);
+	u8 lane_mask;
 	u8 bpp = csiphy_get_bpp(csiphy->res->formats->formats, csiphy->res->formats->nformats,
 				csiphy->fmt[MSM_CSIPHY_PAD_SINK].code);
-	u8 num_lanes = csiphy->cfg.csi2->lane_cfg.num_data;
-	const bool cphy = (csiphy->cfg.csi2->lane_cfg.phy_cfg == V4L2_MBUS_CSI2_CPHY);
+	u8 num_lanes;
+	const bool cphy = (lane_cfg->phy_cfg == V4L2_MBUS_CSI2_CPHY);
 	u8 val;
+
+	/*
+	 * A board MIPI mux can select a sensor with fewer data lanes than this
+	 * port declares; stream with the active sensor's lane count and the
+	 * first N lanes of the port's lane map, restoring the DT value before
+	 * returning.
+	 */
+	lane_cfg->num_data = camss_get_num_lanes(&csiphy->subdev.entity, dt_num_data);
+	num_lanes = lane_cfg->num_data;
+	lane_mask = csiphy->res->hw_ops->get_lane_mask(lane_cfg);
 
 	link_freq = camss_get_link_freq(&csiphy->subdev.entity, bpp, num_lanes, cphy);
 
 	if (link_freq < 0) {
 		dev_err(csiphy->camss->dev,
 			"Cannot get CSI2 transmitter's link frequency\n");
+		lane_cfg->num_data = dt_num_data;
 		return -EINVAL;
 	}
 
@@ -298,6 +311,8 @@ static int csiphy_stream_on(struct csiphy_device *csiphy)
 	}
 
 	csiphy->res->hw_ops->lanes_enable(csiphy, cfg, link_freq, lane_mask);
+
+	lane_cfg->num_data = dt_num_data;
 
 	return 0;
 }
