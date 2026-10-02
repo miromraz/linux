@@ -556,6 +556,20 @@ int vfe_enable_output_v2(struct vfe_line *line)
 		ops->reg_update(vfe, line->id);
 	}
 
+	/*
+	 * vfe_wm_start() armed the write master, but its image address is only
+	 * programmed by vfe_wm_update() once a buffer is pulled from the
+	 * pending list. If none was available, disarm the WM again instead of
+	 * leaving it enabled pointing at address 0 - that would fault the IFE
+	 * SMMU context bank on the first frame and wedge all further capture.
+	 */
+	if (!output->gen2.active_num) {
+		ops->vfe_wm_stop(vfe, output->wm_idx[0]);
+		output->state = VFE_OUTPUT_RESERVED;
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		return -ENOBUFS;
+	}
+
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	return 0;
@@ -1202,6 +1216,16 @@ int vfe_flush_buffers(struct camss_video *vid,
 		vb2_buffer_done(&output->last_buffer->vb.vb2_buf, state);
 		output->last_buffer = NULL;
 	}
+
+	/*
+	 * Fully reset the output state so no stale buffer pointer or active
+	 * count survives into the next stream-on (e.g. after an abnormal
+	 * teardown), which would otherwise be programmed into the write
+	 * master as a freed/zero DMA address.
+	 */
+	output->buf[0] = NULL;
+	output->buf[1] = NULL;
+	output->gen2.active_num = 0;
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 

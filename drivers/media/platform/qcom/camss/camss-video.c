@@ -327,11 +327,16 @@ static void video_stop_streaming(struct vb2_queue *q)
 		subdev = media_entity_to_v4l2_subdev(entity);
 
 		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
-
-		if (ret) {
-			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
-			return;
-		}
+		if (ret)
+			dev_err(video->camss->dev,
+				"Video pipeline stop failed: %d\n", ret);
+		/*
+		 * Keep walking and always reach flush_buffers() below even on
+		 * error: returning early would leak the queued buffers back
+		 * into the driver's output lists, so the next stream-on would
+		 * program a stale/freed buffer address into the write master
+		 * and fault the IFE SMMU context bank.
+		 */
 
 		/*
 		 * Stop at the first external subdev: it stops its own
@@ -719,6 +724,11 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 	q->io_modes = VB2_DMABUF | VB2_MMAP | VB2_READ;
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
 	q->buf_struct_size = sizeof(struct camss_buffer);
+	/*
+	 * The VFE write master needs a buffer address before it is armed, so
+	 * only start streaming once at least one buffer has been queued.
+	 */
+	q->min_queued_buffers = 1;
 	q->dev = video->camss->dev;
 	q->lock = &video->q_lock;
 	ret = vb2_queue_init(q);
