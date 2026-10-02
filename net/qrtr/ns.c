@@ -5,6 +5,7 @@
  * Copyright (c) 2020, Linaro Ltd.
  */
 
+#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/qrtr.h>
 #include <linux/workqueue.h>
@@ -226,14 +227,25 @@ static int announce_servers(struct sockaddr_qrtr *sq)
 
 	/* Announce the list of servers registered in this node */
 	xa_for_each(&node->servers, index, srv) {
-		ret = service_announce_new(sq, srv);
-		if (ret < 0) {
-			if (ret == -ENODEV)
-				continue;
+		int tries = 0;
 
-			pr_err("failed to announce new service\n");
-			return ret;
-		}
+		/*
+		 * A remote's HELLO can be handled before our own HELLO to it has
+		 * gone out, and until then qrtr_node_enqueue() returns -EAGAIN.
+		 * Retry briefly instead of giving up: a peer that misses these
+		 * announcements never learns about our services (e.g. a modem
+		 * then stalls waiting for rmtfs and its watchdog fires).
+		 */
+		do {
+			ret = service_announce_new(sq, srv);
+			if (ret != -EAGAIN)
+				break;
+			msleep(20);
+		} while (++tries < 50);
+
+		if (ret < 0 && ret != -ENODEV)
+			pr_err("failed to announce service %u:%u to node %u: %d\n",
+			       srv->service, srv->instance, sq->sq_node, ret);
 	}
 	return 0;
 }
