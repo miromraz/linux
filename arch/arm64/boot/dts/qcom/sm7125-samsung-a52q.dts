@@ -393,6 +393,19 @@
 	status = "okay";
 };
 
+/*
+ * SSC sensor VDDIO ("sensor_vddio" in the ADSP/SEE registry). Powers the
+ * LSM6DSO accel/gyro, AK0991x magnetometer and STK31610 ALS that the SEE
+ * framework probes on the SSC QUP buses. SEE assumes this rail is already
+ * on (the sensors have no AP-side driver to enable it); without it the
+ * sensor bus transactions hang and the sns_thread_mana watchdog resets the
+ * ADSP ~5s after boot. Samsung's downstream keeps it always-on as
+ * "Sensor Vdd" (pm6150l_l8, L8C) in atoll-sec-a52q-r00.dtsi.
+ */
+&vreg_l8c_1p8 {
+	regulator-always-on;
+};
+
 &remoteproc_adsp {
 	firmware-name = "qcom/sm7125/a52q/adsp.mbn";
 
