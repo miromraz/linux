@@ -765,6 +765,8 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 	int ret;
 
 	if (enable) {
+		struct media_pad *remote;
+
 		if (csid->testgen.nmodes != CSID_PAYLOAD_MODE_DISABLED) {
 			ret = v4l2_ctrl_handler_setup(&csid->ctrls);
 			if (ret < 0) {
@@ -774,9 +776,25 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 			}
 		}
 
-		if (!csid->testgen.enabled &&
-		    !media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_SINK]))
+		remote = media_pad_remote_pad_first(&csid->pads[MSM_CSID_PAD_SINK]);
+		if (!csid->testgen.enabled && !remote)
 			return -ENOLINK;
+
+		if (remote && !csid->tpg_linked) {
+			struct csiphy_device *csiphy =
+				v4l2_get_subdevdata(media_entity_to_v4l2_subdev(remote->entity));
+
+			/*
+			 * link_setup() cached the CSIPHY port's lane count. A
+			 * board MIPI mux can select a sensor with fewer lanes,
+			 * so re-evaluate against the active sensor; the DT lane
+			 * map's extra entries are unused once the count drops.
+			 */
+			if (csiphy->cfg.csi2)
+				csid->phy.lane_cnt =
+					camss_get_num_lanes(&csid->subdev.entity,
+							    csiphy->cfg.csi2->lane_cfg.num_data);
+		}
 	}
 
 	if (csid->phy.need_vc_update) {

@@ -438,12 +438,23 @@ static const struct v4l2_subdev_video_ops s5k3l6xx_video_ops = {
 	.s_stream = s5k3l6xx_s_stream,
 };
 
+static int s5k3l6xx_get_mbus_config(struct v4l2_subdev *sd, unsigned int pad,
+				    struct v4l2_mbus_config *config)
+{
+	/* 4 D-PHY data lanes, enforced at probe time. */
+	config->type = V4L2_MBUS_CSI2_DPHY;
+	config->bus.mipi_csi2.num_data_lanes = 4;
+
+	return 0;
+}
+
 static const struct v4l2_subdev_pad_ops s5k3l6xx_pad_ops = {
 	.enum_mbus_code = s5k3l6xx_enum_mbus_code,
 	.enum_frame_size = s5k3l6xx_enum_frame_size,
 	.get_fmt = s5k3l6xx_get_fmt,
 	.set_fmt = s5k3l6xx_set_fmt,
 	.get_selection = s5k3l6xx_get_selection,
+	.get_mbus_config = s5k3l6xx_get_mbus_config,
 };
 
 static const struct v4l2_subdev_ops s5k3l6xx_subdev_ops = {
