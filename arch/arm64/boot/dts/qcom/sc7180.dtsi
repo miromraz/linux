@@ -3454,6 +3454,10 @@
 			interrupts = <GIC_SPI 468 IRQ_TYPE_EDGE_RISING>;
 			power-domains = <&camcc TITAN_TOP_GDSC>;
 
+			interconnects = <&camnoc_virt MASTER_CAMNOC_HF0_UNCOMP 0
+					 &camnoc_virt SLAVE_CAMNOC_UNCOMP 0>;
+			interconnect-names = "cci-camnoc";
+
 			clocks = <&camcc CAM_CC_CAMNOC_AXI_CLK>,
 				 <&camcc CAM_CC_SOC_AHB_CLK>,
 				 <&camcc CAM_CC_SLOW_AHB_CLK_SRC>,
@@ -3495,6 +3499,10 @@
 			reg = <0 0x0ac4b000 0 0x1000>;
 			interrupts = <GIC_SPI 462 IRQ_TYPE_EDGE_RISING>;
 			power-domains = <&camcc TITAN_TOP_GDSC>;
+
+			interconnects = <&camnoc_virt MASTER_CAMNOC_HF0_UNCOMP 0
+					 &camnoc_virt SLAVE_CAMNOC_UNCOMP 0>;
+			interconnect-names = "cci-camnoc";
 
 			clocks = <&camcc CAM_CC_CAMNOC_AXI_CLK>,
 				 <&camcc CAM_CC_SOC_AHB_CLK>,
