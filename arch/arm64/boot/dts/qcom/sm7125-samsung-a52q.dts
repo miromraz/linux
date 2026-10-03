@@ -910,3 +910,20 @@
 &cam_main {
 	lens-focus = <&cam_main_vcm>;
 };
+
+/*
+ * Samsung's firmware cannot resume the Cortex-A76 Gold cores (CPU6/7) from the
+ * deepest PSCI idle state, big-rail-power-down (big_cpu_sleep_1,
+ * arm,psci-suspend-param 0x40000004): under load the core fails to exit the
+ * power collapse, wedges so hard it does not even take a pseudo-NMI, and
+ * triggers an rcu_preempt stall followed by a watchdog reset. The shallower
+ * big-power-down (big_cpu_sleep_0) resumes reliably. Drop the rail-power-down
+ * state from the Gold cores' idle set; the Silver cores are unaffected.
+ */
+&cpu_pd6 {
+	domain-idle-states = <&big_cpu_sleep_0>;
+};
+
+&cpu_pd7 {
+	domain-idle-states = <&big_cpu_sleep_0>;
+};
