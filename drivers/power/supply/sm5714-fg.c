@@ -36,6 +36,7 @@ static enum power_supply_property sm5714_fg_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
 };
 
@@ -93,6 +94,8 @@ static int sm5714_fg_get_property(struct power_supply *psy,
 		val->intval = sm5714_fg_sign(raw, ((raw & 0x7fff) * 1000) / 2044) * 1000;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	/* no capacity learning on this gauge: full is the design capacity */
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		if (!drv->charge_full_design_uah)
 			return -ENODATA;
 		val->intval = drv->charge_full_design_uah;
