@@ -570,6 +570,22 @@ int vfe_enable_output_v2(struct vfe_line *line)
 		return -ENOBUFS;
 	}
 
+	/*
+	 * The write master double-buffers its image address into an internal
+	 * ping/pong pair and consumes one slot per frame. The loop above
+	 * programs one slot per queued buffer, so if only a single buffer was
+	 * available the second slot is left at its reset value of 0. The
+	 * hardware would then DMA a frame to IOVA 0, fault the IFE SMMU context
+	 * bank (TF, WNR) and wedge all further capture. Point the spare slot at
+	 * the same buffer so the master never targets address 0, mirroring the
+	 * gen1 path (vfe_output_init_addrs(): pong_addr = ping_addr).
+	 */
+	if (output->gen2.active_num == 1) {
+		ops->vfe_wm_update(vfe, output->wm_idx[0],
+				   output->buf[0]->addr[0], line);
+		ops->reg_update(vfe, line->id);
+	}
+
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	return 0;
