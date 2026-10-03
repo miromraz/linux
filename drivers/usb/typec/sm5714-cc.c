@@ -12,6 +12,7 @@
  * Register layout from the Samsung downstream sm5714_typec driver.
  */
 #include <linux/bits.h>
+#include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/mod_devicetable.h>
@@ -57,6 +58,14 @@
 #define SM5714_CC_CNTL1_DRP		0x41
 #define SM5714_CC_CNTL1_SNK		0x45
 #define SM5714_CC_CNTL1_SRC		0x49
+
+/*
+ * CC debounce before committing to host mode. With the cable unplugged the CC
+ * block free-runs its DRP toggle and latches a phantom sink for roughly one
+ * toggle period (~85 ms observed) on the source-advertise half of each cycle;
+ * this covers it with margin while staying well under a human plug-in.
+ */
+#define SM5714_CC_DEBOUNCE_MS		150
 
 struct sm5714_cc {
 	struct device *dev;
@@ -172,6 +181,27 @@ static void sm5714_cc_update(struct sm5714_cc *cc)
 	}
 
 	type = st & SM5714_CC_ATTACH_TYPE;
+
+	/*
+	 * A sink attach makes us the host: we drive VBUS and switch the USB
+	 * controller to host mode, registering the xHCI host controller. With
+	 * nothing plugged in, the free-running DRP toggle reports a phantom
+	 * sink for about one toggle period on each cycle; acting on it would
+	 * add and remove the host controller a few times a second. Require the
+	 * sink attach to survive a CC debounce before committing - a real OTG
+	 * partner stays put, a phantom clears within the toggle period. The
+	 * source attach (we are the device) and detach are the safe resting
+	 * states and need no debounce, so the gadget link still comes up fast.
+	 */
+	if (type == SM5714_CC_ATTACH_SINK) {
+		msleep(SM5714_CC_DEBOUNCE_MS);
+		if (regmap_read(cc->regmap, SM5714_REG_CC_STATUS, &st)) {
+			mutex_unlock(&cc->lock);
+			return;
+		}
+		type = st & SM5714_CC_ATTACH_TYPE;
+	}
+
 	dev_dbg(cc->dev, "CC_STATUS 0x%02x (attach type %u)\n", st, type);
 
 	if (type == SM5714_CC_ATTACH_SOURCE || type == SM5714_CC_ATTACH_SINK)
