@@ -24,6 +24,8 @@ struct panel_info {
 
 	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data supplies[2];
+
+	bool enabled;
 };
 
 struct panel_desc {
@@ -203,6 +205,8 @@ static int s6e3fc3_enable(struct drm_panel *panel)
 	if (dsi_ctx.accum_err) {
 		gpiod_set_value_cansleep(pinfo->reset_gpio, 1);
 		regulator_bulk_disable(ARRAY_SIZE(pinfo->supplies), pinfo->supplies);
+	} else {
+		pinfo->enabled = true;
 	}
 
 	return dsi_ctx.accum_err;
@@ -228,6 +232,8 @@ static int s6e3fc3_disable(struct drm_panel *panel)
 {
 	struct panel_info *pinfo = to_panel_info(panel);
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = pinfo->dsi };
+
+	pinfo->enabled = false;
 
 	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
 	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
@@ -289,8 +295,12 @@ static const struct drm_panel_funcs s6e3fc3_panel_funcs = {
 static int s6e3fc3_bl_update_status(struct backlight_device *bl)
 {
 	struct mipi_dsi_device *dsi = bl_get_data(bl);
+	struct panel_info *pinfo = mipi_dsi_get_drvdata(dsi);
 	u16 brightness = backlight_get_brightness(bl);
 	int ret;
+
+	if (!pinfo->enabled)
+		return 0;
 
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
@@ -306,8 +316,12 @@ static int s6e3fc3_bl_update_status(struct backlight_device *bl)
 static int s6e3fc3_bl_get_brightness(struct backlight_device *bl)
 {
 	struct mipi_dsi_device *dsi = bl_get_data(bl);
+	struct panel_info *pinfo = mipi_dsi_get_drvdata(dsi);
 	u16 brightness;
 	int ret;
+
+	if (!pinfo->enabled)
+		return 0;
 
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
