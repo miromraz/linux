@@ -22,6 +22,8 @@ properties:
   reg:
     maxItems: 1
 
+  monitored-battery: true
+
 required:
   - compatible
   - reg
