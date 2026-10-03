@@ -1250,22 +1250,37 @@ static void csiphy_hw_version_read(struct csiphy_device *csiphy,
 {
 	struct csiphy_device_regs *regs = csiphy->regs;
 	u32 hw_version;
+	int i;
 
 	writel(CSIPHY_3PH_CMN_CSI_COMMON_CTRL6_SHOW_REV_ID, csiphy->base +
 	       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->offset, 6));
 
-	hw_version = readl_relaxed(csiphy->base +
-		CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
-						  regs->common_status_offset, 12));
-	hw_version |= readl_relaxed(csiphy->base +
-		CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
-						  regs->common_status_offset, 13)) << 8;
-	hw_version |= readl_relaxed(csiphy->base +
-		CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
-						  regs->common_status_offset, 14)) << 16;
-	hw_version |= readl_relaxed(csiphy->base +
-		CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
-						  regs->common_status_offset, 15)) << 24;
+	/*
+	 * On the first power-up after the CAMSS top GDSC has been off, the
+	 * block has only just been clocked and the revision id is not latched
+	 * into the common status registers the instant SHOW_REV_ID is written,
+	 * so the read returns 0. Poll until it reports the real version; this
+	 * also confirms the CSIPHY is actually powered and clocked before
+	 * lanes_enable() starts programming it.
+	 */
+	for (i = 0; i < 10; i++) {
+		hw_version = readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, 12));
+		hw_version |= readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, 13)) << 8;
+		hw_version |= readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, 14)) << 16;
+		hw_version |= readl_relaxed(csiphy->base +
+			CSIPHY_3PH_CMN_CSI_COMMON_STATUSn(regs->offset,
+							  regs->common_status_offset, 15)) << 24;
+		if (hw_version)
+			break;
+
+		usleep_range(100, 200);
+	}
 
 	dev_dbg(dev, "CSIPHY 3PH HW Version = 0x%08x\n", hw_version);
 }
