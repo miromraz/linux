@@ -20,6 +20,14 @@
 	compatible = "samsung,a52q", "qcom,sm7125";
 	qcom,board-id = <0x22 0x6>;
 
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion";
+		charge-full-design-microamp-hours = <4500000>;
+		voltage-max-design-microvolt = <4380000>;
+		voltage-min-design-microvolt = <3400000>;
+	};
+
 	vreg_nfc_pvdd: regulator-nfc-pvdd {
 		compatible = "regulator-fixed";
 		regulator-name = "nfc_pvdd";
@@ -321,6 +329,8 @@
 	fuel-gauge@71 {
 		compatible = "siliconmitus,sm5714-fg";
 		reg = <0x71>;
+
+		monitored-battery = <&battery>;
 	};
 };
 
