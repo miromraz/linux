@@ -27,6 +27,7 @@
 struct sm5714_fg {
 	struct power_supply *psy;
 	struct i2c_client *i2c;
+	int charge_full_design_uah;
 };
 
 static enum power_supply_property sm5714_fg_props[] = {
@@ -34,6 +35,8 @@ static enum power_supply_property sm5714_fg_props[] = {
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
 };
 
 static int sm5714_fg_read_sram(struct sm5714_fg *drv, u8 addr)
@@ -89,6 +92,24 @@ static int sm5714_fg_get_property(struct power_supply *psy,
 		/* microamps, negative while discharging */
 		val->intval = sm5714_fg_sign(raw, ((raw & 0x7fff) * 1000) / 2044) * 1000;
 		break;
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+		if (!drv->charge_full_design_uah)
+			return -ENODATA;
+		val->intval = drv->charge_full_design_uah;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+		/*
+		 * The gauge exposes no coulomb counter, so scale the design
+		 * charge by the reported state of charge.
+		 */
+		if (!drv->charge_full_design_uah)
+			return -ENODATA;
+		raw = sm5714_fg_read_sram(drv, SM5714_FG_ADDR_SRAM_SOC);
+		if (raw < 0)
+			return raw;
+		val->intval = drv->charge_full_design_uah / 100 *
+			      (min((raw * 10) >> 8, 1000) / 10);
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -107,7 +128,9 @@ static const struct power_supply_desc sm5714_fg_desc = {
 static int sm5714_fg_probe(struct i2c_client *i2c)
 {
 	struct power_supply_config fg_cfg = { };
+	struct power_supply_battery_info *info;
 	struct sm5714_fg *drv;
+	int ret;
 
 	drv = devm_kzalloc(&i2c->dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)
@@ -121,6 +144,20 @@ static int sm5714_fg_probe(struct i2c_client *i2c)
 	if (IS_ERR(drv->psy))
 		return dev_err_probe(&i2c->dev, PTR_ERR(drv->psy),
 				     "failed to register power supply\n");
+
+	/*
+	 * An optional "monitored-battery" node supplies the design capacity;
+	 * without it the charge_* properties report -ENODATA.
+	 */
+	ret = power_supply_get_battery_info(drv->psy, &info);
+	if (ret == -ENODEV || ret == -ENOENT)
+		return 0;
+	if (ret)
+		return dev_err_probe(&i2c->dev, ret, "failed to get battery info\n");
+
+	if (info->charge_full_design_uah > 0)
+		drv->charge_full_design_uah = info->charge_full_design_uah;
+	power_supply_put_battery_info(drv->psy, info);
 
 	return 0;
 }
