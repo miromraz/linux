@@ -64,6 +64,7 @@ static enum power_supply_property sm5714_charger_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_USB_TYPE,
 };
 
 static int chg_set_input_current_limit(struct sm5714_charger *charger, int mA)
@@ -243,6 +244,18 @@ static int sm5714_charger_get_property(struct power_supply *psy,
 			return error;
 		val->intval = value & SM5714_CHG_STATUS1_VBUSOK ? 1 : 0;
 		break;
+	case POWER_SUPPLY_PROP_USB_TYPE:
+		/*
+		 * The charger block only sees whether VBUS is present; the
+		 * BC1.2/Type-C port subtype is detected by the separate MUIC
+		 * block, so report a generic SDP port while powered.
+		 */
+		error = regmap_read(drv->regmap, SM5714_CHG_REG_STATUS1, &value);
+		if (error)
+			return error;
+		val->intval = value & SM5714_CHG_STATUS1_VBUSOK ?
+			POWER_SUPPLY_USB_TYPE_SDP : POWER_SUPPLY_USB_TYPE_UNKNOWN;
+		break;
 	case POWER_SUPPLY_PROP_STATUS:
 		error = regmap_read(drv->regmap, SM5714_CHG_REG_STATUS1, &reg_st1);
 		if (error)
@@ -281,6 +294,8 @@ static int sm5714_charger_get_property(struct power_supply *psy,
 static const struct power_supply_desc sm5714_charger_desc = {
 	.name			= "sm5714_charger",
 	.type			= POWER_SUPPLY_TYPE_USB,
+	.usb_types		= BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+				  BIT(POWER_SUPPLY_USB_TYPE_SDP),
 	.properties		= sm5714_charger_props,
 	.num_properties		= ARRAY_SIZE(sm5714_charger_props),
 	.get_property		= sm5714_charger_get_property,
