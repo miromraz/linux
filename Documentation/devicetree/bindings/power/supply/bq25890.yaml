@@ -29,6 +29,9 @@ properties:
     maxItems: 1
 
   interrupts:
+    description: |
+      Interrupt line of the charger's active-low INT output. If omitted, the
+      driver periodically polls the status registers instead.
     maxItems: 1
 
   ti,battery-regulation-voltage:
@@ -88,7 +91,6 @@ properties:
 required:
   - compatible
   - reg
-  - interrupts
   - ti,battery-regulation-voltage
   - ti,charge-current
   - ti,termination-current
