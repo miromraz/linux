@@ -368,6 +368,31 @@
 	};
 };
 
+&i2c4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c4_pins_a>;
+	status = "okay";
+
+	/*
+	 * Novatek NT36772 TDDI touchscreen. Verified against the vendor
+	 * aeon6797_6m_n.dts: I2C4 0x62, interrupt on GPIO85/EINT8, reset on
+	 * GPIO68. As a TDDI controller it shares the panel's always-on rails,
+	 * which are not switchable from this node, so no supply is described.
+	 * The driver applies the vendor portrait orientation (swap X/Y, invert
+	 * Y) internally, so no touchscreen-* transform properties are set.
+	 * Kept disabled until the reset polarity and the 0x62-to-0x01 target
+	 * transition are validated on hardware.
+	 */
+	touchscreen@62 {
+		compatible = "novatek,nt36772-ts";
+		reg = <0x62>;
+		interrupt-parent = <&pio>;
+		interrupts = <8 IRQ_TYPE_EDGE_RISING>;
+		reset-gpios = <&pio 68 GPIO_ACTIVE_HIGH>;
+		status = "disabled";
+	};
+};
+
 &watchdog {
 	interrupts = <GIC_SPI 137 IRQ_TYPE_EDGE_FALLING>;
 };
