@@ -15,8 +15,12 @@ static const struct mtk_gate_regs mfg_cg_regs = {
 };
 
 static const struct mtk_gate mfg_clks[] = {
-	GATE_MTK(CLK_MFG_BG3D, "mfg_bg3d", "mfg_sel", &mfg_cg_regs, 0,
-		 &mtk_clk_gate_ops_setclr),
+	/*
+	 * Propagate rate requests to mfg_sel/MFGPLL so the GPU devfreq OPPs
+	 * reach the PLL, matching the MT8183 MFG gate.
+	 */
+	GATE_MTK_FLAGS(CLK_MFG_BG3D, "mfg_bg3d", "mfg_sel", &mfg_cg_regs, 0,
+		       &mtk_clk_gate_ops_setclr, CLK_SET_RATE_PARENT),
 };
 
 static const struct mtk_clk_desc mfg_desc = {
