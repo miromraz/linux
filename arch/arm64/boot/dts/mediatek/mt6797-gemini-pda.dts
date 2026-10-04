@@ -913,6 +913,7 @@
 
 &gpu {
 	mali-supply = <&rt5735_vgpu>;
+	operating-points-v2 = <&gpu_opp_table>;
 	status = "okay";
 };
 
