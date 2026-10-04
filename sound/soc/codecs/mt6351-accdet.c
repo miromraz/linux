@@ -48,12 +48,11 @@ static int mt6351_accdet_read_voltage(struct mt6351_accdet *priv)
 {
 	int val, ret;
 
-	ret = iio_read_channel_raw(priv->adc, &val);
+	ret = iio_read_channel_processed(priv->adc, &val);
 	if (ret < 0)
 		return ret;
 
-	/* the raw sample is taken against a 1.8 V reference */
-	return val * MT6351_ACCDET_AUXADC_MV / MT6351_ACCDET_AUXADC_RES;
+	return val;
 }
 
 static void mt6351_accdet_check_button(struct mt6351_accdet *priv,

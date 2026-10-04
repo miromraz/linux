@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/mediatek,mt6797-mt6351.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6797 with MT6351 CODEC sound card
+
+maintainers:
+  - Miroslav Mraz <miroslav.mraz@techmania.cz>
+
+properties:
+  compatible:
+    const: mediatek,mt6797-mt6351-sound
+
+  mediatek,platform:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The phandle of the MT6797 AFE platform.
+
+  mediatek,audio-codec:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The phandle of the MT6351 audio codec.
+
+  mediatek,accdet:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The phandle of the MT6351 ACCDET node, to enable headset plug and
+      button detection through a headset jack.
+
+required:
+  - compatible
+  - mediatek,platform
+  - mediatek,audio-codec
+
+additionalProperties: false
+
+examples:
+  - |
+    sound {
+        compatible = "mediatek,mt6797-mt6351-sound";
+        mediatek,platform = <&afe>;
+        mediatek,audio-codec = <&mt6351_codec>;
+        mediatek,accdet = <&accdet>;
+    };

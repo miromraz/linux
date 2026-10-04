@@ -101,10 +101,6 @@ struct iio_channel;
 #define MT6351_ACCDET_MODE_LOW_COST	2
 #define MT6351_ACCDET_MODE_LOW_COST_BIAS 6
 
-/* AUXADC reference voltage (mV) and resolution for the accessory channel */
-#define MT6351_ACCDET_AUXADC_MV		1800
-#define MT6351_ACCDET_AUXADC_RES	4096
-
 #define MT6351_ACCDET_JACK_MASK		(SND_JACK_HEADPHONE | \
 					 SND_JACK_HEADSET | \
 					 SND_JACK_BTN_0 | \
