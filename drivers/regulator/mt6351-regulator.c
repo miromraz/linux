@@ -183,7 +183,7 @@ static const struct regulator_ops mt6351_fixed_ops = {
 	.is_enabled = regulator_is_enabled_regmap,
 };
 
-static struct mt6351_regulator_info mt6351_regulators[] = {
+static const struct mt6351_regulator_info mt6351_regulators[] = {
 	MT6351_BUCK("buck-vcore", VCORE, mt6351_buck_range, 0x7f,
 		    MT6351_BUCK_VCORE_CON0, MT6351_BUCK_VCORE_CON2,
 		    MT6351_BUCK_VCORE_CON4, MT6351_BUCK_VCORE_CON5, GENMASK(6, 0)),
@@ -259,10 +259,14 @@ static struct mt6351_regulator_info mt6351_regulators[] = {
 		   MT6351_LDO_VBIF28_CON0, MT6351_LDO_VBIF28_VOSEL, GENMASK(9, 8)),
 	MT6351_LDO("ldo-vefuse", VEFUSE, mt6351_ldo_voltages_sim,
 		   MT6351_LDO_VEFUSE_CON0, MT6351_LDO_VEFUSE_VOSEL, GENMASK(10, 8)),
-	MT6351_LDO("ldo-vcn33-bt", VCN33_BT, mt6351_ldo_voltages_vcn33,
+	/*
+	 * VCN33_BT and VCN33_WIFI are two enable bits for one physical rail
+	 * that share a single voltage selector field. Expose one VCN33
+	 * regulator (using the BT enable) and fold the WIFI enable into it in
+	 * probe so the shared field cannot be driven inconsistently.
+	 */
+	MT6351_LDO("ldo-vcn33", VCN33, mt6351_ldo_voltages_vcn33,
 		   MT6351_LDO_VCN33_BT_CON0, MT6351_LDO_VCN33_VOSEL, GENMASK(10, 9)),
-	MT6351_LDO("ldo-vcn33-wifi", VCN33_WIFI, mt6351_ldo_voltages_vcn33,
-		   MT6351_LDO_VCN33_WIFI_CON0, MT6351_LDO_VCN33_VOSEL, GENMASK(10, 9)),
 	MT6351_FIXED("ldo-vldo28", VLDO28, MT6351_LDO_VLDO28_CON0, 2800000),
 	MT6351_LDO("ldo-vmc", VMC, mt6351_ldo_voltages_vmc,
 		   MT6351_LDO_VMC_CON0, MT6351_LDO_VMC_VOSEL, GENMASK(10, 8)),
@@ -270,13 +274,14 @@ static struct mt6351_regulator_info mt6351_regulators[] = {
 };
 
 static int mt6351_select_buck_vsel_regs(struct device *dev,
-					struct regmap *regmap)
+					struct regmap *regmap,
+					struct mt6351_regulator_info *regulators)
 {
 	unsigned int value;
 	int i, ret;
 
 	for (i = 0; i < MT6351_ID_VREG_MAX; i++) {
-		struct mt6351_regulator_info *info = &mt6351_regulators[i];
+		struct mt6351_regulator_info *info = &regulators[i];
 
 		if (!info->vsel_ctrl_reg)
 			continue;
@@ -295,9 +300,40 @@ static int mt6351_select_buck_vsel_regs(struct device *dev,
 	return 0;
 }
 
+static int mt6351_sync_vcn33_setting(struct device *dev, struct regmap *regmap)
+{
+	unsigned int val;
+	int ret;
+
+	/*
+	 * VCN33_BT and VCN33_WIFI share one voltage selector and output. Only
+	 * the BT enable is exposed as the VCN33 regulator, so fold a boot-time
+	 * WIFI enable into the BT enable and clear WIFI to keep them in sync.
+	 */
+	ret = regmap_read(regmap, MT6351_LDO_VCN33_WIFI_CON0, &val);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to read VCN33_WIFI\n");
+
+	if (!(val & MT6351_LDO_EN))
+		return 0;
+
+	ret = regmap_update_bits(regmap, MT6351_LDO_VCN33_BT_CON0,
+				 MT6351_LDO_EN, MT6351_LDO_EN);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to sync VCN33_WIFI enable\n");
+
+	ret = regmap_update_bits(regmap, MT6351_LDO_VCN33_WIFI_CON0,
+				 MT6351_LDO_EN, 0);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to clear VCN33_WIFI enable\n");
+
+	return 0;
+}
+
 static int mt6351_regulator_probe(struct platform_device *pdev)
 {
 	struct mt6397_chip *mt6351 = dev_get_drvdata(pdev->dev.parent);
+	struct mt6351_regulator_info *regulators;
 	struct regulator_config config = {};
 	struct regulator_dev *rdev;
 	unsigned int swcid;
@@ -307,25 +343,32 @@ static int mt6351_regulator_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "failed to read chip revision\n");
 
-	if (swcid != 0x5120) {
-		dev_err(&pdev->dev, "unsupported MT6351 revision 0x%04x\n", swcid);
-		return -EINVAL;
-	}
+	if (swcid != 0x5120)
+		dev_warn(&pdev->dev, "untested MT6351 revision 0x%04x\n", swcid);
 
-	ret = mt6351_select_buck_vsel_regs(&pdev->dev, mt6351->regmap);
+	regulators = devm_kmemdup(&pdev->dev, mt6351_regulators,
+				  sizeof(mt6351_regulators), GFP_KERNEL);
+	if (!regulators)
+		return -ENOMEM;
+
+	ret = mt6351_select_buck_vsel_regs(&pdev->dev, mt6351->regmap, regulators);
+	if (ret)
+		return ret;
+
+	ret = mt6351_sync_vcn33_setting(&pdev->dev, mt6351->regmap);
 	if (ret)
 		return ret;
 
 	config.dev = &pdev->dev;
 	config.regmap = mt6351->regmap;
 	for (i = 0; i < MT6351_ID_VREG_MAX; i++) {
-		config.driver_data = &mt6351_regulators[i];
+		config.driver_data = &regulators[i];
 		rdev = devm_regulator_register(&pdev->dev,
-					       &mt6351_regulators[i].desc, &config);
+					       &regulators[i].desc, &config);
 		if (IS_ERR(rdev))
 			return dev_err_probe(&pdev->dev, PTR_ERR(rdev),
 					     "failed to register %s\n",
-					     mt6351_regulators[i].desc.name);
+					     regulators[i].desc.name);
 	}
 
 	return 0;
