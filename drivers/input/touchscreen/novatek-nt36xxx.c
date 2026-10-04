@@ -43,6 +43,7 @@ struct nvt36xxx_data {
 	struct input_dev *input;
 	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data supplies[2];
+	int num_supplies;
 	struct touchscreen_properties prop;
 	u8 event[NVT36XXX_EVENT_DATA_LEN];
 	u32 raw_x_max;
@@ -280,11 +281,43 @@ static irqreturn_t nvt36xxx_irq(int irq, void *arg)
 	return IRQ_HANDLED;
 }
 
+static const char * const nvt36xxx_supply_names[] = { "vcc", "iovcc" };
+
 static void nvt36xxx_disable_regulators(void *arg)
 {
 	struct nvt36xxx_data *data = arg;
 
-	regulator_bulk_disable(ARRAY_SIZE(data->supplies), data->supplies);
+	regulator_bulk_disable(data->num_supplies, data->supplies);
+}
+
+/*
+ * The supplies are optional: on TDDI boards the controller shares the panel's
+ * always-on rails, which are not individually switchable from this device.
+ * Collect only the rails the board actually describes.
+ */
+static int nvt36xxx_get_regulators(struct nvt36xxx_data *data)
+{
+	struct device *dev = &data->client->dev;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(nvt36xxx_supply_names); i++) {
+		struct regulator *reg;
+
+		reg = devm_regulator_get_optional(dev, nvt36xxx_supply_names[i]);
+		if (IS_ERR(reg)) {
+			if (PTR_ERR(reg) != -ENODEV)
+				return dev_err_probe(dev, PTR_ERR(reg),
+						     "failed to get %s supply\n",
+						     nvt36xxx_supply_names[i]);
+			continue;
+		}
+
+		data->supplies[data->num_supplies].supply = nvt36xxx_supply_names[i];
+		data->supplies[data->num_supplies].consumer = reg;
+		data->num_supplies++;
+	}
+
+	return 0;
 }
 
 static int nvt36xxx_probe(struct i2c_client *client)
@@ -303,14 +336,11 @@ static int nvt36xxx_probe(struct i2c_client *client)
 
 	data->client = client;
 	i2c_set_clientdata(client, data);
-	data->supplies[0].supply = "vcc";
-	data->supplies[1].supply = "iovcc";
-	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(data->supplies),
-				      data->supplies);
+	ret = nvt36xxx_get_regulators(data);
 	if (ret)
 		return ret;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(data->supplies), data->supplies);
+	ret = regulator_bulk_enable(data->num_supplies, data->supplies);
 	if (ret)
 		return ret;
 	ret = devm_add_action_or_reset(dev, nvt36xxx_disable_regulators, data);
