@@ -318,8 +318,9 @@
 		clocks = <&topckgen CLK_TOP_MUX_MFG>,
 			 <&topckgen CLK_TOP_MUX_MFG_52M>,
 			 <&topckgen CLK_TOP_MUX_MM>,
-			 <&topckgen CLK_TOP_MUX_VDEC>;
-		clock-names = "mfg", "mfg_52m", "mm", "vdec";
+			 <&topckgen CLK_TOP_MUX_VDEC>,
+			 <&infrasys CLK_INFRA_MFG_VCG>;
+		clock-names = "mfg", "mfg_52m", "mm", "vdec", "mfg_vcg";
 		infracfg = <&infrasys>;
 	};
 
