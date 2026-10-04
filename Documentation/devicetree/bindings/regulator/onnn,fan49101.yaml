@@ -51,7 +51,7 @@ examples:
           vout {
             regulator-name = "fan49101-vout";
             regulator-min-microvolt = <603000>;
-            regulator-max-microvolt = <1413000>;
+            regulator-max-microvolt = <1411038>;
           };
         };
       };
