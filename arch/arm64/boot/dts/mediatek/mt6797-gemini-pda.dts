@@ -53,6 +53,29 @@
 		max-microvolt = <2800000>;
 	};
 
+	/*
+	 * Single-cell Li-Ion pack. The design capacity is the vendor
+	 * fuel-gauge Q_MAX at 25 C (mt_battery_meter.h: Q_MAX_POS_25 =
+	 * 4268 mAh). The open-circuit-voltage table is taken from the vendor
+	 * 25 C profile battery_profile_t2[] in mt_battery_meter_table.h, which
+	 * lists depth-of-discharge against resting voltage in mV; the capacity
+	 * column here is 100 - depth-of-discharge.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <4268000>;
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4357000>;
+		ocv-capacity-celsius = <25>;
+		ocv-capacity-table-0 =
+			<4357000 100>, <4301000 95>, <4248000 91>, <4196000 86>,
+			<4132000 80>, <4082000 75>, <4023000 70>, <3970000 65>,
+			<3941000 60>, <3888000 56>, <3849000 50>, <3826000 45>,
+			<3807000 40>, <3789000 35>, <3776000 30>, <3760000 25>,
+			<3739000 19>, <3715000 15>, <3688000 10>, <3681000 5>,
+			<3483000 1>, <3400000 0>;
+	};
+
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -549,6 +572,8 @@
 	charger: charger@6b {
 		compatible = "ti,bq25896", "ti,bq25890";
 		reg = <0x6b>;
+
+		monitored-battery = <&battery>;
 
 		ti,battery-regulation-voltage = <4416000>;
 		ti,charge-current = <2048000>;
