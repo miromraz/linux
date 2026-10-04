@@ -153,6 +153,18 @@
 		regulator-max-microvolt = <1800000>;
 		regulator-always-on;
 	};
+
+	mt6351_vmch_reg: ldo-vmch {
+		regulator-name = "vmch_3v3";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	mt6351_vmc_reg: ldo-vmc {
+		regulator-name = "vmc";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <3300000>;
+	};
 };
 
 &pio {
@@ -194,6 +206,20 @@
 		};
 	};
 
+	mmc1_pins_default: mmc1-default-pins {
+		pins-cmd-dat {
+			pinmux = <MT6797_GPIO130__FUNC_MSDC1_DAT0>,
+				 <MT6797_GPIO131__FUNC_MSDC1_DAT1>,
+				 <MT6797_GPIO132__FUNC_MSDC1_DAT2>,
+				 <MT6797_GPIO133__FUNC_MSDC1_DAT3>,
+				 <MT6797_GPIO129__FUNC_MSDC1_CMD>;
+		};
+
+		pins-clk {
+			pinmux = <MT6797_GPIO134__FUNC_MSDC1_CLK>;
+		};
+	};
+
 	hall_pins: hall-pins {
 		pins-hall {
 			pinmux = <MT6797_GPIO66__FUNC_GPIO66>;
@@ -217,6 +243,25 @@
 	vqmmc-supply = <&mt6351_vio18_reg>;
 	non-removable;
 	no-sd;
+	no-sdio;
+	status = "okay";
+};
+
+&mmc1 {
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc1_pins_default>;
+	pinctrl-1 = <&mmc1_pins_default>;
+	bus-width = <4>;
+	max-frequency = <200000000>;
+	cap-sd-highspeed;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	cd-gpios = <&pio 67 GPIO_ACTIVE_HIGH>;
+	vmmc-supply = <&mt6351_vmch_reg>;
+	vqmmc-supply = <&mt6351_vmc_reg>;
+	no-mmc;
 	no-sdio;
 	status = "okay";
 };
