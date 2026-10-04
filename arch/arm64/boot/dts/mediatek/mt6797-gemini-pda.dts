@@ -211,11 +211,6 @@
 };
 
 &pio {
-	/*
-	 * MT6797 pinctrl currently supports pinmux only for these pads:
-	 * its descriptor has no pull, IES, or drive-strength register maps.
-	 * Keep boot-firmware pad configuration until those maps are recovered.
-	 */
 	uart0_gemini_pins: uart0-gemini-pins {
 		pins-rx-tx {
 			pinmux = <MT6797_GPIO97__FUNC_URXD0>,
