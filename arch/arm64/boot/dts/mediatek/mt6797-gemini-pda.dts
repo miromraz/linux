@@ -359,11 +359,15 @@
 
 		regulators {
 			da9214_bucka: BUCKA {
-				regulator-name = "da9214-bucka";
+				regulator-name = "vproc-little";
+				regulator-always-on;
+				regulator-boot-on;
 			};
 
 			da9214_buckb: BUCKB {
 				regulator-name = "vproc-big";
+				regulator-always-on;
+				regulator-boot-on;
 			};
 		};
 	};
