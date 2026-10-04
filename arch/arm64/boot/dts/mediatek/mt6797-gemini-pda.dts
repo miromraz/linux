@@ -9,6 +9,7 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
 
 / {
 	model = "Planet Computers Gemini PDA";
@@ -165,6 +166,30 @@
 		regulator-name = "vibr";
 		regulator-min-microvolt = <2800000>;
 		regulator-max-microvolt = <2800000>;
+	};
+};
+
+&pmic {
+	/*
+	 * MT6351 ISINK current-sink LEDs. Vendor aeon6797_6m_n.dts led@0/led@1
+	 * drive the red/green indicators from ISINK0/ISINK1 (led_mode = 3).
+	 */
+	leds {
+		compatible = "mediatek,mt6351-led";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		led@0 {
+			reg = <0>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+		};
+
+		led@1 {
+			reg = <1>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+		};
 	};
 };
 
