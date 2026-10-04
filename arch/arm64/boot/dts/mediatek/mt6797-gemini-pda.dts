@@ -136,6 +136,16 @@
 		#size-cells = <2>;
 		ranges;
 
+		/*
+		 * Fixed firmware reservations carried over from the vendor
+		 * mt6797.dtsi. By base address the owners are: 0x40000000 the
+		 * preloader-preserved first DRAM page; 0x44400000 ram_console;
+		 * 0x44410000 pstore/ramoops; 0x444f0000 minirdump; 0x44600000
+		 * ARM Trusted Firmware; 0x44610000 ATF ramdump; 0x44640000
+		 * i-cache dump; 0x44800000 preloader; 0x46000000 LK. Linux must
+		 * not map any of them (no-map); the retained MT6797 LK adds its
+		 * further runtime mblock reservations after this DT is loaded.
+		 */
 		memory@40000000 {
 			reg = <0 0x40000000 0 0x1000>;
 			no-map;
