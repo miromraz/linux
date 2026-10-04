@@ -653,7 +653,7 @@
 	 * on I2C1 has no usable interrupt line and is therefore not described.
 	 */
 	fusb301: typec@25 {
-		compatible = "onnn,fusb301a";
+		compatible = "onnn,fusb301a", "onnn,fusb301";
 		reg = <0x25>;
 		interrupt-parent = <&pio>;
 		interrupts = <3 IRQ_TYPE_LEVEL_LOW>;
@@ -661,8 +661,8 @@
 		connector {
 			compatible = "usb-c-connector";
 			label = "USB-C";
-			power-role = "dual";
-			data-role = "dual";
+			power-role = "source";
+			data-role = "host";
 			typec-power-opmode = "default";
 			pd-disable;
 			vbus-supply = <&usb_p1_vbus>;
