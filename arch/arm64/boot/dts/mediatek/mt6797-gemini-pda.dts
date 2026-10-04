@@ -406,6 +406,19 @@
 			enable-gpios = <&pio 251 GPIO_ACTIVE_HIGH>;
 		};
 	};
+
+	/*
+	 * Sensortek STK3x1x ambient-light/proximity sensor. Vendor
+	 * aeon6797_6m_n.dts cust_alsps@0 uses I2C1 0x48 with EINT on
+	 * GPIO88 (= EINT11, alspspincfg) and ps_threshold_high = 50.
+	 */
+	light-sensor@48 {
+		compatible = "sensortek,stk3310";
+		reg = <0x48>;
+		interrupt-parent = <&pio>;
+		interrupts = <11 IRQ_TYPE_LEVEL_LOW>;
+		proximity-near-level = <50>;
+	};
 };
 
 &i2c4 {
