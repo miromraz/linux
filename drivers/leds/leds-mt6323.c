@@ -613,6 +613,19 @@ static int mt6323_led_probe(struct platform_device *pdev)
 
 		is_wled = of_property_read_bool(child, "mediatek,is-wled");
 
+		/*
+		 * The ISINK code path dereferences the full isink_con[] layout
+		 * (up to isink_con[2]) and the ISINK enable register. PMICs that
+		 * only expose WLEDs (e.g. MT6332) provide a truncated isink_con[]
+		 * and no isink_en_ctrl, so a non-WLED child would read past the
+		 * end of isink_con[]. Reject it instead.
+		 */
+		if (!is_wled && !regs->isink_en_ctrl) {
+			dev_err(dev, "ISINK LEDs not supported on this PMIC (reg %u)\n",
+				reg);
+			return -EINVAL;
+		}
+
 		leds->led[reg] = led;
 		leds->led[reg]->id = reg;
 		leds->led[reg]->cdev.max_brightness = spec->max_brightness;
