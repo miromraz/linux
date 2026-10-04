@@ -23,6 +23,43 @@
 		stdout-path = "serial0:921600n8";
 	};
 
+	/*
+	 * GPU operating points for this board's MT6797 speed bin. The
+	 * frequency/voltage pairs are the vendor 3.18 mt_gpufreq non-M-bin
+	 * grid (238-700 MHz); M-bin parts use a disjoint grid topping out at
+	 * 600 MHz, so this table is not valid for every MT6797 and lives in
+	 * the board DTS rather than the shared SoC dtsi.
+	 */
+	gpu_opp_table: opp-table-gpu {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-238000000 {
+			opp-hz = /bits/ 64 <238000000>;
+			opp-microvolt = <862500>;
+		};
+		opp-365000000 {
+			opp-hz = /bits/ 64 <365000000>;
+			opp-microvolt = <912500>;
+		};
+		opp-442500000 {
+			opp-hz = /bits/ 64 <442500000>;
+			opp-microvolt = <975000>;
+		};
+		opp-520000000 {
+			opp-hz = /bits/ 64 <520000000>;
+			opp-microvolt = <1006250>;
+		};
+		opp-610000000 {
+			opp-hz = /bits/ 64 <610000000>;
+			opp-microvolt = <1081250>;
+		};
+		opp-700000000 {
+			opp-hz = /bits/ 64 <700000000>;
+			opp-microvolt = <1131250>;
+		};
+	};
+
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0 0x40000000 1 0>;
