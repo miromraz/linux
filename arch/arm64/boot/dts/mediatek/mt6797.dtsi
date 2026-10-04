@@ -369,6 +369,8 @@
 		interrupt-names = "job", "mmu", "gpu";
 		clocks = <&mfgsys CLK_MFG_BG3D>;
 		clock-names = "core";
+		assigned-clocks = <&topckgen CLK_TOP_MUX_MFG>;
+		assigned-clock-parents = <&topckgen CLK_TOP_MFGPLL_CK>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MFG_CORE0>,
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE1>,
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE2>,
