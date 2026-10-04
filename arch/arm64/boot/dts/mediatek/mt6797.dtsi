@@ -824,7 +824,6 @@
 		clocks = <&mmsys CLK_MM_DISP_OVL0>;
 		iommus = <&m4u M4U_PORT_DISP_OVL0>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0xb000 0x1000>;
-		status = "disabled";
 	};
 
 	ovl0_2l: ovl@1400d000 {
@@ -835,7 +834,6 @@
 		clocks = <&mmsys CLK_MM_DISP_OVL0_2L>;
 		iommus = <&m4u M4U_PORT_DISP_2L_OVL0_LARB0>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0xd000 0x1000>;
-		status = "disabled";
 	};
 
 	ovl1_2l: ovl@1400e000 {
@@ -846,7 +844,6 @@
 		clocks = <&mmsys CLK_MM_DISP_OVL1_2L>;
 		iommus = <&m4u M4U_PORT_DISP_2L_OVL1>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0xe000 0x1000>;
-		status = "disabled";
 	};
 
 	rdma0: rdma@1400f000 {
@@ -857,7 +854,6 @@
 		clocks = <&mmsys CLK_MM_DISP_RDMA0>;
 		iommus = <&m4u M4U_PORT_DISP_RDMA0>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0xf000 0x1000>;
-		status = "disabled";
 	};
 
 	color0: color@14013000 {
@@ -868,7 +864,6 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_COLOR>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x3000 0x1000>;
-		status = "disabled";
 	};
 
 	ccorr0: ccorr@14014000 {
@@ -878,7 +873,6 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_CCORR>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x4000 0x1000>;
-		status = "disabled";
 	};
 
 	aal0: aal@14015000 {
@@ -888,7 +882,6 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_AAL>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x5000 0x1000>;
-		status = "disabled";
 	};
 
 	gamma0: gamma@14016000 {
@@ -898,7 +891,6 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_GAMMA>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x6000 0x1000>;
-		status = "disabled";
 	};
 
 	od0: od@14017000 {
@@ -908,7 +900,6 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_OD>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x7000 0x1000>;
-		status = "disabled";
 	};
 
 	dither0: dither@14018000 {
@@ -918,7 +909,6 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_DITHER>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x8000 0x1000>;
-		status = "disabled";
 	};
 
 	ufoe: ufoe@14019000 {
@@ -928,7 +918,6 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_UFOE>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x9000 0x1000>;
-		status = "disabled";
 	};
 
 	dsi0: dsi@1401c000 {
