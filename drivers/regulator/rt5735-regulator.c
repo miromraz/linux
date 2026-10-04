@@ -7,6 +7,7 @@
  * downstream kernels are intentionally left to board firmware and userspace.
  */
 
+#include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/i2c.h>
 #include <linux/kernel.h>
@@ -19,11 +20,14 @@
 #define RT5735_REG_PRODUCT_ID		0x03
 #define RT5735_REG_VSEL0		0x11
 #define RT5735_REG_PGOOD		0x12
+#define RT5735_REG_TIME			0x13
 
 #define RT5735_PRODUCT_ID		0x10
 #define RT5735_VSEL_MASK		GENMASK(6, 0)
 #define RT5735_ENABLE_MASK		BIT(7)
 #define RT5735_ACTIVE_DISCHARGE_MASK	BIT(4)
+#define RT5735_DVSUP_MASK		GENMASK(4, 2)
+#define RT5735_DVSUP_32MV_US		FIELD_PREP(RT5735_DVSUP_MASK, 6)
 
 #define RT5735_MIN_UV			600000
 #define RT5735_STEP_UV			6250
@@ -31,6 +35,7 @@
 
 static const struct regulator_ops rt5735_regulator_ops = {
 	.list_voltage = regulator_list_voltage_linear,
+	.map_voltage = regulator_map_voltage_linear,
 	.get_voltage_sel = regulator_get_voltage_sel_regmap,
 	.set_voltage_sel = regulator_set_voltage_sel_regmap,
 	.enable = regulator_enable_regmap,
@@ -83,6 +88,18 @@ static int rt5735_probe(struct i2c_client *client)
 	if (product_id != RT5735_PRODUCT_ID)
 		return dev_err_probe(&client->dev, -ENODEV,
 				     "unexpected product ID 0x%02x\n", product_id);
+
+	/*
+	 * Program the DVS up-slew (DVSUP) to 32 mV/us, matching the vendor
+	 * default (rt5735.c TIME register 0x13 = 0x19). The consumer's
+	 * regulator-ramp-delay is sized for this slew; leaving the field at an
+	 * unknown firmware value would under-estimate the voltage settle time.
+	 */
+	ret = regmap_update_bits(regmap, RT5735_REG_TIME, RT5735_DVSUP_MASK,
+				 RT5735_DVSUP_32MV_US);
+	if (ret)
+		return dev_err_probe(&client->dev, ret,
+				     "failed to program slew rate\n");
 
 	config.dev = &client->dev;
 	config.of_node = dev_of_node(&client->dev);
