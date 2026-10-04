@@ -10,6 +10,8 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
+#include <linux/usb/role.h>
 #include <linux/usb/typec.h>
 
 #define FUSB301_REG_DEVICE_ID	0x01
@@ -48,8 +50,6 @@
 
 #define FUSB301_TYPE_SINK	BIT(4)
 #define FUSB301_TYPE_SOURCE	BIT(3)
-#define FUSB301_TYPE_DEBUG_ACC	BIT(1)
-#define FUSB301_TYPE_AUDIO_ACC	BIT(0)
 
 struct fusb301 {
 	struct device *dev;
@@ -58,9 +58,38 @@ struct fusb301 {
 	struct typec_port *port;
 	struct typec_partner *partner;
 	struct fwnode_handle *connector;
+	struct usb_role_switch *role_sw;
+	struct regulator *vbus;
+	bool vbus_on;
+	int irq;
 	enum typec_pwr_opmode pwr_opmode;
 	unsigned int partner_type;
 };
+
+/*
+ * As a Type-C source (DFP, Attached.SRC) the FUSB301 does not switch VBUS
+ * itself; the board gates it with an external supply. Enable that supply only
+ * while a sink partner is attached and disable it again otherwise.
+ */
+static void fusb301_vbus_set(struct fusb301 *fusb, bool on)
+{
+	int ret;
+
+	if (!fusb->vbus || fusb->vbus_on == on)
+		return;
+
+	if (on)
+		ret = regulator_enable(fusb->vbus);
+	else
+		ret = regulator_disable(fusb->vbus);
+	if (ret) {
+		dev_warn(fusb->dev, "failed to %s VBUS: %d\n",
+			 on ? "enable" : "disable", ret);
+		return;
+	}
+
+	fusb->vbus_on = on;
+}
 
 static unsigned int fusb301_mode_for_port_type(enum typec_port_type type)
 {
@@ -131,10 +160,16 @@ static int fusb301_set_port_type(struct typec_port *port,
 				  enum typec_port_type type)
 {
 	struct fusb301 *fusb = typec_get_drvdata(port);
+	int ret;
 
-	return regmap_update_bits(fusb->regmap, FUSB301_REG_MODE,
-				  FUSB301_MODE_MASK,
-				  fusb301_mode_for_port_type(type));
+	ret = regmap_update_bits(fusb->regmap, FUSB301_REG_MODE,
+				 FUSB301_MODE_MASK,
+				 fusb301_mode_for_port_type(type));
+	if (ret)
+		return ret;
+
+	fusb->cap.type = type;
+	return 0;
 }
 
 static const struct typec_operations fusb301_typec_ops = {
@@ -167,10 +202,12 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		return ret;
 
 	if (!(status & FUSB301_STATUS_ATTACH)) {
+		fusb301_vbus_set(fusb, false);
 		fusb301_unregister_partner(fusb);
 		fusb->partner_type = 0;
 		pwr_role = fusb301_default_role(fusb);
 		data_role = pwr_role == TYPEC_SOURCE ? TYPEC_HOST : TYPEC_DEVICE;
+		usb_role_switch_set_role(fusb->role_sw, USB_ROLE_NONE);
 		typec_set_data_role(fusb->port, data_role);
 		typec_set_pwr_role(fusb->port, pwr_role);
 		typec_set_vconn_role(fusb->port, pwr_role);
@@ -179,22 +216,17 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		return 0;
 	}
 
-	partner_type = type & (FUSB301_TYPE_SINK | FUSB301_TYPE_SOURCE |
-				       FUSB301_TYPE_DEBUG_ACC | FUSB301_TYPE_AUDIO_ACC);
+	partner_type = type & (FUSB301_TYPE_SINK | FUSB301_TYPE_SOURCE);
 	if (!partner_type)
 		return -EIO;
 
 	if (partner_type & FUSB301_TYPE_SINK)
 		pwr_role = TYPEC_SOURCE;
-	else if (partner_type & FUSB301_TYPE_SOURCE)
-		pwr_role = TYPEC_SINK;
 	else
-		pwr_role = fusb301_default_role(fusb);
+		pwr_role = TYPEC_SINK;
 
-	if (partner_type & FUSB301_TYPE_AUDIO_ACC)
-		desc.accessory = TYPEC_ACCESSORY_AUDIO;
-	else if (partner_type & FUSB301_TYPE_DEBUG_ACC)
-		desc.accessory = TYPEC_ACCESSORY_DEBUG;
+	/* Source VBUS only for a sink partner, never for an accessory. */
+	fusb301_vbus_set(fusb, partner_type & FUSB301_TYPE_SINK);
 
 	if (partner_type != fusb->partner_type) {
 		fusb301_unregister_partner(fusb);
@@ -206,6 +238,9 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		}
 
 		data_role = pwr_role == TYPEC_SOURCE ? TYPEC_HOST : TYPEC_DEVICE;
+		usb_role_switch_set_role(fusb->role_sw,
+					 pwr_role == TYPEC_SOURCE ?
+					 USB_ROLE_HOST : USB_ROLE_DEVICE);
 		typec_set_pwr_role(fusb->port, pwr_role);
 		typec_set_vconn_role(fusb->port, pwr_role);
 		typec_set_data_role(fusb->port, data_role);
@@ -308,45 +343,72 @@ static int fusb301_probe(struct i2c_client *client)
 		goto err_put_connector;
 	}
 	fusb->pwr_opmode = ret;
-	if (client->irq <= 0) {
+	fusb->irq = client->irq;
+	if (fusb->irq <= 0) {
 		ret = -EINVAL;
 		dev_err_probe(dev, ret, "missing active-low interrupt\n");
 		goto err_put_connector;
 	}
 
+	fusb->vbus = devm_of_regulator_get_optional(dev,
+						    to_of_node(fusb->connector),
+						    "vbus");
+	if (IS_ERR(fusb->vbus)) {
+		ret = PTR_ERR(fusb->vbus);
+		if (ret != -ENODEV) {
+			dev_err_probe(dev, ret, "failed to get VBUS supply\n");
+			goto err_put_connector;
+		}
+		fusb->vbus = NULL;
+	}
+
+	/*
+	 * The USB controller behind the connector learns its host/device role
+	 * from this optional role switch. Absence is fine (e.g. a host-only
+	 * port); -EPROBE_DEFER means the switch is not ready yet.
+	 */
+	fusb->role_sw = fwnode_usb_role_switch_get(fusb->connector);
+	if (IS_ERR(fusb->role_sw)) {
+		ret = dev_err_probe(dev, PTR_ERR(fusb->role_sw),
+				    "failed to get USB role switch\n");
+		goto err_put_connector;
+	}
+
 	fusb->cap.revision = USB_TYPEC_REV_1_1;
-	fusb->cap.accessory[0] = TYPEC_ACCESSORY_AUDIO;
-	fusb->cap.accessory[1] = TYPEC_ACCESSORY_DEBUG;
 	fusb->cap.orientation_aware = true;
 	fusb->cap.driver_data = fusb;
 	fusb->cap.ops = &fusb301_typec_ops;
 
 	ret = fusb301_hw_init(fusb);
 	if (ret)
-		goto err_put_connector;
+		goto err_put_role_sw;
 
 	fusb->port = typec_register_port(dev, &fusb->cap);
 	if (IS_ERR(fusb->port)) {
 		ret = PTR_ERR(fusb->port);
-		goto err_put_connector;
+		goto err_put_role_sw;
 	}
 
 	ret = fusb301_update_status(fusb);
 	if (ret)
 		goto err_unregister_port;
 
-	ret = devm_request_threaded_irq(dev, client->irq, NULL, fusb301_irq,
-					IRQF_ONESHOT, dev_name(dev), fusb);
+	i2c_set_clientdata(client, fusb);
+
+	ret = request_threaded_irq(fusb->irq, NULL, fusb301_irq,
+				   IRQF_ONESHOT, dev_name(dev), fusb);
 	if (ret)
 		goto err_unregister_port;
 
-	i2c_set_clientdata(client, fusb);
 	fwnode_handle_put(fusb->connector);
 	return 0;
 
 err_unregister_port:
+	fusb301_vbus_set(fusb, false);
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
+err_put_role_sw:
+	usb_role_switch_put(fusb->role_sw);
 err_put_connector:
 	fwnode_handle_put(fusb->connector);
 	return ret;
@@ -356,8 +418,18 @@ static void fusb301_remove(struct i2c_client *client)
 {
 	struct fusb301 *fusb = i2c_get_clientdata(client);
 
+	free_irq(fusb->irq, fusb);
+	fusb301_vbus_set(fusb, false);
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
+	usb_role_switch_put(fusb->role_sw);
+}
+
+static void fusb301_shutdown(struct i2c_client *client)
+{
+	struct fusb301 *fusb = i2c_get_clientdata(client);
+
+	fusb301_vbus_set(fusb, false);
 }
 
 static const struct of_device_id fusb301_of_match[] = {
@@ -377,6 +449,7 @@ MODULE_DEVICE_TABLE(i2c, fusb301_i2c_id);
 static struct i2c_driver fusb301_driver = {
 	.probe = fusb301_probe,
 	.remove = fusb301_remove,
+	.shutdown = fusb301_shutdown,
 	.driver = {
 		.name = "fusb301",
 		.of_match_table = fusb301_of_match,
