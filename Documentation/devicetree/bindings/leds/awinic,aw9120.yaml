@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/leds/awinic,aw9120.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Awinic AW9120 20-channel LED controller
+
+maintainers:
+  - Miroslav Mraz <miroslav.mraz@techmania.cz>
+
+description:
+  The AW9120 is an I2C constant-current LED controller with 20 individually
+  controlled outputs. Each output is described by a child node whose unit
+  address is the output index (0-19).
+
+properties:
+  compatible:
+    const: awinic,aw9120
+
+  reg:
+    maxItems: 1
+
+  "#address-cells":
+    const: 1
+
+  "#size-cells":
+    const: 0
+
+  enable-gpios:
+    description: GPIO connected to the PDN (power-down) pin.
+    maxItems: 1
+
+  vcc-supply:
+    description: Regulator supplying the controller.
+
+patternProperties:
+  "^led@[0-9a-f]+$":
+    type: object
+    $ref: common.yaml#
+    unevaluatedProperties: false
+
+    properties:
+      reg:
+        description: Index of the LED output.
+        minimum: 0
+        maximum: 19
+
+    required:
+      - reg
+
+required:
+  - compatible
+  - reg
+  - "#address-cells"
+  - "#size-cells"
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    #include <dt-bindings/leds/common.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        led-controller@2c {
+            compatible = "awinic,aw9120";
+            reg = <0x2c>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            enable-gpios = <&pio 245 GPIO_ACTIVE_HIGH>;
+
+            led@0 {
+                reg = <0>;
+                color = <LED_COLOR_ID_RED>;
+                function = LED_FUNCTION_INDICATOR;
+            };
+
+            led@1 {
+                reg = <1>;
+                color = <LED_COLOR_ID_GREEN>;
+                function = LED_FUNCTION_INDICATOR;
+            };
+
+            led@2 {
+                reg = <2>;
+                color = <LED_COLOR_ID_BLUE>;
+                function = LED_FUNCTION_INDICATOR;
+            };
+        };
+    };
+
+...
