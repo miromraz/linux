@@ -14,35 +14,27 @@
 #include <linux/regmap.h>
 
 /*
- * Register field for TOP_CKPDN0 to enable
- * 32K clock common for LED device.
+ * Register fields to gate the LED clocks. The common 32K gate, the
+ * per-channel ISINK gate and the ISINK clock-source select live at
+ * different bit positions (and, for the ISINK gates, in different
+ * registers) depending on the PMIC, so the shifts are taken from the
+ * per-chip register spec (struct mt6323_regs) while the holding
+ * registers come from its top_ckpdn[]/top_ckcon[] arrays.
  */
-#define RG_DRV_32K_CK_PDN		BIT(11)
-#define RG_DRV_32K_CK_PDN_MASK		BIT(11)
+#define RG_DRV_32K_CK_PDN(s)		BIT(s)
+#define RG_ISINK_CK_PDN(s, i)		BIT((s) + (i))
+#define RG_ISINK_CK_SEL(s, i)		BIT((s) + (i))
 
 /* 32K/1M/6M clock common for WLED device */
 #define RG_VWLED_1M_CK_PDN		BIT(0)
 #define RG_VWLED_32K_CK_PDN		BIT(12)
 #define RG_VWLED_6M_CK_PDN		BIT(13)
 
-/*
- * Register field for TOP_CKPDN2 to enable
- * individual clock for LED device.
- */
-#define RG_ISINK_CK_PDN(i)	BIT(i)
-#define RG_ISINK_CK_PDN_MASK(i)	BIT(i)
-
-/*
- * Register field for TOP_CKCON1 to select
- * clock source.
- */
-#define RG_ISINK_CK_SEL_MASK(i)	(BIT(10) << (i))
-
 #define ISINK_CON(r, i)		(r + 0x8 * (i))
 
-/* ISINK_CON0: Register to setup the duty cycle of the blink. */
-#define ISINK_DIM_DUTY_MASK	(0x1f << 8)
-#define ISINK_DIM_DUTY(i)	(((i) << 8) & ISINK_DIM_DUTY_MASK)
+/* Register to setup the duty cycle of the blink. */
+#define ISINK_DIM_DUTY_MASK(s)	(0x1f << (s))
+#define ISINK_DIM_DUTY(s, i)	(((i) & 0x1f) << (s))
 
 /* ISINK_CON1: Register to setup the period of the blink. */
 #define ISINK_DIM_FSEL_MASK	(0xffff)
@@ -90,6 +82,16 @@ struct mt6323_led {
  * @isink_max_regs:	Number of ISINK[0..x] registers
  * @isink_en_ctrl:	Offset to ISINK_EN_CTRL register
  * @iwled_en_ctrl:	Offset to IWLED_EN_CTRL register
+ * @isink_mode_ctrl:	Offset to the ISINK mode-select register, or 0 when
+ *			the PMIC needs no explicit mode programming
+ * @ck_32k_pdn_shift:	Bit of the common 32K gate in top_ckpdn[0]
+ * @isink_ck_pdn_shift:	Bit of the channel-0 ISINK gate in top_ckpdn[2]
+ *			(channel i uses isink_ck_pdn_shift + i)
+ * @isink_ck_sel_shift:	Bit of the channel-0 ISINK clock select in
+ *			top_ckcon[1] (channel i uses isink_ck_sel_shift + i)
+ * @isink_dim_duty_shift: Bit offset of the DIM duty field in isink_con[0]
+ * @isink_sfstr_in_con:	True when the soft-start control is packed into the
+ *			brightness register (isink_con[2])
  */
 struct mt6323_regs {
 	const u16 *top_ckpdn;
@@ -101,6 +103,12 @@ struct mt6323_regs {
 	u8 isink_max_regs;
 	u16 isink_en_ctrl;
 	u16 iwled_en_ctrl;
+	u16 isink_mode_ctrl;
+	u8 ck_32k_pdn_shift;
+	u8 isink_ck_pdn_shift;
+	u8 isink_ck_sel_shift;
+	u8 isink_dim_duty_shift;
+	bool isink_sfstr_in_con;
 };
 
 /**
@@ -163,12 +171,18 @@ static int mt6323_led_hw_brightness(struct led_classdev *cdev,
 	 * Setup current output for the corresponding
 	 * brightness level.
 	 */
-	con2_mask |= ISINK_CH_STEP_MASK |
-		     ISINK_SFSTR0_TC_MASK |
-		     ISINK_SFSTR0_EN_MASK;
-	con2_val |=  ISINK_CH_STEP(brightness - 1) |
-		     ISINK_SFSTR0_TC(2) |
-		     ISINK_SFSTR0_EN;
+	con2_mask |= ISINK_CH_STEP_MASK;
+	con2_val |= ISINK_CH_STEP(brightness - 1);
+
+	/*
+	 * On some PMICs (e.g. MT6351) the soft-start control is a separate
+	 * register that is left at reset for the ISINK LEDs, so only program
+	 * it where it is packed into the brightness register.
+	 */
+	if (regs->isink_sfstr_in_con) {
+		con2_mask |= ISINK_SFSTR0_TC_MASK | ISINK_SFSTR0_EN_MASK;
+		con2_val |= ISINK_SFSTR0_TC(2) | ISINK_SFSTR0_EN;
+	}
 
 	ret = regmap_update_bits(regmap, ISINK_CON(regs->isink_con[2], led->id),
 				 con2_mask, con2_val);
@@ -192,8 +206,8 @@ static int mt6323_led_hw_off(struct led_classdev *cdev)
 
 	usleep_range(100, 300);
 	ret = regmap_update_bits(regmap, regs->top_ckpdn[2],
-				 RG_ISINK_CK_PDN_MASK(led->id),
-				 RG_ISINK_CK_PDN(led->id));
+				 RG_ISINK_CK_PDN(regs->isink_ck_pdn_shift, led->id),
+				 RG_ISINK_CK_PDN(regs->isink_ck_pdn_shift, led->id));
 	if (ret < 0)
 		return ret;
 
@@ -214,7 +228,7 @@ mt6323_get_led_hw_brightness(struct led_classdev *cdev)
 	if (ret < 0)
 		return ret;
 
-	if (status & RG_ISINK_CK_PDN_MASK(led->id))
+	if (status & RG_ISINK_CK_PDN(regs->isink_ck_pdn_shift, led->id))
 		return 0;
 
 	ret = regmap_read(regmap, regs->isink_en_ctrl, &status);
@@ -248,18 +262,30 @@ static int mt6323_led_hw_on(struct led_classdev *cdev,
 	 * the default.
 	 */
 	ret = regmap_update_bits(regmap, regs->top_ckcon[1],
-				 RG_ISINK_CK_SEL_MASK(led->id), 0);
+				 RG_ISINK_CK_SEL(regs->isink_ck_sel_shift, led->id),
+				 0);
 	if (ret < 0)
 		return ret;
 
-	status = RG_ISINK_CK_PDN(led->id);
-	ret = regmap_update_bits(regmap, regs->top_ckpdn[2],
-				 RG_ISINK_CK_PDN_MASK(led->id),
-				 ~status);
+	status = RG_ISINK_CK_PDN(regs->isink_ck_pdn_shift, led->id);
+	ret = regmap_update_bits(regmap, regs->top_ckpdn[2], status, ~status);
 	if (ret < 0)
 		return ret;
 
 	usleep_range(100, 300);
+
+	/*
+	 * PMICs with a dedicated ISINK mode register (e.g. MT6351) must be
+	 * put into PWM dimming mode, which is how this driver drives the
+	 * current sink. The 2-bit field for channel i sits at bits
+	 * [15 - 2 * i : 14 - 2 * i] and PWM mode is value 0.
+	 */
+	if (regs->isink_mode_ctrl) {
+		ret = regmap_update_bits(regmap, regs->isink_mode_ctrl,
+					 0x3 << (14 - 2 * led->id), 0);
+		if (ret < 0)
+			return ret;
+	}
 
 	ret = regmap_update_bits(regmap, regs->isink_en_ctrl,
 				 ISINK_CH_EN_MASK(led->id),
@@ -272,8 +298,8 @@ static int mt6323_led_hw_on(struct led_classdev *cdev,
 		return ret;
 
 	ret = regmap_update_bits(regmap, ISINK_CON(regs->isink_con[0], led->id),
-				 ISINK_DIM_DUTY_MASK,
-				 ISINK_DIM_DUTY(31));
+				 ISINK_DIM_DUTY_MASK(regs->isink_dim_duty_shift),
+				 ISINK_DIM_DUTY(regs->isink_dim_duty_shift, 31));
 	if (ret < 0)
 		return ret;
 
@@ -342,8 +368,9 @@ static int mt6323_led_set_blink(struct led_classdev *cdev,
 	}
 
 	ret = regmap_update_bits(regmap, ISINK_CON(regs->isink_con[0], led->id),
-				 ISINK_DIM_DUTY_MASK,
-				 ISINK_DIM_DUTY(duty_hw - 1));
+				 ISINK_DIM_DUTY_MASK(regs->isink_dim_duty_shift),
+				 ISINK_DIM_DUTY(regs->isink_dim_duty_shift,
+						duty_hw - 1));
 	if (ret < 0)
 		goto out;
 
@@ -555,9 +582,9 @@ static int mt6323_led_probe(struct platform_device *pdev)
 	leds->hw = hw;
 	mutex_init(&leds->lock);
 
-	status = RG_DRV_32K_CK_PDN;
+	status = RG_DRV_32K_CK_PDN(regs->ck_32k_pdn_shift);
 	ret = regmap_update_bits(leds->hw->regmap, regs->top_ckpdn[0],
-				 RG_DRV_32K_CK_PDN_MASK, ~status);
+				 status, ~status);
 	if (ret < 0) {
 		dev_err(leds->dev,
 			"Failed to update TOP_CKPDN0 Register\n");
@@ -635,8 +662,8 @@ static void mt6323_led_remove(struct platform_device *pdev)
 		mt6323_led_hw_off(&leds->led[i]->cdev);
 
 	regmap_update_bits(leds->hw->regmap, regs->top_ckpdn[0],
-			   RG_DRV_32K_CK_PDN_MASK,
-			   RG_DRV_32K_CK_PDN);
+			   RG_DRV_32K_CK_PDN(regs->ck_32k_pdn_shift),
+			   RG_DRV_32K_CK_PDN(regs->ck_32k_pdn_shift));
 
 	mutex_destroy(&leds->lock);
 }
@@ -650,6 +677,11 @@ static const struct mt6323_regs mt6323_registers = {
 	.num_isink_con = 3,
 	.isink_max_regs = 4, /* ISINK[0..3] */
 	.isink_en_ctrl = 0x356,
+	.ck_32k_pdn_shift = 11,
+	.isink_ck_pdn_shift = 0,
+	.isink_ck_sel_shift = 10,
+	.isink_dim_duty_shift = 8,
+	.isink_sfstr_in_con = true,
 };
 
 static const struct mt6323_regs mt6331_registers = {
@@ -661,6 +693,11 @@ static const struct mt6323_regs mt6331_registers = {
 	.num_isink_con = 5,
 	.isink_max_regs = 4, /* ISINK[0..3] */
 	.isink_en_ctrl = 0x43a,
+	.ck_32k_pdn_shift = 11,
+	.isink_ck_pdn_shift = 0,
+	.isink_ck_sel_shift = 10,
+	.isink_dim_duty_shift = 8,
+	.isink_sfstr_in_con = true,
 };
 
 static const struct mt6323_regs mt6332_registers = {
@@ -672,6 +709,8 @@ static const struct mt6323_regs mt6332_registers = {
 	.num_isink_con = 1,
 	.isink_max_regs = 12, /* IWLED[0..2, 3..9] */
 	.iwled_en_ctrl = 0x8cda,
+	/* MT6332 exposes only WLEDs; the 32K gate is the single shared bit. */
+	.ck_32k_pdn_shift = 11,
 };
 
 static const struct mt6323_hwspec mt6323_spec = {
