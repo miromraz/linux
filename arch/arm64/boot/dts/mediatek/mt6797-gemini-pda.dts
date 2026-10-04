@@ -10,7 +10,6 @@
 #include <dt-bindings/iio/adc/mediatek,mt6351-auxadc.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
-#include <dt-bindings/leds/common.h>
 
 / {
 	model = "Planet Computers Gemini PDA";
