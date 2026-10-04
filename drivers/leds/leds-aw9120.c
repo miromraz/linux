@@ -8,13 +8,19 @@
  * address / 16-bit big-endian data I2C interface. Each output is controlled
  * independently: the per-channel drive current lives in the IMAX registers and
  * the per-channel PWM duty is written through the command register (CMDR) with
- * a single "set PWM" instruction. This driver exposes one LED class device per
- * output and maps brightness directly onto that 8-bit PWM value.
+ * a single "set PWM" instruction.
+ *
+ * Outputs wired together as an RGB group are exposed through the multicolor LED
+ * class (one output per colour component); remaining outputs are exposed as
+ * plain single-colour LED class devices. Only the outputs described in the
+ * device tree are enabled.
  */
 
+#include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
+#include <linux/led-class-multicolor.h>
 #include <linux/leds.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
@@ -35,15 +41,13 @@
 /* LED enable registers: LER1 outputs 0-11, LER2 outputs 12-19. */
 #define AW9120_REG_LER1		0x50
 #define AW9120_REG_LER2		0x51
-#define AW9120_LER1_ALL		0x0fff
-#define AW9120_LER2_ALL		0x00ff
 
 /* Control-source select: 1 = I2C/command register, 0 = internal SRAM. */
 #define AW9120_REG_CTRS1	0x55
 #define AW9120_REG_CTRS2	0x56
 
-/* Per-channel max-current registers, four 4-bit nibbles each. */
-#define AW9120_REG_IMAX1	0x57
+/* Per-channel max-current registers: five registers, four 4-bit nibbles each. */
+#define AW9120_REG_IMAX(n)	(0x57 + (n))
 #define AW9120_IMAX_DEFAULT	0x1111
 
 /* Command register: executes one instruction immediately. */
@@ -52,89 +56,209 @@
 #define AW9120_CMD_CHAN(x)	((x) << 8)
 
 #define AW9120_REG_MAX		0x7f
+#define AW9120_MAX_BRIGHTNESS	0xff
+
+struct aw9120;
 
 struct aw9120_led {
-	struct led_classdev cdev;
-	struct regmap *regmap;
+	struct aw9120 *chip;
+	union {
+		struct led_classdev cdev;
+		struct led_classdev_mc mcdev;
+	};
 	u32 channel;
 };
 
-static int aw9120_brightness_set(struct led_classdev *cdev,
-				 enum led_brightness brightness)
+struct aw9120 {
+	struct regmap *regmap;
+	struct device *dev;
+	u32 used_mask;
+	unsigned long num_leds;
+	struct aw9120_led leds[] __counted_by(num_leds);
+};
+
+static int aw9120_set_channel(struct aw9120 *chip, u32 channel,
+			      enum led_brightness brightness)
+{
+	return regmap_write(chip->regmap, AW9120_REG_CMDR,
+			    AW9120_CMD_SETPWM | AW9120_CMD_CHAN(channel) |
+			    brightness);
+}
+
+static int aw9120_brightness_single_set(struct led_classdev *cdev,
+					enum led_brightness value)
 {
 	struct aw9120_led *led = container_of(cdev, struct aw9120_led, cdev);
 
-	return regmap_write(led->regmap, AW9120_REG_CMDR,
-			    AW9120_CMD_SETPWM |
-			    AW9120_CMD_CHAN(led->channel) | brightness);
+	return aw9120_set_channel(led->chip, led->channel, value);
 }
 
-static int aw9120_chip_init(struct regmap *regmap)
+static int aw9120_brightness_mc_set(struct led_classdev *cdev,
+				    enum led_brightness value)
 {
-	static const struct reg_sequence init_seq[] = {
-		{ AW9120_REG_GCR, 0 },
-		{ AW9120_REG_IMAX1 + 0, AW9120_IMAX_DEFAULT },
-		{ AW9120_REG_IMAX1 + 1, AW9120_IMAX_DEFAULT },
-		{ AW9120_REG_IMAX1 + 2, AW9120_IMAX_DEFAULT },
-		{ AW9120_REG_IMAX1 + 3, AW9120_IMAX_DEFAULT },
-		{ AW9120_REG_IMAX1 + 4, AW9120_IMAX_DEFAULT },
-		{ AW9120_REG_LER1, AW9120_LER1_ALL },
-		{ AW9120_REG_LER2, AW9120_LER2_ALL },
-		{ AW9120_REG_CTRS1, AW9120_LER1_ALL },
-		{ AW9120_REG_CTRS2, AW9120_LER2_ALL },
-		{ AW9120_REG_GCR, AW9120_GCR_ENABLE },
-	};
+	struct led_classdev_mc *mc = lcdev_to_mccdev(cdev);
+	struct aw9120_led *led = container_of(mc, struct aw9120_led, mcdev);
+	int i, ret;
 
-	return regmap_multi_reg_write(regmap, init_seq, ARRAY_SIZE(init_seq));
+	led_mc_calc_color_components(mc, value);
+
+	for (i = 0; i < mc->num_colors; i++) {
+		ret = aw9120_set_channel(led->chip, mc->subled_info[i].channel,
+					 mc->subled_info[i].brightness);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int aw9120_claim_channel(struct aw9120 *chip, u32 channel)
+{
+	if (channel >= AW9120_MAX_LEDS)
+		return dev_err_probe(chip->dev, -EINVAL,
+				     "LED output %u out of range\n", channel);
+
+	if (chip->used_mask & BIT(channel))
+		return dev_err_probe(chip->dev, -EINVAL,
+				     "duplicate LED output %u\n", channel);
+
+	chip->used_mask |= BIT(channel);
+
+	return 0;
+}
+
+static int aw9120_setup_rgb(struct aw9120 *chip, struct fwnode_handle *fwnode,
+			    struct aw9120_led *led,
+			    struct led_init_data *init_data)
+{
+	struct mc_subled *info;
+	int num_colors, i = 0, ret;
+
+	num_colors = fwnode_get_child_node_count(fwnode);
+	if (!num_colors || num_colors > AW9120_MAX_LEDS)
+		return dev_err_probe(chip->dev, -EINVAL,
+				     "invalid colour count in %pfw\n", fwnode);
+
+	info = devm_kcalloc(chip->dev, num_colors, sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+
+	fwnode_for_each_child_node_scoped(fwnode, child) {
+		u32 color, reg;
+
+		ret = fwnode_property_read_u32(child, "color", &color);
+		if (ret)
+			return dev_err_probe(chip->dev, ret,
+					     "missing colour in %pfw\n", child);
+
+		ret = fwnode_property_read_u32(child, "reg", &reg);
+		if (ret)
+			return dev_err_probe(chip->dev, ret,
+					     "missing reg in %pfw\n", child);
+
+		ret = aw9120_claim_channel(chip, reg);
+		if (ret)
+			return ret;
+
+		info[i].color_index = color;
+		info[i].channel = reg;
+		info[i].intensity = AW9120_MAX_BRIGHTNESS;
+		i++;
+	}
+
+	led->mcdev.subled_info = info;
+	led->mcdev.num_colors = num_colors;
+	led->mcdev.led_cdev.max_brightness = AW9120_MAX_BRIGHTNESS;
+	led->mcdev.led_cdev.brightness_set_blocking = aw9120_brightness_mc_set;
+
+	return devm_led_classdev_multicolor_register_ext(chip->dev, &led->mcdev,
+							 init_data);
+}
+
+static int aw9120_setup_single(struct aw9120 *chip, struct fwnode_handle *fwnode,
+			       struct aw9120_led *led,
+			       struct led_init_data *init_data)
+{
+	u32 reg;
+	int ret;
+
+	ret = fwnode_property_read_u32(fwnode, "reg", &reg);
+	if (ret)
+		return dev_err_probe(chip->dev, ret, "missing reg in %pfw\n",
+				     fwnode);
+
+	ret = aw9120_claim_channel(chip, reg);
+	if (ret)
+		return ret;
+
+	led->channel = reg;
+	led->cdev.max_brightness = AW9120_MAX_BRIGHTNESS;
+	led->cdev.brightness_set_blocking = aw9120_brightness_single_set;
+
+	return devm_led_classdev_register_ext(chip->dev, &led->cdev, init_data);
+}
+
+static int aw9120_add_led(struct aw9120 *chip, struct fwnode_handle *fwnode,
+			  unsigned int index)
+{
+	struct aw9120_led *led = &chip->leds[index];
+	struct led_init_data init_data = { .fwnode = fwnode };
+	u32 color = 0;
+	int ret;
+
+	led->chip = chip;
+
+	/* "color" is optional for a single LED, but selects the RGB path. */
+	ret = fwnode_property_read_u32(fwnode, "color", &color);
+	if (ret && ret != -EINVAL)
+		return dev_err_probe(chip->dev, ret, "bad colour in %pfw\n",
+				     fwnode);
+
+	if (color == LED_COLOR_ID_RGB)
+		return aw9120_setup_rgb(chip, fwnode, led, &init_data);
+
+	return aw9120_setup_single(chip, fwnode, led, &init_data);
+}
+
+static int aw9120_chip_init(struct aw9120 *chip)
+{
+	u32 mask = chip->used_mask;
+	int i, ret;
+
+	ret = regmap_write(chip->regmap, AW9120_REG_GCR, 0);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < 5; i++) {
+		ret = regmap_write(chip->regmap, AW9120_REG_IMAX(i),
+				   AW9120_IMAX_DEFAULT);
+		if (ret)
+			return ret;
+	}
+
+	/* Enable and command-control only the outputs described in DT. */
+	ret = regmap_write(chip->regmap, AW9120_REG_LER1, mask & 0xfff);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(chip->regmap, AW9120_REG_LER2, (mask >> 12) & 0xff);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(chip->regmap, AW9120_REG_CTRS1, mask & 0xfff);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(chip->regmap, AW9120_REG_CTRS2, (mask >> 12) & 0xff);
+	if (ret)
+		return ret;
+
+	return regmap_write(chip->regmap, AW9120_REG_GCR, AW9120_GCR_ENABLE);
 }
 
 static void aw9120_power_off(void *data)
 {
-	struct gpio_desc *enable_gpio = data;
-
-	gpiod_set_value_cansleep(enable_gpio, 0);
-}
-
-static void aw9120_regulator_disable(void *data)
-{
-	regulator_disable(data);
-}
-
-static int aw9120_probe_dt(struct device *dev, struct regmap *regmap)
-{
-	int count, ret;
-
-	count = device_get_child_node_count(dev);
-	if (!count || count > AW9120_MAX_LEDS)
-		return dev_err_probe(dev, -EINVAL,
-				     "invalid LED node count: %d\n", count);
-
-	device_for_each_child_node_scoped(dev, child) {
-		struct led_init_data init_data = { .fwnode = child };
-		struct aw9120_led *led;
-
-		led = devm_kzalloc(dev, sizeof(*led), GFP_KERNEL);
-		if (!led)
-			return -ENOMEM;
-
-		ret = fwnode_property_read_u32(child, "reg", &led->channel);
-		if (ret || led->channel >= AW9120_MAX_LEDS)
-			return dev_err_probe(dev, ret ? ret : -EINVAL,
-					     "invalid LED channel\n");
-
-		led->regmap = regmap;
-		led->cdev.max_brightness = 0xff;
-		led->cdev.brightness_set_blocking = aw9120_brightness_set;
-
-		ret = devm_led_classdev_register_ext(dev, &led->cdev,
-						     &init_data);
-		if (ret)
-			return dev_err_probe(dev, ret,
-					     "failed to register LED %u\n",
-					     led->channel);
-	}
-
-	return 0;
+	gpiod_set_value_cansleep(data, 0);
 }
 
 static const struct regmap_config aw9120_regmap_config = {
@@ -148,27 +272,30 @@ static int aw9120_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct gpio_desc *enable_gpio;
-	struct regulator *vcc;
-	struct regmap *regmap;
+	struct aw9120 *chip;
 	unsigned int chip_id;
-	int ret;
+	int count, i = 0, ret;
 
-	regmap = devm_regmap_init_i2c(client, &aw9120_regmap_config);
-	if (IS_ERR(regmap))
-		return dev_err_probe(dev, PTR_ERR(regmap),
+	count = device_get_child_node_count(dev);
+	if (!count || count > AW9120_MAX_LEDS)
+		return dev_err_probe(dev, -EINVAL,
+				     "invalid LED node count %d\n", count);
+
+	chip = devm_kzalloc(dev, struct_size(chip, leds, count), GFP_KERNEL);
+	if (!chip)
+		return -ENOMEM;
+
+	chip->dev = dev;
+	chip->num_leds = count;
+
+	chip->regmap = devm_regmap_init_i2c(client, &aw9120_regmap_config);
+	if (IS_ERR(chip->regmap))
+		return dev_err_probe(dev, PTR_ERR(chip->regmap),
 				     "failed to init regmap\n");
 
-	vcc = devm_regulator_get(dev, "vcc");
-	if (IS_ERR(vcc))
-		return dev_err_probe(dev, PTR_ERR(vcc), "failed to get vcc\n");
-
-	ret = regulator_enable(vcc);
+	ret = devm_regulator_get_enable(dev, "vcc");
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to enable vcc\n");
-
-	ret = devm_add_action_or_reset(dev, aw9120_regulator_disable, vcc);
-	if (ret)
-		return ret;
 
 	/* Optional PDN pin: pulse low then high to reset and power the chip. */
 	enable_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_LOW);
@@ -186,18 +313,20 @@ static int aw9120_probe(struct i2c_client *client)
 			return ret;
 	}
 
-	ret = regmap_read(regmap, AW9120_REG_RSTR, &chip_id);
+	ret = regmap_read(chip->regmap, AW9120_REG_RSTR, &chip_id);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to read chip id\n");
 	if (chip_id != AW9120_CHIP_ID)
 		return dev_err_probe(dev, -ENODEV,
 				     "unexpected chip id 0x%04x\n", chip_id);
 
-	ret = aw9120_chip_init(regmap);
-	if (ret)
-		return dev_err_probe(dev, ret, "failed to init chip\n");
+	device_for_each_child_node_scoped(dev, child) {
+		ret = aw9120_add_led(chip, child, i++);
+		if (ret)
+			return ret;
+	}
 
-	return aw9120_probe_dt(dev, regmap);
+	return aw9120_chip_init(chip);
 }
 
 static const struct of_device_id aw9120_of_match[] = {
