@@ -428,7 +428,6 @@
 		mediatek,larbs = <&larb0>, <&larb1>, <&larb2>, <&larb3>,
 				 <&larb4>, <&larb5>, <&larb6>;
 		#iommu-cells = <1>;
-		status = "disabled";
 	};
 
 	gce: mailbox@10212000 {
@@ -997,7 +996,6 @@
 		clocks = <&mmsys CLK_MM_SMI_LARB0>,
 			 <&mmsys CLK_MM_SMI_LARB0>;
 		clock-names = "apb", "smi";
-		status = "disabled";
 	};
 
 	larb5: larb@14021000 {
@@ -1008,7 +1006,6 @@
 		clocks = <&mmsys CLK_MM_SMI_LARB5>,
 			 <&mmsys CLK_MM_SMI_LARB5>;
 		clock-names = "apb", "smi";
-		status = "disabled";
 	};
 
 	smi_common: smi@14022000 {
@@ -1018,7 +1015,6 @@
 		clocks = <&mmsys CLK_MM_SMI_COMMON>,
 			 <&mmsys CLK_MM_SMI_COMMON>;
 		clock-names = "apb", "smi";
-		status = "disabled";
 	};
 
 	imgsys: syscon@15000000  {
