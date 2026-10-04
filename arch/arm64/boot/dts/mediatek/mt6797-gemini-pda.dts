@@ -249,6 +249,12 @@
 		};
 	};
 
+	/*
+	 * Pull and drive values follow the vendor aeon6797_6m_n.dts mmc1 groups
+	 * (cmd/dat pull-up, clk pull-down; drive-strength is written as a raw
+	 * MT6797 register code as on all MT6797 pads). Card detect is GPIO67
+	 * (vendor EINT6) with an internal pull-up.
+	 */
 	mmc1_pins_default: mmc1-default-pins {
 		pins-cmd-dat {
 			pinmux = <MT6797_GPIO130__FUNC_MSDC1_DAT0>,
@@ -256,10 +262,22 @@
 				 <MT6797_GPIO132__FUNC_MSDC1_DAT2>,
 				 <MT6797_GPIO133__FUNC_MSDC1_DAT3>,
 				 <MT6797_GPIO129__FUNC_MSDC1_CMD>;
+			drive-strength = <4>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
 		};
 
 		pins-clk {
 			pinmux = <MT6797_GPIO134__FUNC_MSDC1_CLK>;
+			drive-strength = <4>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	mmc1_cd_pins: mmc1-cd-pins {
+		pins-cd {
+			pinmux = <MT6797_GPIO67__FUNC_GPIO67>;
+			input-enable;
+			bias-pull-up;
 		};
 	};
 
@@ -292,8 +310,8 @@
 
 &mmc1 {
 	pinctrl-names = "default", "state_uhs";
-	pinctrl-0 = <&mmc1_pins_default>;
-	pinctrl-1 = <&mmc1_pins_default>;
+	pinctrl-0 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
+	pinctrl-1 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
 	bus-width = <4>;
 	max-frequency = <200000000>;
 	cap-sd-highspeed;
