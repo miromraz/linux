@@ -655,6 +655,162 @@
 	};
 };
 
+&i2c3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c3_pins_a>;
+	status = "okay";
+
+	/*
+	 * Awinic AW9120 20-channel constant-current LED controller (I2C3 0x2c,
+	 * PDN GPIO245; docs/driver-port-inventory.md). The per-channel colour
+	 * map is taken from the gemian-leds daemon (LightState.cpp
+	 * AWLEDCodeForStep plus the CH_6/CH_7 defines): five RGB indicator
+	 * blocks, an RGB status LED, a caps-lock LED and a power LED.
+	 */
+	led-controller@2c {
+		compatible = "awinic,aw9120";
+		reg = <0x2c>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		enable-gpios = <&pio 245 GPIO_ACTIVE_HIGH>;
+
+		led@0 {
+			reg = <0>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
+		};
+
+		led@1 {
+			reg = <1>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
+		};
+
+		led@2 {
+			reg = <2>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
+		};
+
+		led@3 {
+			reg = <3>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <3>;
+		};
+
+		led@4 {
+			reg = <4>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <3>;
+		};
+
+		led@5 {
+			reg = <5>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <3>;
+		};
+
+		led@6 {
+			reg = <6>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <4>;
+		};
+
+		led@7 {
+			reg = <7>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <4>;
+		};
+
+		led@8 {
+			reg = <8>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <4>;
+		};
+
+		led@9 {
+			reg = <9>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <5>;
+		};
+
+		led@a {
+			reg = <10>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <5>;
+		};
+
+		led@b {
+			reg = <11>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <5>;
+		};
+
+		led@c {
+			reg = <12>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
+		};
+
+		led@d {
+			reg = <13>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
+		};
+
+		led@e {
+			reg = <14>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
+		};
+
+		led@f {
+			reg = <15>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_STATUS;
+		};
+
+		led@10 {
+			reg = <16>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_STATUS;
+		};
+
+		led@11 {
+			reg = <17>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+		};
+
+		led@12 {
+			reg = <18>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_CAPSLOCK;
+		};
+
+		led@13 {
+			reg = <19>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_POWER;
+		};
+	};
+};
+
 /* The RT5735 VGPU rail remains disabled until a fixed OPP is validated. */
 &gpu {
 	mali-supply = <&rt5735_vgpu>;
