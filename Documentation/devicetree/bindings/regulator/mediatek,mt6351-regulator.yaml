@@ -10,7 +10,7 @@ maintainers:
   - Julien Etienne <julien.etienne@gmail.com>
 
 description: |
-  The MT6351 PMIC provides nine buck regulators and 30 independently
+  The MT6351 PMIC provides nine buck regulators and 29 independently
   controlled LDO regulator outputs. The regulators node is a child of the
   MT6351 MFD node. Regulator nodes are named for their hardware rail using
   buck-<name> and ldo-<name>.
@@ -25,7 +25,7 @@ patternProperties:
     $ref: regulator.yaml#
     unevaluatedProperties: false
 
-  "^ldo-v(a10|a18|bif28|cama|camd|camio|cn18|cn28|cn33-bt|cn33-wifi|dram|efuse|emc|gp3|ibr|io18|io28|ldo28|ldo28-1|mc|mch|mipi|rf12|rf18|sim1|sim2|tcxo24|tcxo28|usb33|xo22)$":
+  "^ldo-v(a10|a18|bif28|cama|camd|camio|cn18|cn28|cn33|dram|efuse|emc|gp3|ibr|io18|io28|ldo28|ldo28-1|mc|mch|mipi|rf12|rf18|sim1|sim2|tcxo24|tcxo28|usb33|xo22)$":
     type: object
     $ref: regulator.yaml#
     unevaluatedProperties: false
