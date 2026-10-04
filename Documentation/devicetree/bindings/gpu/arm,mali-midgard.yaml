@@ -157,6 +157,25 @@ allOf:
           minItems: 2
       required:
         - resets
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6797-mali
+    then:
+      properties:
+        power-domains:
+          minItems: 4
+          maxItems: 4
+        power-domain-names:
+          items:
+            - const: core0
+            - const: core1
+            - const: core2
+            - const: core3
+      required:
+        - power-domains
+        - power-domain-names
 
 examples:
   - |
