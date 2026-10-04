@@ -83,7 +83,7 @@
 		compatible = "simple-battery";
 		charge-full-design-microamp-hours = <4268000>;
 		voltage-min-design-microvolt = <3400000>;
-		voltage-max-design-microvolt = <4357000>;
+		voltage-max-design-microvolt = <4416000>;
 		ocv-capacity-celsius = <25>;
 		ocv-capacity-table-0 =
 			<4357000 100>, <4301000 95>, <4248000 91>, <4196000 86>,
