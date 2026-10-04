@@ -2770,6 +2770,16 @@ config SND_SOC_ML26124
 config SND_SOC_MT6351
 	tristate "MediaTek MT6351 Codec"
 
+config SND_SOC_MT6351_ACCDET
+	tristate "MediaTek MT6351 ACCDET driver"
+	depends on MTK_PMIC_WRAP
+	depends on IIO
+	help
+	  ACCDET means Accessory Detection technology, MediaTek develop it
+	  for ASoC codec soc-jack detection mechanism.  Select this to report
+	  headphone/headset plug and headset buttons found on the MT6351 PMIC.
+	  Select N if you don't have jack on board.
+
 config SND_SOC_MT6357
 	tristate "MediaTek MT6357 Codec"
 	help

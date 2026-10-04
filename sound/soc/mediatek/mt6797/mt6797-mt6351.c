@@ -6,9 +6,40 @@
 // Author: KaiChieh Chuang <kaichieh.chuang@mediatek.com>
 
 #include <linux/module.h>
+#include <linux/of_platform.h>
+#include <sound/jack.h>
 #include <sound/soc.h>
 
 #include "mt6797-afe-common.h"
+#include "../../codecs/mt6351-accdet.h"
+
+struct mt6797_mt6351_priv {
+	struct snd_soc_jack headset_jack;
+	struct snd_soc_component *accdet;
+};
+
+static int mt6797_mt6351_accdet_init(struct snd_soc_pcm_runtime *rtd)
+{
+	struct mt6797_mt6351_priv *priv =
+		snd_soc_card_get_drvdata(rtd->card);
+	int ret;
+
+	if (!priv->accdet)
+		return 0;
+
+	ret = snd_soc_card_jack_new(rtd->card, "Headset Jack",
+				    SND_JACK_HEADSET | SND_JACK_BTN_0 |
+				    SND_JACK_BTN_1 | SND_JACK_BTN_2 |
+				    SND_JACK_BTN_3,
+				    &priv->headset_jack);
+	if (ret) {
+		dev_err(rtd->dev, "Headset Jack creation failed: %d\n", ret);
+		return ret;
+	}
+
+	return mt6351_accdet_enable_jack_detect(priv->accdet,
+						&priv->headset_jack);
+}
 
 SND_SOC_DAILINK_DEFS(playback_1,
 	DAILINK_COMP_ARRAY(COMP_CPU("DL1")),
@@ -158,6 +189,7 @@ static struct snd_soc_dai_link mt6797_mt6351_dai_links[] = {
 		.name = "Primary Codec",
 		.no_pcm = 1,
 		.ignore_suspend = 1,
+		.init = mt6797_mt6351_accdet_init,
 		SND_SOC_DAILINK_REG(primary_codec),
 	},
 	{
@@ -184,11 +216,33 @@ static struct snd_soc_card mt6797_mt6351_card = {
 static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = &mt6797_mt6351_card;
-	struct device_node *platform_node, *codec_node;
+	struct device_node *platform_node, *codec_node, *accdet_node;
 	struct snd_soc_dai_link *dai_link;
+	struct mt6797_mt6351_priv *priv;
 	int ret, i;
 
 	card->dev = &pdev->dev;
+
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+	snd_soc_card_set_drvdata(card, priv);
+
+	/* Headset jack detection is optional. */
+	accdet_node = of_parse_phandle(pdev->dev.of_node, "mediatek,accdet", 0);
+	if (accdet_node) {
+		struct platform_device *accdet_pdev =
+			of_find_device_by_node(accdet_node);
+
+		of_node_put(accdet_node);
+		if (!accdet_pdev)
+			return -EPROBE_DEFER;
+
+		priv->accdet = snd_soc_lookup_component(&accdet_pdev->dev, NULL);
+		put_device(&accdet_pdev->dev);
+		if (!priv->accdet)
+			return -EPROBE_DEFER;
+	}
 
 	platform_node = of_parse_phandle(pdev->dev.of_node,
 					 "mediatek,platform", 0);

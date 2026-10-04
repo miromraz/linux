@@ -25,15 +25,20 @@ properties:
   reset-gpios:
     maxItems: 1
 
-  vcc-supply: true
-  iovcc-supply: true
+  vcc-supply:
+    description:
+      Analog supply. Optional because on some boards (e.g. the Planet Computers
+      Gemini PDA) the controller shares always-on panel rails that are not
+      individually switchable from this device.
+
+  iovcc-supply:
+    description:
+      I/O supply. Optional for the same reason as vcc-supply.
 
 required:
   - compatible
   - reg
   - interrupts
-  - vcc-supply
-  - iovcc-supply
 
 unevaluatedProperties: false
 
@@ -50,8 +55,6 @@ examples:
             reg = <0x62>;
             interrupts-extended = <&gpio 85 IRQ_TYPE_EDGE_RISING>;
             reset-gpios = <&gpio 68 GPIO_ACTIVE_HIGH>;
-            vcc-supply = <&touch_vcc>;
-            iovcc-supply = <&touch_iovcc>;
         };
     };
 ...
