@@ -21,12 +21,6 @@ properties:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: The phandle of the MT6351 audio codec.
 
-  mediatek,accdet:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description:
-      The phandle of the MT6351 ACCDET node, to enable headset plug and
-      button detection through a headset jack.
-
 required:
   - compatible
   - mediatek,platform
@@ -40,5 +34,4 @@ examples:
         compatible = "mediatek,mt6797-mt6351-sound";
         mediatek,platform = <&afe>;
         mediatek,audio-codec = <&mt6351_codec>;
-        mediatek,accdet = <&accdet>;
     };
