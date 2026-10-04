@@ -617,6 +617,26 @@
 	maximum-speed = "high-speed";
 };
 
+/*
+ * The right USB-C connector is wired to the USB11 MUSB controller, which the
+ * vendor runs as a full-speed host only (CONFIG_MTK_USBFSH, "Host-only MUSB
+ * hardware"). Enable the controller and its USB2 T-PHY; the SoC description
+ * already fixes dr_mode = "host". Select the proven 26 MHz PHY reference as
+ * on the left-port u2port0.
+ */
+&usb11_tphy {
+	status = "okay";
+};
+
+&usb11_u2 {
+	clocks = <&clk26m>;
+	status = "okay";
+};
+
+&usb11 {
+	status = "okay";
+};
+
 &thermal {
 	nvmem-cells = <&mt6797_thermal_calibration>;
 	nvmem-cell-names = "calibration-data";
