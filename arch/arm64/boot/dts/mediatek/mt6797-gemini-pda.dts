@@ -320,18 +320,14 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c7_pins_a>;
 
-	/*
-	 * Live Gemian identifies the external GPU buck as RT5735 at 0x1c.
-	 * Keep the provider disabled until the board rail and OPP sequence
-	 * have a recovery-tested runtime bring-up plan.
-	 */
+	/* Live Gemian identifies the external GPU buck as RT5735 at 0x1c. */
 	rt5735_vgpu: regulator@1c {
 		compatible = "richtek,rt5735";
 		reg = <0x1c>;
 		regulator-name = "vgpu";
-		regulator-min-microvolt = <600000>;
-		regulator-max-microvolt = <1393750>;
-		status = "disabled";
+		regulator-min-microvolt = <862500>;
+		regulator-max-microvolt = <1131250>;
+		regulator-ramp-delay = <32000>;
 	};
 };
 
@@ -837,9 +833,13 @@
 	};
 };
 
-/* The RT5735 VGPU rail remains disabled until a fixed OPP is validated. */
+&mfgsys {
+	status = "okay";
+};
+
 &gpu {
 	mali-supply = <&rt5735_vgpu>;
+	status = "okay";
 };
 
 &{/} {
