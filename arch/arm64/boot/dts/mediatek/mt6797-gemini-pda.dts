@@ -479,7 +479,7 @@
 		compatible = "sensortek,stk3310";
 		reg = <0x48>;
 		interrupt-parent = <&pio>;
-		interrupts = <11 IRQ_TYPE_LEVEL_LOW>;
+		interrupts = <11 IRQ_TYPE_EDGE_FALLING>;
 		proximity-near-level = <50>;
 	};
 };
