@@ -713,6 +713,31 @@ static const struct mt6323_regs mt6332_registers = {
 	.ck_32k_pdn_shift = 11,
 };
 
+static const struct mt6323_regs mt6351_registers = {
+	/*
+	 * MT6351 gates the common 32K clock and both ISINK clocks in the
+	 * single TOP_CKPDN_CON0 register (bits 3, 4 and 5) and selects the
+	 * ISINK clock source in TOP_CKSEL_CON0 (bits 2 and 3), so the same
+	 * address is used for the 32K and ISINK power-down slots. The duty,
+	 * period and current step live in ISINKx_CON1/CON0, reached with the
+	 * common 0x8-per-channel stride.
+	 */
+	.top_ckpdn = (const u16[]){ 0x23a, 0x23a, 0x23a },
+	.num_top_ckpdn = 3,
+	.top_ckcon = (const u16[]){ 0x25e, 0x25e },
+	.num_top_ckcon = 2,
+	.isink_con = (const u16[]){ 0x812, 0x810, 0x812 },
+	.num_isink_con = 3,
+	.isink_max_regs = 2, /* ISINK[0..1] */
+	.isink_en_ctrl = 0x836,
+	.isink_mode_ctrl = 0x838,
+	.ck_32k_pdn_shift = 3,
+	.isink_ck_pdn_shift = 4,
+	.isink_ck_sel_shift = 2,
+	.isink_dim_duty_shift = 7,
+	.isink_sfstr_in_con = false,
+};
+
 static const struct mt6323_hwspec mt6323_spec = {
 	.max_period = 10000,
 	.max_leds = 4,
@@ -725,6 +750,18 @@ static const struct mt6323_hwspec mt6332_spec = {
 	.max_leds = 0,
 	.max_wleds = 1,
 	.max_brightness = 1024,
+};
+
+static const struct mt6323_hwspec mt6351_spec = {
+	/*
+	 * MT6351 drives the red/green indicator LEDs from ISINK0/ISINK1. The
+	 * duty, period and current-step fields have the same widths as the
+	 * MT6323 ISINK, so the MT6323 timing parameters apply.
+	 */
+	.max_period = 10000,
+	.max_leds = 2,
+	.max_brightness = 6,
+	.unit_duty = 3125,
 };
 
 static const struct mt6323_data mt6323_pdata = {
@@ -742,10 +779,16 @@ static const struct mt6323_data mt6332_pdata = {
 	.spec = &mt6332_spec,
 };
 
+static const struct mt6323_data mt6351_pdata = {
+	.regs = &mt6351_registers,
+	.spec = &mt6351_spec,
+};
+
 static const struct of_device_id mt6323_led_dt_match[] = {
 	{ .compatible = "mediatek,mt6323-led", .data = &mt6323_pdata},
 	{ .compatible = "mediatek,mt6331-led", .data = &mt6331_pdata },
 	{ .compatible = "mediatek,mt6332-led", .data = &mt6332_pdata },
+	{ .compatible = "mediatek,mt6351-led", .data = &mt6351_pdata },
 	{},
 };
 MODULE_DEVICE_TABLE(of, mt6323_led_dt_match);
