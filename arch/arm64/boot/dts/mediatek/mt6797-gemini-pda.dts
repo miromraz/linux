@@ -9,6 +9,7 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
 
 / {
 	model = "Planet Computers Gemini PDA";
@@ -51,6 +52,29 @@
 		haptic-supply = <&mt6351_vibr_reg>;
 		min-microvolt = <2800000>;
 		max-microvolt = <2800000>;
+	};
+
+	/*
+	 * Single-cell Li-Ion pack. The design capacity is the vendor
+	 * fuel-gauge Q_MAX at 25 C (mt_battery_meter.h: Q_MAX_POS_25 =
+	 * 4268 mAh). The open-circuit-voltage table is taken from the vendor
+	 * 25 C profile battery_profile_t2[] in mt_battery_meter_table.h, which
+	 * lists depth-of-discharge against resting voltage in mV; the capacity
+	 * column here is 100 - depth-of-discharge.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <4268000>;
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4357000>;
+		ocv-capacity-celsius = <25>;
+		ocv-capacity-table-0 =
+			<4357000 100>, <4301000 95>, <4248000 91>, <4196000 86>,
+			<4132000 80>, <4082000 75>, <4023000 70>, <3970000 65>,
+			<3941000 60>, <3888000 56>, <3849000 50>, <3826000 45>,
+			<3807000 40>, <3789000 35>, <3776000 30>, <3760000 25>,
+			<3739000 19>, <3715000 15>, <3688000 10>, <3681000 5>,
+			<3483000 1>, <3400000 0>;
 	};
 
 	reserved-memory {
@@ -182,6 +206,30 @@
 		regulator-name = "vibr";
 		regulator-min-microvolt = <2800000>;
 		regulator-max-microvolt = <2800000>;
+	};
+};
+
+&pmic {
+	/*
+	 * MT6351 ISINK current-sink LEDs. Vendor aeon6797_6m_n.dts led@0/led@1
+	 * drive the red/green indicators from ISINK0/ISINK1 (led_mode = 3).
+	 */
+	leds {
+		compatible = "mediatek,mt6351-led";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		led@0 {
+			reg = <0>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+		};
+
+		led@1 {
+			reg = <1>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+		};
 	};
 };
 
@@ -326,6 +374,15 @@
 	};
 };
 
+&pio {
+	lcd_bias_pins: lcd-bias-pins {
+		pins-enp-enn {
+			pinmux = <MT6797_GPIO60__FUNC_GPIO60>,
+				 <MT6797_GPIO251__FUNC_GPIO251>;
+		};
+	};
+};
+
 &i2c1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c1_pins_a>;
@@ -345,10 +402,96 @@
 			       "-1", "0", "0",
 			       "0", "0", "-1";
 	};
+
+	/*
+	 * LCD bias for the internal panel. The vendor driver treats it as an
+	 * "lp3101" at I2C1 0x3e, which is register-compatible with the TI
+	 * TPS65132 dual output regulator. ENP (GPIO60) gates the positive OUTP
+	 * rail and ENN (GPIO251) the negative OUTN rail, both active-high per
+	 * aeon_gpio.dtsi:143-170. The vendor LCM writes VPOS/VNEG = 0x0f, i.e.
+	 * +/-5.5 V (lp3101.c:105-125).
+	 */
+	lcd_bias: regulator@3e {
+		compatible = "ti,tps65132";
+		reg = <0x3e>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lcd_bias_pins>;
+
+		reg_lcd_bias_outp: outp {
+			regulator-name = "lcd-bias-outp";
+			regulator-min-microvolt = <5500000>;
+			regulator-max-microvolt = <5500000>;
+			enable-gpios = <&pio 60 GPIO_ACTIVE_HIGH>;
+		};
+
+		reg_lcd_bias_outn: outn {
+			regulator-name = "lcd-bias-outn";
+			regulator-min-microvolt = <5500000>;
+			regulator-max-microvolt = <5500000>;
+			enable-gpios = <&pio 251 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	/*
+	 * Sensortek STK3x1x ambient-light/proximity sensor. Vendor
+	 * aeon6797_6m_n.dts cust_alsps@0 uses I2C1 0x48 with EINT on
+	 * GPIO88 (= EINT11, alspspincfg) and ps_threshold_high = 50.
+	 */
+	light-sensor@48 {
+		compatible = "sensortek,stk3310";
+		reg = <0x48>;
+		interrupt-parent = <&pio>;
+		interrupts = <11 IRQ_TYPE_LEVEL_LOW>;
+		proximity-near-level = <50>;
+	};
+};
+
+&i2c4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c4_pins_a>;
+	status = "okay";
+
+	/*
+	 * Novatek NT36772 TDDI touchscreen. Verified against the vendor
+	 * aeon6797_6m_n.dts: I2C4 0x62, interrupt on GPIO85/EINT8, reset on
+	 * GPIO68. As a TDDI controller it shares the panel's always-on rails,
+	 * which are not switchable from this node, so no supply is described.
+	 * The driver applies the vendor portrait orientation (swap X/Y, invert
+	 * Y) internally, so no touchscreen-* transform properties are set.
+	 * Kept disabled until the reset polarity and the 0x62-to-0x01 target
+	 * transition are validated on hardware.
+	 */
+	touchscreen@62 {
+		compatible = "novatek,nt36772-ts";
+		reg = <0x62>;
+		interrupt-parent = <&pio>;
+		interrupts = <8 IRQ_TYPE_EDGE_RISING>;
+		reset-gpios = <&pio 68 GPIO_ACTIVE_HIGH>;
+		status = "disabled";
+	};
 };
 
 &watchdog {
 	interrupts = <GIC_SPI 137 IRQ_TYPE_EDGE_FALLING>;
+};
+
+/*
+ * Panel backlight driven by the MT6797 display PWM. The vendor backlight
+ * node (aeon6797_6m_n.dts led6, "mediatek,lcd-backlight") selects
+ * led_mode = <5>, i.e. the display PWM source.
+ */
+&disp_pwm {
+	status = "okay";
+};
+
+&{/} {
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&disp_pwm 0 500000>;
+		brightness-levels = <0 16 32 48 64 80 96 112 128
+				     144 160 176 192 208 224 240 255>;
+		default-brightness-level = <10>;
+	};
 };
 
 &pio {
@@ -532,6 +675,35 @@
 		};
 	};
 
+	/*
+	 * TI BQ25896 single-cell Li-Ion charger. The vendor DT mislabels it
+	 * "bq24261@6b", but the board enables MTK_BQ25896_SUPPORT and the part
+	 * answers at 0x6b. Its INT line is not routed (the vendor firmware
+	 * tracks the MT6351 charger-detect comparator instead), so the driver
+	 * polls the status registers.
+	 *
+	 * Charge voltage (4.416 V) and current (2.048 A) match the vendor
+	 * settings. Termination (256 mA), precharge (128 mA), minimum system
+	 * voltage (3.5 V) and boost voltage (5.126 V) are the BQ25896 power-on
+	 * reset defaults (REG05 = 0x13, REG03 = 0x1a, REG0A = 0x93); the vendor
+	 * does not reprogram them. The 1.3 A boost current limit matches the
+	 * value the vendor firmware writes.
+	 */
+	charger: charger@6b {
+		compatible = "ti,bq25896", "ti,bq25890";
+		reg = <0x6b>;
+
+		monitored-battery = <&battery>;
+
+		ti,battery-regulation-voltage = <4416000>;
+		ti,charge-current = <2048000>;
+		ti,termination-current = <256000>;
+		ti,precharge-current = <128000>;
+		ti,minimum-sys-voltage = <3500000>;
+		ti,boost-voltage = <5126000>;
+		ti,boost-max-current = <1300000>;
+	};
+
 	/* FAN49101 is populated, but keep the regulator and consumer disabled. */
 	fan49101: regulator@70 {
 		compatible = "onnn,fan49101";
@@ -544,6 +716,162 @@
 				regulator-min-microvolt = <603000>;
 				regulator-max-microvolt = <1413000>;
 			};
+		};
+	};
+};
+
+&i2c3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c3_pins_a>;
+	status = "okay";
+
+	/*
+	 * Awinic AW9120 20-channel constant-current LED controller (I2C3 0x2c,
+	 * PDN GPIO245; docs/driver-port-inventory.md). The per-channel colour
+	 * map is taken from the gemian-leds daemon (LightState.cpp
+	 * AWLEDCodeForStep plus the CH_6/CH_7 defines): five RGB indicator
+	 * blocks, an RGB status LED, a caps-lock LED and a power LED.
+	 */
+	led-controller@2c {
+		compatible = "awinic,aw9120";
+		reg = <0x2c>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		enable-gpios = <&pio 245 GPIO_ACTIVE_HIGH>;
+
+		led@0 {
+			reg = <0>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
+		};
+
+		led@1 {
+			reg = <1>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
+		};
+
+		led@2 {
+			reg = <2>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
+		};
+
+		led@3 {
+			reg = <3>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <3>;
+		};
+
+		led@4 {
+			reg = <4>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <3>;
+		};
+
+		led@5 {
+			reg = <5>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <3>;
+		};
+
+		led@6 {
+			reg = <6>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <4>;
+		};
+
+		led@7 {
+			reg = <7>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <4>;
+		};
+
+		led@8 {
+			reg = <8>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <4>;
+		};
+
+		led@9 {
+			reg = <9>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <5>;
+		};
+
+		led@a {
+			reg = <10>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <5>;
+		};
+
+		led@b {
+			reg = <11>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <5>;
+		};
+
+		led@c {
+			reg = <12>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
+		};
+
+		led@d {
+			reg = <13>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
+		};
+
+		led@e {
+			reg = <14>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
+		};
+
+		led@f {
+			reg = <15>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_STATUS;
+		};
+
+		led@10 {
+			reg = <16>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_STATUS;
+		};
+
+		led@11 {
+			reg = <17>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_STATUS;
+		};
+
+		led@12 {
+			reg = <18>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_CAPSLOCK;
+		};
+
+		led@13 {
+			reg = <19>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_POWER;
 		};
 	};
 };
@@ -567,5 +895,54 @@
 			gpios = <&pio 66 GPIO_ACTIVE_LOW>;
 			debounce-interval = <64>;
 		};
+	};
+};
+
+&pio {
+	panel_pins: panel-pins {
+		pins-reset {
+			pinmux = <MT6797_GPIO180__FUNC_GPIO180>;
+		};
+	};
+};
+
+&mipi_tx0 {
+	status = "okay";
+};
+
+&dsi0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/*
+	 * NT36672-class FHD+ DSI video panel (vendor LCM
+	 * aeon_nt36672_fhd_dsi_vdo_x600_xinli): 4-lane burst mode, reset on
+	 * GPIO180 (LCM_RST). OUTP/OUTN are the TPS65132 bias rails; the vendor
+	 * sequence enables both before releasing reset. VDDI is not switched by
+	 * the vendor LCM (its PMIC VGP1 calls are commented out), so no digital
+	 * supply is described here.
+	 */
+	panel@0 {
+		compatible = "planet,gemini-pda-nt36672";
+		reg = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&panel_pins>;
+		reset-gpios = <&pio 180 GPIO_ACTIVE_HIGH>;
+		outp-supply = <&reg_lcd_bias_outp>;
+		outn-supply = <&reg_lcd_bias_outn>;
+		backlight = <&backlight>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi0_out_ep>;
+			};
+		};
+	};
+};
+
+&dsi0_out {
+	dsi0_out_ep: endpoint {
+		remote-endpoint = <&panel_in>;
 	};
 };
