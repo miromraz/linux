@@ -417,7 +417,7 @@ static const struct musb_fifo_cfg mt6797_usb11_mode_cfg[] = {
 static const struct musb_hdrc_config mt6797_usb11_hdrc_config = {
 	.fifo_cfg = mt6797_usb11_mode_cfg,
 	.fifo_cfg_size = ARRAY_SIZE(mt6797_usb11_mode_cfg),
-	.multipoint = false,
+	.multipoint = true,
 	.dyn_fifo = true,
 	.num_eps = 6,
 	.ram_bits = MTK_MUSB_RAM_BITS,
@@ -428,7 +428,7 @@ static const char *const mtk_musb_clock_names[] = {
 };
 
 static const char *const mt6797_usb11_clock_names[] = {
-	"infra_icusb", "sssub_ref_clk",
+	"infra_icusb", "ssusb_ref_clk",
 };
 
 static const struct mtk_musb_data mtk_musb_data = {
