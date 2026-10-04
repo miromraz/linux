@@ -349,6 +349,15 @@
 	};
 };
 
+&pio {
+	lcd_bias_pins: lcd-bias-pins {
+		pins-enp-enn {
+			pinmux = <MT6797_GPIO60__FUNC_GPIO60>,
+				 <MT6797_GPIO251__FUNC_GPIO251>;
+		};
+	};
+};
+
 &i2c1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c1_pins_a>;
@@ -367,6 +376,35 @@
 		mount-matrix = "0", "-1", "0",
 			       "-1", "0", "0",
 			       "0", "0", "-1";
+	};
+
+	/*
+	 * LCD bias for the internal panel. The vendor driver treats it as an
+	 * "lp3101" at I2C1 0x3e, which is register-compatible with the TI
+	 * TPS65132 dual output regulator. ENP (GPIO60) gates the positive OUTP
+	 * rail and ENN (GPIO251) the negative OUTN rail, both active-high per
+	 * aeon_gpio.dtsi:143-170. The vendor LCM writes VPOS/VNEG = 0x0f, i.e.
+	 * +/-5.5 V (lp3101.c:105-125).
+	 */
+	lcd_bias: regulator@3e {
+		compatible = "ti,tps65132";
+		reg = <0x3e>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lcd_bias_pins>;
+
+		reg_lcd_bias_outp: outp {
+			regulator-name = "lcd-bias-outp";
+			regulator-min-microvolt = <5500000>;
+			regulator-max-microvolt = <5500000>;
+			enable-gpios = <&pio 60 GPIO_ACTIVE_HIGH>;
+		};
+
+		reg_lcd_bias_outn: outn {
+			regulator-name = "lcd-bias-outn";
+			regulator-min-microvolt = <5500000>;
+			regulator-max-microvolt = <5500000>;
+			enable-gpios = <&pio 251 GPIO_ACTIVE_HIGH>;
+		};
 	};
 };
 
