@@ -7,6 +7,7 @@
 
 #include "mt6797.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/iio/adc/mediatek,mt6351-auxadc.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/leds/common.h>
@@ -131,46 +132,6 @@
 		memory@46000000 {
 			reg = <0 0x46000000 0 0x400000>;
 			no-map;
-		};
-
-		reserve-memory-ccci_md1 {
-			compatible = "mediatek,reserve-memory-ccci_md1";
-			no-map;
-			size = <0 0xa100000>;
-			alignment = <0 0x2000000>;
-			alloc-ranges = <0 0x40000000 0 0x80000000>;
-		};
-
-		reserve-memory-ccci_share {
-			compatible = "mediatek,reserve-memory-ccci_share";
-			no-map;
-			size = <0 0x600000>;
-			alignment = <0 0x4000000>;
-			alloc-ranges = <0 0x40000000 0 0x50000000>;
-		};
-
-		consys-reserve-memory {
-			compatible = "mediatek,consys-reserve-memory";
-			no-map;
-			size = <0 0x200000>;
-			alignment = <0 0x200000>;
-			alloc-ranges = <0 0x40000000 0 0x80000000>;
-		};
-
-		spm-reserve-memory {
-			compatible = "mediatek,spm-reserve-memory";
-			no-map;
-			size = <0 0x16000>;
-			alignment = <0 0x10000>;
-			alloc-ranges = <0 0x40000000 0 0x80000000>;
-		};
-
-		reserve-memory-scp_share {
-			compatible = "mediatek,reserve-memory-scp_share";
-			no-map;
-			size = <0 0x1000000>;
-			alignment = <0 0x1000000>;
-			alloc-ranges = <0 0x40000000 0 0x50000000>;
 		};
 	};
 };
@@ -944,5 +905,35 @@
 &dsi0_out {
 	dsi0_out_ep: endpoint {
 		remote-endpoint = <&panel_in>;
+	};
+};
+
+&afe {
+	status = "okay";
+};
+
+&pmic {
+	mt6351_codec: audio-codec {
+		compatible = "mediatek,mt6351-sound";
+	};
+
+	accdet: accdet {
+		compatible = "mediatek,mt6351-accdet";
+		io-channels = <&pmic_adc MT6351_AUXADC_ACCDET>;
+		io-channel-names = "accdet";
+		mediatek,mic-vol = <7>;
+		mediatek,mic-mode = <1>;
+		mediatek,key-mode = <0>;
+		mediatek,pwm-deb-setting = <0x500 0x500 1 0x1f0 0x800 0x800 0x20>;
+		mediatek,three-key-thr = <0 80 220 400>;
+	};
+};
+
+&{/} {
+	sound {
+		compatible = "mediatek,mt6797-mt6351-sound";
+		mediatek,platform = <&afe>;
+		mediatek,audio-codec = <&mt6351_codec>;
+		mediatek,accdet = <&accdet>;
 	};
 };

@@ -181,14 +181,14 @@
 			 <&infrasys CLK_INFRA_SSUSB_REF>,
 			 <&infrasys CLK_INFRA_SSUSB_BUS>;
 		clock-names = "sys_ck", "ref_ck", "mcu_ck";
-		#address-cells = <1>;
-		#size-cells = <1>;
+		#address-cells = <2>;
+		#size-cells = <2>;
 		ranges;
 		status = "disabled";
 
 		xhci: usb@11270000 {
 			compatible = "mediatek,mt6797-xhci", "mediatek,mtk-xhci";
-			reg = <0x11270000 0x1000>;
+			reg = <0 0x11270000 0 0x1000>;
 			reg-names = "mac";
 			interrupts = <GIC_SPI 126 IRQ_TYPE_LEVEL_LOW>;
 			interrupt-names = "host";
@@ -501,7 +501,7 @@
 	};
 
 	spi0: spi@1100a000 {
-		compatible = "mediatek,mt6797-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
 		reg = <0 0x1100a000 0 0x1000>;
 		interrupts = <GIC_SPI 122 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -515,7 +515,7 @@
 	};
 
 	spi1: spi@11012000 {
-		compatible = "mediatek,mt6797-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
 		reg = <0 0x11012000 0 0x1000>;
 		interrupts = <GIC_SPI 131 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -529,7 +529,7 @@
 	};
 
 	spi2: spi@11018000 {
-		compatible = "mediatek,mt6797-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
 		reg = <0 0x11018000 0 0x1000>;
 		interrupts = <GIC_SPI 132 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -543,7 +543,7 @@
 	};
 
 	spi3: spi@11019000 {
-		compatible = "mediatek,mt6797-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
 		reg = <0 0x11019000 0 0x1000>;
 		interrupts = <GIC_SPI 133 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -557,7 +557,7 @@
 	};
 
 	spi4: spi@1101a000 {
-		compatible = "mediatek,mt6797-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
 		reg = <0 0x1101a000 0 0x1000>;
 		interrupts = <GIC_SPI 134 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -571,7 +571,7 @@
 	};
 
 	spi5: spi@1101b000 {
-		compatible = "mediatek,mt6797-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
 		reg = <0 0x1101b000 0 0x1000>;
 		interrupts = <GIC_SPI 135 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
