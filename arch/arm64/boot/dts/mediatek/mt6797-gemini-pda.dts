@@ -397,6 +397,37 @@
 	};
 };
 
+&i2c4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c4_pins_a>;
+	status = "okay";
+
+	/*
+	 * Novatek NT36772 TDDI touchscreen. The vendor aeon6797_6m_n.dts uses
+	 * I2C4 with the 0x62 bootloader address for firmware commands and the
+	 * 0x01 FW address for touch and parameter reads; the mainline driver
+	 * only needs the FW address, so the node sits at 0x01. Interrupt on
+	 * GPIO85/EINT8, reset (active-low RESX) on GPIO68. As a TDDI controller
+	 * it shares the panel's always-on rails, which are not switchable from
+	 * this node, so no supply is described (the dummy regulators cover it).
+	 * The vendor panel is mounted rotated, so express its orientation with
+	 * the standard touchscreen transform properties.
+	 *
+	 * Kept disabled until the reset polarity, the interrupt mapping and the
+	 * orientation are validated on hardware.
+	 */
+	touchscreen@1 {
+		compatible = "novatek,nt36772-ts";
+		reg = <0x01>;
+		interrupt-parent = <&pio>;
+		interrupts = <8 IRQ_TYPE_EDGE_RISING>;
+		reset-gpios = <&pio 68 GPIO_ACTIVE_LOW>;
+		touchscreen-swapped-x-y;
+		touchscreen-inverted-x;
+		status = "disabled";
+	};
+};
+
 &watchdog {
 	interrupts = <GIC_SPI 137 IRQ_TYPE_EDGE_FALLING>;
 };
