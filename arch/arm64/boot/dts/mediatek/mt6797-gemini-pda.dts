@@ -56,6 +56,22 @@
 	};
 
 	/*
+	 * VBUS switch for the right USB-C port (USB11 MUSB host). The vendor
+	 * Type-C flow drives USB1 DRVVBUS (GPIO94) high to source 5 V when a
+	 * device attaches in source role (drivers/misc/mediatek/usb_c/.../
+	 * usb_typec.c; aeon_gpio.dtsi labels GPIO94 "usb1_drvvbus"). Active
+	 * high, left off at boot.
+	 */
+	usb_p1_vbus: regulator-usb-p1-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-p1-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&pio 94 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	/*
 	 * Single-cell Li-Ion pack. The design capacity is the vendor
 	 * fuel-gauge Q_MAX at 25 C (mt_battery_meter.h: Q_MAX_POS_25 =
 	 * 4268 mAh). The open-circuit-voltage table is taken from the vendor
@@ -320,18 +336,14 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c7_pins_a>;
 
-	/*
-	 * Live Gemian identifies the external GPU buck as RT5735 at 0x1c.
-	 * Keep the provider disabled until the board rail and OPP sequence
-	 * have a recovery-tested runtime bring-up plan.
-	 */
+	/* Live Gemian identifies the external GPU buck as RT5735 at 0x1c. */
 	rt5735_vgpu: regulator@1c {
 		compatible = "richtek,rt5735";
 		reg = <0x1c>;
 		regulator-name = "vgpu";
-		regulator-min-microvolt = <600000>;
-		regulator-max-microvolt = <1393750>;
-		status = "disabled";
+		regulator-min-microvolt = <862500>;
+		regulator-max-microvolt = <1131250>;
+		regulator-ramp-delay = <32000>;
 	};
 };
 
@@ -605,6 +617,26 @@
 	maximum-speed = "high-speed";
 };
 
+/*
+ * The right USB-C connector is wired to the USB11 MUSB controller, which the
+ * vendor runs as a full-speed host only (CONFIG_MTK_USBFSH, "Host-only MUSB
+ * hardware"). Enable the controller and its USB2 T-PHY; the SoC description
+ * already fixes dr_mode = "host". Select the proven 26 MHz PHY reference as
+ * on the left-port u2port0.
+ */
+&usb11_tphy {
+	status = "okay";
+};
+
+&usb11_u2 {
+	clocks = <&clk26m>;
+	status = "okay";
+};
+
+&usb11 {
+	status = "okay";
+};
+
 &thermal {
 	nvmem-cells = <&mt6797_thermal_calibration>;
 	nvmem-cell-names = "calibration-data";
@@ -633,6 +665,7 @@
 			data-role = "dual";
 			typec-power-opmode = "default";
 			pd-disable;
+			vbus-supply = <&usb_p1_vbus>;
 		};
 	};
 
@@ -837,9 +870,13 @@
 	};
 };
 
-/* The RT5735 VGPU rail remains disabled until a fixed OPP is validated. */
+&mfgsys {
+	status = "okay";
+};
+
 &gpu {
 	mali-supply = <&rt5735_vgpu>;
+	status = "okay";
 };
 
 &{/} {
