@@ -767,9 +767,9 @@
 		compatible = "mediatek,mt6797-mmc";
 		reg = <0 0x11230000 0 0x10000>;
 		interrupts = <GIC_SPI 79 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&infrasys CLK_INFRA_MSDC0>,
+		clocks = <&topckgen CLK_TOP_MUX_MSDC50_0>,
 			 <&topckgen CLK_TOP_MUX_MSDC50_0_HCLK>,
-			 <&topckgen CLK_TOP_MUX_MSDC50_0>;
+			 <&infrasys CLK_INFRA_MSDC0>;
 		clock-names = "source", "hclk", "source_cg";
 		status = "disabled";
 	};
@@ -778,9 +778,9 @@
 		compatible = "mediatek,mt6797-mmc";
 		reg = <0 0x11240000 0 0x10000>;
 		interrupts = <GIC_SPI 80 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&infrasys CLK_INFRA_MSDC1>,
+		clocks = <&topckgen CLK_TOP_MUX_MSDC30_1>,
 			 <&topckgen CLK_TOP_MUX_AXI>,
-			 <&topckgen CLK_TOP_MUX_MSDC30_1>;
+			 <&infrasys CLK_INFRA_MSDC1>;
 		clock-names = "source", "hclk", "source_cg";
 		status = "disabled";
 	};
