@@ -372,6 +372,25 @@
 	interrupts = <GIC_SPI 137 IRQ_TYPE_EDGE_FALLING>;
 };
 
+/*
+ * Panel backlight driven by the MT6797 display PWM. The vendor backlight
+ * node (aeon6797_6m_n.dts led6, "mediatek,lcd-backlight") selects
+ * led_mode = <5>, i.e. the display PWM source.
+ */
+&disp_pwm {
+	status = "okay";
+};
+
+&{/} {
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&disp_pwm 0 500000>;
+		brightness-levels = <0 16 32 48 64 80 96 112 128
+				     144 160 176 192 208 224 240 255>;
+		default-brightness-level = <10>;
+	};
+};
+
 &pio {
 	keyboard_soc_pins: keyboard-soc-pins {
 		pins-reset {
