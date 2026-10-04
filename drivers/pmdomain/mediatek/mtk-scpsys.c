@@ -832,6 +832,8 @@ static const struct scp_domain_data scp_domain_data_mt6797[] = {
 		.name = "mfg",
 		.sta_mask = BIT(12),
 		.ctl_offs = 0x338,
+		/* INFRA_TOPAXI_PROTECTEN MFG bit, per clk-mt6797-pg.c MFG_PROT_MASK */
+		.bus_prot_mask = BIT(21),
 		.sram_pdn_ctl_offs = SPM_MFG_SRAM_CON_MT6797,
 		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
 		.sram_pdn_bits = GENMASK(1, 0),
