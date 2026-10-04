@@ -430,6 +430,17 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 		mtk_ddp_comp_start(comp);
 	}
 
+	/*
+	 * Component .config() leaves colour-management blocks (gamma, ccorr) in
+	 * their power-on bypass state, and the registers are cleared whenever the
+	 * MM power domain cycles. Re-apply the committed CTM and gamma LUT here so
+	 * they survive a disable/enable that does not change the properties.
+	 */
+	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
+		mtk_ddp_gamma_set(mtk_crtc->ddp_comp[i], crtc->state);
+		mtk_ddp_ctm_set(mtk_crtc->ddp_comp[i], crtc->state);
+	}
+
 	/* Initially configure all planes */
 	for (i = 0; i < mtk_crtc->layer_nr; i++) {
 		struct drm_plane *plane = &mtk_crtc->planes[i];
