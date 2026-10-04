@@ -6,9 +6,11 @@
 
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include "clk-gate.h"
 #include "clk-mtk.h"
+#include "clk-mux.h"
 #include "clk-pll.h"
 #include "reset.h"
 
@@ -380,11 +382,41 @@ static const struct mtk_composite top_muxes[] = {
 	    0x0104, 1, 2),
 };
 
+/*
+ * Register a clk mux notifier for the MFG mux.
+ *
+ * The GPU runs off MFGPLL through the mfg_sel mux, so reprogramming MFGPLL
+ * on a GPU OPP change would glitch the clock feeding the running GPU. Before
+ * the rate change the mux is transparently switched to the 26 MHz crystal
+ * (mfg_parents[0]), and switched back afterwards. This matches the vendor
+ * gpufreq driver, which parks the mux on its clk_sub_parent (clk26m) while
+ * modifying MFGPLL_CON1.
+ *
+ * mfg_sel is registered as an mtk_composite, so feed the common mux notifier
+ * the composite's own clk_ops; the notifier callback drives get_parent() and
+ * set_parent() on the mux clk it is registered on.
+ */
+static int clk_mt6797_reg_mfg_mux_notifier(struct device *dev, struct clk *clk)
+{
+	struct clk_composite *composite = to_clk_composite(__clk_get_hw(clk));
+	struct mtk_mux_nb *mfg_mux_nb;
+
+	mfg_mux_nb = devm_kzalloc(dev, sizeof(*mfg_mux_nb), GFP_KERNEL);
+	if (!mfg_mux_nb)
+		return -ENOMEM;
+
+	mfg_mux_nb->ops = &composite->ops;
+	mfg_mux_nb->bypass_index = 0; /* Bypass to 26M crystal */
+
+	return devm_mtk_clk_mux_notifier_register(dev, clk, mfg_mux_nb);
+}
+
 static int mtk_topckgen_init(struct platform_device *pdev)
 {
 	struct clk_hw_onecell_data *clk_data;
 	void __iomem *base;
 	struct device_node *node = pdev->dev.of_node;
+	int ret;
 
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
@@ -401,7 +433,12 @@ static int mtk_topckgen_init(struct platform_device *pdev)
 				    ARRAY_SIZE(top_muxes), base,
 				    &mt6797_clk_lock, clk_data);
 
-	return of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	ret = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	if (ret)
+		return ret;
+
+	return clk_mt6797_reg_mfg_mux_notifier(&pdev->dev,
+					       clk_data->hws[CLK_TOP_MUX_MFG]->clk);
 }
 
 static const struct mtk_gate_regs infra0_cg_regs = {
