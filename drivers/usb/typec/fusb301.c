@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <linux/usb/typec.h>
 
 #define FUSB301_REG_DEVICE_ID	0x01
@@ -58,9 +59,37 @@ struct fusb301 {
 	struct typec_port *port;
 	struct typec_partner *partner;
 	struct fwnode_handle *connector;
+	struct regulator *vbus;
+	bool vbus_on;
 	enum typec_pwr_opmode pwr_opmode;
 	unsigned int partner_type;
 };
+
+/*
+ * As a Type-C source (DFP, Attached.SRC) the FUSB301 does not switch VBUS
+ * itself; the board gates it with an external supply. Mirror the vendor flow,
+ * which drives the VBUS switch on when a partner attaches as sink and off on
+ * detach (drivers/misc/mediatek/usb_c/fusb302/usb_typec.c:126 and :102).
+ */
+static void fusb301_vbus_set(struct fusb301 *fusb, bool on)
+{
+	int ret;
+
+	if (!fusb->vbus || fusb->vbus_on == on)
+		return;
+
+	if (on)
+		ret = regulator_enable(fusb->vbus);
+	else
+		ret = regulator_disable(fusb->vbus);
+	if (ret) {
+		dev_warn(fusb->dev, "failed to %s VBUS: %d\n",
+			 on ? "enable" : "disable", ret);
+		return;
+	}
+
+	fusb->vbus_on = on;
+}
 
 static unsigned int fusb301_mode_for_port_type(enum typec_port_type type)
 {
@@ -167,6 +196,7 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		return ret;
 
 	if (!(status & FUSB301_STATUS_ATTACH)) {
+		fusb301_vbus_set(fusb, false);
 		fusb301_unregister_partner(fusb);
 		fusb->partner_type = 0;
 		pwr_role = fusb301_default_role(fusb);
@@ -190,6 +220,9 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		pwr_role = TYPEC_SINK;
 	else
 		pwr_role = fusb301_default_role(fusb);
+
+	/* Source VBUS only when we are the power source for the partner. */
+	fusb301_vbus_set(fusb, pwr_role == TYPEC_SOURCE);
 
 	if (partner_type & FUSB301_TYPE_AUDIO_ACC)
 		desc.accessory = TYPEC_ACCESSORY_AUDIO;
@@ -314,6 +347,18 @@ static int fusb301_probe(struct i2c_client *client)
 		goto err_put_connector;
 	}
 
+	fusb->vbus = devm_of_regulator_get_optional(dev,
+						    to_of_node(fusb->connector),
+						    "vbus");
+	if (IS_ERR(fusb->vbus)) {
+		ret = PTR_ERR(fusb->vbus);
+		if (ret != -ENODEV) {
+			dev_err_probe(dev, ret, "failed to get VBUS supply\n");
+			goto err_put_connector;
+		}
+		fusb->vbus = NULL;
+	}
+
 	fusb->cap.revision = USB_TYPEC_REV_1_1;
 	fusb->cap.accessory[0] = TYPEC_ACCESSORY_AUDIO;
 	fusb->cap.accessory[1] = TYPEC_ACCESSORY_DEBUG;
@@ -345,6 +390,7 @@ static int fusb301_probe(struct i2c_client *client)
 	return 0;
 
 err_unregister_port:
+	fusb301_vbus_set(fusb, false);
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
 err_put_connector:
@@ -356,6 +402,7 @@ static void fusb301_remove(struct i2c_client *client)
 {
 	struct fusb301 *fusb = i2c_get_clientdata(client);
 
+	fusb301_vbus_set(fusb, false);
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
 }
