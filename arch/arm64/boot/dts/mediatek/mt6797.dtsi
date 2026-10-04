@@ -156,13 +156,13 @@
 	};
 
 	usb11: usb@11200000 {
-		compatible = "mediatek,mt6797-usb11", "mediatek,mtk-musb";
+		compatible = "mediatek,mt6797-usb11";
 		reg = <0 0x11200000 0 0x1000>;
 		interrupts = <GIC_SPI 73 IRQ_TYPE_LEVEL_LOW>;
 		interrupt-names = "mc";
 		clocks = <&infrasys CLK_INFRA_ICUSB>,
 				 <&infrasys CLK_INFRA_SSUSB_REF>;
-		clock-names = "infra_icusb", "sssub_ref_clk";
+		clock-names = "infra_icusb", "ssusb_ref_clk";
 		phys = <&usb11_u2 PHY_TYPE_USB2>;
 		dr_mode = "host";
 		status = "disabled";
