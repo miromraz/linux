@@ -264,18 +264,23 @@
 };
 
 &i2c1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c1_pins_a>;
+	status = "okay";
+
 	/*
-	 * Keep this candidate disabled until the physical ID, rails, and
-	 * interrupt/polling contract are verified on a recoverable image.
-	 * The vendor's logical 0x68 client is rewritten to 0x69 in probe.
+	 * Bosch BMI160 accelerometer/gyroscope. The vendor rewrites its logical
+	 * 0x68 client to 0x69 in probe, which is the live I2C1 address. The
+	 * mount-matrix is the vendor coordinate direction 7 (aeon6797_6m_n.dts
+	 * cust_accel@1/cust_gyro@1) expanded through the MediaTek hwmsen
+	 * conversion table (sign {-1,-1,-1}, axis map {1,0,2}).
 	 */
-	bmi160_candidate: bmi160@69 {
+	bmi160: imu@69 {
 		compatible = "bosch,bmi160";
 		reg = <0x69>;
 		mount-matrix = "0", "-1", "0",
-				       "-1", "0", "0",
-				       "0", "0", "-1";
-		status = "disabled";
+			       "-1", "0", "0",
+			       "0", "0", "-1";
 	};
 };
 
