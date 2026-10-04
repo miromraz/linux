@@ -678,3 +678,52 @@
 		};
 	};
 };
+
+&pio {
+	panel_pins: panel-pins {
+		pins-reset {
+			pinmux = <MT6797_GPIO180__FUNC_GPIO180>;
+		};
+	};
+};
+
+&mipi_tx0 {
+	status = "okay";
+};
+
+&dsi0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/*
+	 * NT36672-class FHD+ DSI video panel (vendor LCM
+	 * aeon_nt36672_fhd_dsi_vdo_x600_xinli): 4-lane burst mode, reset on
+	 * GPIO180 (LCM_RST). OUTP/OUTN are the TPS65132 bias rails; the vendor
+	 * sequence enables both before releasing reset. VDDI is not switched by
+	 * the vendor LCM (its PMIC VGP1 calls are commented out), so no digital
+	 * supply is described here.
+	 */
+	panel@0 {
+		compatible = "planet,gemini-pda-nt36672";
+		reg = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&panel_pins>;
+		reset-gpios = <&pio 180 GPIO_ACTIVE_HIGH>;
+		outp-supply = <&reg_lcd_bias_outp>;
+		outn-supply = <&reg_lcd_bias_outn>;
+		backlight = <&backlight>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi0_out_ep>;
+			};
+		};
+	};
+};
+
+&dsi0_out {
+	dsi0_out_ep: endpoint {
+		remote-endpoint = <&panel_in>;
+	};
+};
