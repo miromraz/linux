@@ -606,7 +606,6 @@
  */
 &u2port0 {
 	clocks = <&clk26m>;
-	mediatek,force-b-session-valid;
 };
 
 &ssusb {
