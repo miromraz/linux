@@ -35,14 +35,16 @@ properties:
 
   clocks:
     minItems: 4
-    maxItems: 4
+    maxItems: 5
 
   clock-names:
+    minItems: 4
     items:
       - const: mfg
       - const: mfg_52m
       - const: mm
       - const: vdec
+      - const: mfg_vcg
 
 required:
   - compatible
@@ -71,7 +73,8 @@ examples:
             clocks = <&topckgen CLK_TOP_MUX_MFG>,
                      <&topckgen CLK_TOP_MUX_MFG_52M>,
                      <&topckgen CLK_TOP_MUX_MM>,
-                     <&topckgen CLK_TOP_MUX_VDEC>;
-            clock-names = "mfg", "mfg_52m", "mm", "vdec";
+                     <&topckgen CLK_TOP_MUX_VDEC>,
+                     <&infracfg CLK_INFRA_MFG_VCG>;
+            clock-names = "mfg", "mfg_52m", "mm", "vdec", "mfg_vcg";
         };
     };
