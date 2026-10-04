@@ -495,7 +495,6 @@
 		compatible = "gpio-keys";
 		pinctrl-names = "default";
 		pinctrl-0 = <&hall_pins>;
-		status = "disabled";
 
 		hall-switch {
 			/* Vendor hall.c maps raw low to FCOVER_CLOSE/SW_LID=1. */
