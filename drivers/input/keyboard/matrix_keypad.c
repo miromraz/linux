@@ -93,9 +93,6 @@ static void enable_row_irqs(struct matrix_keypad *keypad)
 {
 	int i;
 
-	if (keypad->poll_interval_ms)
-		return;
-
 	for (i = 0; i < keypad->num_row_gpios; i++)
 		enable_irq(keypad->row_irqs[i]);
 }
@@ -103,9 +100,6 @@ static void enable_row_irqs(struct matrix_keypad *keypad)
 static void disable_row_irqs(struct matrix_keypad *keypad)
 {
 	int i;
-
-	if (keypad->poll_interval_ms)
-		return;
 
 	for (i = 0; i < keypad->num_row_gpios; i++)
 		disable_irq_nosync(keypad->row_irqs[i]);
@@ -124,19 +118,12 @@ static uint32_t read_row_state(struct matrix_keypad *keypad)
 /*
  * This gets the keys from keyboard and reports it to input subsystem
  */
-static void matrix_keypad_scan(struct work_struct *work)
+static void matrix_keypad_scan_matrix(struct matrix_keypad *keypad)
 {
-	struct matrix_keypad *keypad =
-		container_of(work, struct matrix_keypad, work.work);
 	struct input_dev *input_dev = keypad->input_dev;
 	const unsigned short *keycodes = input_dev->keycode;
 	uint32_t new_state[MATRIX_MAX_COLS];
 	int row, col, code;
-	u32 init_row_state, new_row_state;
-
-	/* read initial row state to detect changes between scan */
-	if (!keypad->poll_interval_ms)
-		init_row_state = read_row_state(keypad);
 
 	/* de-activate all columns for scanning */
 	activate_all_cols(keypad, false);
@@ -179,17 +166,27 @@ static void matrix_keypad_scan(struct work_struct *work)
 	memcpy(keypad->last_key_state, new_state, sizeof(new_state));
 
 	activate_all_cols(keypad, true);
+}
 
-	if (keypad->poll_interval_ms) {
-		scoped_guard(spinlock_irq, &keypad->lock) {
-			keypad->scan_pending = false;
-			if (!keypad->stopped)
-				schedule_delayed_work(&keypad->work,
-						      msecs_to_jiffies(keypad->poll_interval_ms));
-		}
+/* Polling-mode scan, driven by the input core's polling timer. */
+static void matrix_keypad_poll(struct input_dev *input_dev)
+{
+	struct matrix_keypad *keypad = input_get_drvdata(input_dev);
 
-		return;
-	}
+	matrix_keypad_scan_matrix(keypad);
+}
+
+/* Interrupt-mode scan, run from the debounce work after a row IRQ. */
+static void matrix_keypad_scan(struct work_struct *work)
+{
+	struct matrix_keypad *keypad =
+		container_of(work, struct matrix_keypad, work.work);
+	u32 init_row_state, new_row_state;
+
+	/* read initial row state to detect changes between scan */
+	init_row_state = read_row_state(keypad);
+
+	matrix_keypad_scan_matrix(keypad);
 
 	/* Enable IRQs again */
 	scoped_guard(spinlock_irq, &keypad->lock) {
@@ -279,9 +276,6 @@ static void matrix_keypad_enable_wakeup(struct matrix_keypad *keypad)
 {
 	int i;
 
-	if (keypad->poll_interval_ms)
-		return;
-
 	for_each_clear_bit(i, keypad->wakeup_enabled_irqs,
 			   keypad->num_row_gpios)
 		if (enable_irq_wake(keypad->row_irqs[i]) == 0)
@@ -291,9 +285,6 @@ static void matrix_keypad_enable_wakeup(struct matrix_keypad *keypad)
 static void matrix_keypad_disable_wakeup(struct matrix_keypad *keypad)
 {
 	int i;
-
-	if (keypad->poll_interval_ms)
-		return;
 
 	for_each_set_bit(i, keypad->wakeup_enabled_irqs,
 			 keypad->num_row_gpios) {
@@ -306,16 +297,15 @@ static int matrix_keypad_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct matrix_keypad *keypad = platform_get_drvdata(pdev);
-	struct input_dev *input_dev = keypad->input_dev;
 
-	guard(mutex)(&input_dev->mutex);
+	/* Polling mode is driven by the freezable input-core timer. */
+	if (keypad->poll_interval_ms)
+		return 0;
 
-	if (input_device_enabled(input_dev)) {
-		matrix_keypad_stop(input_dev);
+	matrix_keypad_stop(keypad->input_dev);
 
-		if (device_may_wakeup(&pdev->dev))
-			matrix_keypad_enable_wakeup(keypad);
-	}
+	if (device_may_wakeup(&pdev->dev))
+		matrix_keypad_enable_wakeup(keypad);
 
 	return 0;
 }
@@ -324,16 +314,15 @@ static int matrix_keypad_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct matrix_keypad *keypad = platform_get_drvdata(pdev);
-	struct input_dev *input_dev = keypad->input_dev;
 
-	guard(mutex)(&input_dev->mutex);
+	/* Polling mode is driven by the freezable input-core timer. */
+	if (keypad->poll_interval_ms)
+		return 0;
 
-	if (input_device_enabled(input_dev)) {
-		if (device_may_wakeup(&pdev->dev))
-			matrix_keypad_disable_wakeup(keypad);
+	if (device_may_wakeup(&pdev->dev))
+		matrix_keypad_disable_wakeup(keypad);
 
-		matrix_keypad_start(input_dev);
-	}
+	matrix_keypad_start(keypad->input_dev);
 
 	return 0;
 }
@@ -408,9 +397,6 @@ static int matrix_keypad_setup_interrupts(struct platform_device *pdev,
 	int irq;
 	int i;
 
-	if (keypad->poll_interval_ms)
-		return 0;
-
 	for (i = 0; i < keypad->num_row_gpios; i++) {
 		irq = gpiod_to_irq(keypad->row_gpios[i]);
 		if (irq < 0) {
@@ -479,14 +465,22 @@ static int matrix_keypad_probe(struct platform_device *pdev)
 
 	keypad->row_shift = get_count_order(keypad->num_col_gpios);
 
-	err = matrix_keypad_setup_interrupts(pdev, keypad);
-	if (err)
-		return err;
-
 	input_dev->name		= pdev->name;
 	input_dev->id.bustype	= BUS_HOST;
-	input_dev->open		= matrix_keypad_start;
-	input_dev->close	= matrix_keypad_stop;
+
+	if (keypad->poll_interval_ms) {
+		err = input_setup_polling(input_dev, matrix_keypad_poll);
+		if (err)
+			return err;
+		input_set_poll_interval(input_dev, keypad->poll_interval_ms);
+	} else {
+		input_dev->open	 = matrix_keypad_start;
+		input_dev->close = matrix_keypad_stop;
+
+		err = matrix_keypad_setup_interrupts(pdev, keypad);
+		if (err)
+			return err;
+	}
 
 	err = matrix_keypad_build_keymap(NULL, NULL,
 					 keypad->num_row_gpios,
