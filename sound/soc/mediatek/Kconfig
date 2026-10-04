@@ -49,6 +49,7 @@ config SND_SOC_MT6797
 config SND_SOC_MT6797_MT6351
 	tristate "ASoc Audio driver for MT6797 with MT6351 codec"
 	depends on SND_SOC_MT6797 && MTK_PMIC_WRAP
+	depends on SND_SOC_MT6351_ACCDET || !SND_SOC_MT6351_ACCDET
 	select SND_SOC_MT6351
 	help
 	  This adds ASoC driver for Mediatek MT6797 boards
