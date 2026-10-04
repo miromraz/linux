@@ -4419,6 +4419,13 @@ L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	drivers/media/pci/hws/
 
+AWINIC AW9120 LED DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-leds@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/leds/awinic,aw9120.yaml
+F:	drivers/leds/leds-aw9120.c
+
 AWINIC AW99706 WLED BACKLIGHT DRIVER
 M:	Junjie Cao <junjie.cao@linux.dev>
 S:	Maintained
