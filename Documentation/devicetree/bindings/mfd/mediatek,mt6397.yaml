@@ -169,6 +169,7 @@ properties:
           - mediatek,mt6323-led
           - mediatek,mt6331-led
           - mediatek,mt6332-led
+          - mediatek,mt6351-led
 
       reg:
         maxItems: 1
