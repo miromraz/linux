@@ -282,6 +282,28 @@
 			       "-1", "0", "0",
 			       "0", "0", "-1";
 	};
+
+	/*
+	 * TPS65132-compatible LCD bias (vendor i2c_lcd_bias@3e). Its positive
+	 * and negative outputs are enabled by GPIO60 (ENP) and GPIO251 (ENN),
+	 * both active high per the vendor enp1/enn1 pin states in aeon_gpio.dtsi.
+	 */
+	lcd_bias: regulator@3e {
+		compatible = "ti,tps65132";
+		reg = <0x3e>;
+
+		outp {
+			regulator-name = "lcd-bias-outp";
+			regulator-boot-on;
+			enable-gpios = <&pio 60 GPIO_ACTIVE_HIGH>;
+		};
+
+		outn {
+			regulator-name = "lcd-bias-outn";
+			regulator-boot-on;
+			enable-gpios = <&pio 251 GPIO_ACTIVE_HIGH>;
+		};
+	};
 };
 
 &watchdog {
