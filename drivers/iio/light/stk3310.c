@@ -90,6 +90,12 @@ static const u8 stk3310_chip_ids[] = {
 	STK3311X_CHIP_ID_VAL,
 	STK3311_CHIP_ID_VAL,
 	STK3335_CHIP_ID_VAL,
+	/*
+	 * STK3311-family part fitted on the Planet Computers Gemini PDA.
+	 * Its product-ID register (0x3e) reads 0x11, which shares the
+	 * STK3311 register map but whose marketed suffix is unconfirmed.
+	 */
+	0x11,
 };
 
 /* Estimate maximum proximity values with regard to measurement scale. */
