@@ -404,6 +404,31 @@
 };
 
 &i2c0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_pins_a>;
+	status = "okay";
+
+	/*
+	 * ON Semi FUSB301A autonomous Type-C controller for the right USB-C
+	 * port. Its active-low interrupt is wired to GPIO64/EINT3; the FUSB301A
+	 * on I2C1 has no usable interrupt line and is therefore not described.
+	 */
+	fusb301: typec@25 {
+		compatible = "onnn,fusb301a";
+		reg = <0x25>;
+		interrupt-parent = <&pio>;
+		interrupts = <3 IRQ_TYPE_LEVEL_LOW>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			power-role = "dual";
+			data-role = "dual";
+			typec-power-opmode = "default";
+			pd-disable;
+		};
+	};
+
 	/* FAN49101 is populated, but keep the regulator and consumer disabled. */
 	fan49101: regulator@70 {
 		compatible = "onnn,fan49101";
