@@ -540,14 +540,20 @@ static const struct mtk_fixed_factor infra_fixed_divs[] = {
 	FACTOR(CLK_INFRA_13M, "clk13m", "clk26m", 1, 2),
 };
 
+/*
+ * The three INFRA_GLOBALCON_RST banks each expose a separate SET and CLR
+ * register: 0x120/0x124 (RST0), 0x130/0x134 (RST1) and 0x140/0x144 (RST2,
+ * the always-on bank that carries the PMIC wrapper reset). The array holds
+ * the SET offset of each bank; the set/clear ops derive CLR as SET + 0x4.
+ */
 static u16 infra_rst_ofs[] = {
-	0x120,
-	0x124,
-	0x128,
+	INFRA_RST0_SET_OFFSET,
+	INFRA_RST1_SET_OFFSET,
+	INFRA_RST2_SET_OFFSET,
 };
 
 static const struct mtk_clk_rst_desc infra_rst_desc = {
-	.version = MTK_RST_SIMPLE,
+	.version = MTK_RST_SET_CLR,
 	.rst_bank_ofs = infra_rst_ofs,
 	.rst_bank_nr = ARRAY_SIZE(infra_rst_ofs),
 };
