@@ -56,6 +56,22 @@
 	};
 
 	/*
+	 * VBUS switch for the right USB-C port (USB11 MUSB host). The vendor
+	 * Type-C flow drives USB1 DRVVBUS (GPIO94) high to source 5 V when a
+	 * device attaches in source role (drivers/misc/mediatek/usb_c/.../
+	 * usb_typec.c; aeon_gpio.dtsi labels GPIO94 "usb1_drvvbus"). Active
+	 * high, left off at boot.
+	 */
+	usb_p1_vbus: regulator-usb-p1-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-p1-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&pio 94 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	/*
 	 * Single-cell Li-Ion pack. The design capacity is the vendor
 	 * fuel-gauge Q_MAX at 25 C (mt_battery_meter.h: Q_MAX_POS_25 =
 	 * 4268 mAh). The open-circuit-voltage table is taken from the vendor
@@ -629,6 +645,7 @@
 			data-role = "dual";
 			typec-power-opmode = "default";
 			pd-disable;
+			vbus-supply = <&usb_p1_vbus>;
 		};
 	};
 
