@@ -124,6 +124,11 @@ static const struct resource mt6331_keys_resources[] = {
 	DEFINE_RES_IRQ_NAMED(MT6331_IRQ_STATUS_HOMEKEY, "homekey"),
 };
 
+static const struct resource mt6351_accdet_resources[] = {
+	DEFINE_RES_IRQ_NAMED(MT6351_IRQ_ACCDET, "accdet_irq"),
+	DEFINE_RES_IRQ_NAMED(MT6351_IRQ_ACCDET_EINT, "accdet_eint"),
+};
+
 static const struct resource mt6351_keys_resources[] = {
 	DEFINE_RES_IRQ_NAMED(MT6351_IRQ_PWRKEY, "powerkey"),
 	DEFINE_RES_IRQ_NAMED(MT6351_IRQ_HOMEKEY, "homekey"),
@@ -243,6 +248,11 @@ static const struct mfd_cell mt6351_devs[] = {
 	}, {
 		.name = "mt6351-led",
 		.of_compatible = "mediatek,mt6351-led",
+	}, {
+		.name = "mt6351-accdet",
+		.num_resources = ARRAY_SIZE(mt6351_accdet_resources),
+		.resources = mt6351_accdet_resources,
+		.of_compatible = "mediatek,mt6351-accdet",
 	},
 };
 
