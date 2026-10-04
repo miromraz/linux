@@ -20,8 +20,12 @@ properties:
     maxItems: 1
     description: DSI virtual channel
 
-  outp-supply: true
-  outn-supply: true
+  avdd-supply:
+    description: Positive analog panel supply (bias OUTP rail)
+
+  avee-supply:
+    description: Negative analog panel supply (bias OUTN rail)
+
   reset-gpios: true
   backlight: true
   port: true
@@ -29,9 +33,33 @@ properties:
 required:
   - compatible
   - reg
-  - outp-supply
-  - outn-supply
+  - avdd-supply
+  - avee-supply
   - reset-gpios
   - port
 
 additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    dsi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        panel@0 {
+            compatible = "planet,gemini-pda-nt36672";
+            reg = <0>;
+            reset-gpios = <&pio 180 GPIO_ACTIVE_HIGH>;
+            avdd-supply = <&reg_lcd_bias_outp>;
+            avee-supply = <&reg_lcd_bias_outn>;
+            backlight = <&backlight>;
+
+            port {
+                panel_in: endpoint {
+                    remote-endpoint = <&dsi0_out_ep>;
+                };
+            };
+        };
+    };
