@@ -298,10 +298,20 @@ static bool dpu_crtc_get_scanout_position(struct drm_crtc *crtc,
 	/* last scan line before VSYNC */
 	vfp_end = mode->crtc_vtotal;
 
+	/*
+	 * The vblank core may ask for the scanout position around a modeset,
+	 * when the encoder is still attached but MDSS is runtime suspended.
+	 * Reading INTF_LINE_COUNT then stalls the CPU on the bus forever.
+	 */
+	if (pm_runtime_get_if_in_use(crtc->dev->dev) <= 0)
+		return false;
+
 	if (stime)
 		*stime = ktime_get();
 
 	line = dpu_encoder_get_linecount(encoder);
+
+	pm_runtime_put(crtc->dev->dev);
 
 	if (line < vactive_start)
 		line -= vactive_start;
