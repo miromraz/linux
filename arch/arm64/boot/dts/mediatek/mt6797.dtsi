@@ -849,7 +849,8 @@
 	};
 
 	ovl0: ovl@1400b000 {
-		compatible = "mediatek,mt6797-disp-ovl";
+		compatible = "mediatek,mt6797-disp-ovl",
+			     "mediatek,mt8167-disp-ovl";
 		reg = <0 0x1400b000 0 0x1000>;
 		interrupts = <GIC_SPI 213 IRQ_TYPE_LEVEL_LOW>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
@@ -889,7 +890,8 @@
 	};
 
 	color0: color@14013000 {
-		compatible = "mediatek,mt6797-disp-color";
+		compatible = "mediatek,mt6797-disp-color",
+			     "mediatek,mt8173-disp-color";
 		reg = <0 0x14013000 0 0x1000>;
 		interrupts = <GIC_SPI 221 IRQ_TYPE_LEVEL_LOW>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
@@ -928,6 +930,7 @@
 		compatible = "mediatek,mt6797-disp-od";
 		reg = <0 0x14017000 0 0x1000>;
 		interrupts = <GIC_SPI 225 IRQ_TYPE_LEVEL_LOW>;
+		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_OD>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x7000 0x1000>;
 	};
