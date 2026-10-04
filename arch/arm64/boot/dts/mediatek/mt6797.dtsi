@@ -260,8 +260,27 @@
 			interrupt-controller;
 			#interrupt-cells = <2>;
 
+			pmic_adc: adc {
+				compatible = "mediatek,mt6351-auxadc";
+				#io-channel-cells = <1>;
+			};
+
 			mt6351regulator: regulators {
 				compatible = "mediatek,mt6351-regulator";
+			};
+
+			pmic_efuse: efuse {
+				compatible = "mediatek,mt6351-efuse";
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					accdet_calibration: accdet-offset@6 {
+						reg = <0x6 0x2>;
+					};
+				};
 			};
 
 			rtc {
