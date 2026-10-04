@@ -132,6 +132,85 @@ properties:
     required:
       - compatible
 
+  accdet:
+    type: object
+    additionalProperties: false
+    description:
+      MT6351 accessory (headset) detection block. It reports headphone and
+      headset plug state and headset buttons. The interrupts are provided by
+      the PMIC MFD and need not be described here.
+
+    properties:
+      compatible:
+        const: mediatek,mt6351-accdet
+
+      io-channels:
+        maxItems: 1
+        description:
+          AUXADC channel used to read the accessory voltage for buttons.
+
+      io-channel-names:
+        const: accdet
+
+      mediatek,mic-vol:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: MICBIAS1 reference voltage selection.
+        minimum: 0
+        maximum: 7
+        default: 7
+
+      mediatek,mic-mode:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: |
+          Microphone bias mode:
+            1 - ACC mode
+            2 - low cost mode without internal bias
+            6 - low cost mode with internal bias
+        enum: [1, 2, 6]
+        default: 1
+
+      mediatek,plugout-debounce:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: Plug-out debounce time in milliseconds.
+        default: 1
+
+      mediatek,key-mode:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: |
+          Headset button layout: 0 for three keys, 1 for four keys.
+        enum: [0, 1]
+        default: 0
+
+      mediatek,pwm-deb-setting:
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        description: |
+          PWM and debounce timing, as
+          <pwm-width pwm-thresh fall-delay rise-delay
+           debounce0 debounce1 debounce3>.
+        minItems: 7
+        maxItems: 7
+
+      mediatek,three-key-thr:
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        description: |
+          Three-key voltage thresholds in millivolts, as
+          <0 media-max up-max down-max>.
+        minItems: 4
+        maxItems: 4
+
+      mediatek,four-key-thr:
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        description: |
+          Four-key voltage thresholds in millivolts, as
+          <0 media-max voice-max up-max down-max>.
+        minItems: 5
+        maxItems: 5
+
+    required:
+      - compatible
+      - io-channels
+      - io-channel-names
+
   clocks:
     type: object
     additionalProperties: false
