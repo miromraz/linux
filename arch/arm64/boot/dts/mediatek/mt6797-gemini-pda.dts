@@ -492,6 +492,33 @@
 		};
 	};
 
+	/*
+	 * TI BQ25896 single-cell Li-Ion charger. The vendor DT mislabels it
+	 * "bq24261@6b", but the board enables MTK_BQ25896_SUPPORT and the part
+	 * answers at 0x6b. Its INT line is not routed (the vendor firmware
+	 * tracks the MT6351 charger-detect comparator instead), so the driver
+	 * polls the status registers.
+	 *
+	 * Charge voltage (4.416 V) and current (2.048 A) match the vendor
+	 * settings. Termination (256 mA), precharge (128 mA), minimum system
+	 * voltage (3.5 V) and boost voltage (5.126 V) are the BQ25896 power-on
+	 * reset defaults (REG05 = 0x13, REG03 = 0x1a, REG0A = 0x93); the vendor
+	 * does not reprogram them. The 1.3 A boost current limit matches the
+	 * value the vendor firmware writes.
+	 */
+	charger: charger@6b {
+		compatible = "ti,bq25896", "ti,bq25890";
+		reg = <0x6b>;
+
+		ti,battery-regulation-voltage = <4416000>;
+		ti,charge-current = <2048000>;
+		ti,termination-current = <256000>;
+		ti,precharge-current = <128000>;
+		ti,minimum-sys-voltage = <3500000>;
+		ti,boost-voltage = <5126000>;
+		ti,boost-max-current = <1300000>;
+	};
+
 	/* FAN49101 is populated, but keep the regulator and consumer disabled. */
 	fan49101: regulator@70 {
 		compatible = "onnn,fan49101";
