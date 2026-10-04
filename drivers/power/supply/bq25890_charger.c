@@ -15,6 +15,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/devm-helpers.h>
 #include <linux/usb/phy.h>
 
 #include <linux/acpi.h>
@@ -30,6 +31,9 @@
 #define PUMP_EXPRESS_START_DELAY	(5 * HZ)
 #define PUMP_EXPRESS_MAX_TRIES		6
 #define PUMP_EXPRESS_VBUS_MARGIN_uV	1000000
+
+/* Status polling interval used on boards that do not wire the INT line */
+#define BQ25890_POLL_INTERVAL		HZ
 
 enum bq25890_chip_version {
 	BQ25890,
@@ -117,6 +121,7 @@ struct bq25890_device {
 	struct notifier_block usb_nb;
 	struct work_struct usb_work;
 	struct delayed_work pump_express_work;
+	struct delayed_work status_work;
 	unsigned long usb_event;
 
 	struct regmap *rmap;
@@ -870,6 +875,21 @@ static irqreturn_t bq25890_irq_handler_thread(int irq, void *private)
 	return ret;
 }
 
+/*
+ * Boards that do not wire the charger's INT line rely on this work to pick up
+ * state changes (cable plug/unplug, charge done, faults) by periodically
+ * running the same handler the interrupt would.
+ */
+static void bq25890_status_work(struct work_struct *work)
+{
+	struct bq25890_device *bq =
+		container_of(work, struct bq25890_device, status_work.work);
+
+	bq25890_irq_handler_thread(0, bq);
+
+	schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
+}
+
 static int bq25890_chip_reset(struct bq25890_device *bq)
 {
 	int ret;
@@ -1330,10 +1350,12 @@ static int bq25890_irq_probe(struct bq25890_device *bq)
 {
 	struct gpio_desc *irq;
 
-	irq = devm_gpiod_get(bq->dev, BQ25890_IRQ_PIN, GPIOD_IN);
+	irq = devm_gpiod_get_optional(bq->dev, BQ25890_IRQ_PIN, GPIOD_IN);
 	if (IS_ERR(irq))
 		return dev_err_probe(bq->dev, PTR_ERR(irq),
 				     "Could not probe irq pin.\n");
+	if (!irq)
+		return 0; /* no INT line wired, caller falls back to polling */
 
 	return gpiod_to_irq(irq);
 }
@@ -1495,10 +1517,8 @@ static int bq25890_probe(struct i2c_client *client)
 	if (client->irq <= 0)
 		client->irq = bq25890_irq_probe(bq);
 
-	if (client->irq < 0) {
-		dev_err(dev, "No irq resource found.\n");
+	if (client->irq < 0)
 		return client->irq;
-	}
 
 	/* OTG reporting */
 	bq->usb_phy = devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
@@ -1519,12 +1539,22 @@ static int bq25890_probe(struct i2c_client *client)
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "registering power supply\n");
 
-	ret = devm_request_threaded_irq(dev, client->irq, NULL,
-					bq25890_irq_handler_thread,
-					IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
-					BQ25890_IRQ_PIN, bq);
-	if (ret)
-		return ret;
+	if (client->irq > 0) {
+		ret = devm_request_threaded_irq(dev, client->irq, NULL,
+						bq25890_irq_handler_thread,
+						IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+						BQ25890_IRQ_PIN, bq);
+		if (ret)
+			return ret;
+	} else {
+		/* No INT line: poll the status registers periodically. */
+		ret = devm_delayed_work_autocancel(dev, &bq->status_work,
+						   bq25890_status_work);
+		if (ret)
+			return ret;
+
+		schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
+	}
 
 	if (!IS_ERR_OR_NULL(bq->usb_phy)) {
 		INIT_WORK(&bq->usb_work, bq25890_usb_work);
@@ -1576,6 +1606,10 @@ static void bq25890_shutdown(struct i2c_client *client)
 static int bq25890_suspend(struct device *dev)
 {
 	struct bq25890_device *bq = dev_get_drvdata(dev);
+	struct i2c_client *client = to_i2c_client(dev);
+
+	if (client->irq <= 0)
+		cancel_delayed_work_sync(&bq->status_work);
 
 	/*
 	 * If charger is removed, while in suspend, make sure ADC is diabled
@@ -1607,6 +1641,9 @@ static int bq25890_resume(struct device *dev)
 
 unlock:
 	mutex_unlock(&bq->lock);
+
+	if (to_i2c_client(dev)->irq <= 0)
+		schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
 
 	return ret;
 }
