@@ -926,7 +926,7 @@
 	};
 
 	dsi0: dsi@1401c000 {
-		compatible = "mediatek,mt6797-dsi";
+		compatible = "mediatek,mt6797-dsi", "mediatek,mt8173-dsi";
 		reg = <0 0x1401c000 0 0x1000>;
 		interrupts = <GIC_SPI 229 IRQ_TYPE_LEVEL_LOW>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
