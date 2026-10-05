@@ -793,9 +793,8 @@
 	/*
 	 * Awinic AW9120 20-channel constant-current LED controller on I2C3
 	 * (address 0x2c, PDN on GPIO245). The per-output colour map follows
-	 * the gemian-leds daemon (LightState.cpp AWLEDCodeForStep and the
-	 * CH_6/CH_7 defines): five RGB indicator blocks, an RGB status LED,
-	 * a caps-lock LED and a power LED.
+	 * the vendor Android LED mapping: five RGB indicator blocks, an RGB
+	 * status LED, a caps-lock LED and a power LED.
 	 */
 	led-controller@2c {
 		compatible = "awinic,aw9120";
