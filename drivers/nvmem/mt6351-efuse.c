@@ -55,27 +55,37 @@ static int mt6351_efuse_read_word(struct mt6351_efuse *e, unsigned int word,
 	int ret;
 
 	/* Enable the eFuse controller clock. */
-	regmap_update_bits(regmap, MT6351_TOP_CKHWEN_CON0,
-			   MT6351_RG_EFUSE_CK_PDN_HWEN, 0);
-	regmap_update_bits(regmap, MT6351_TOP_CKPDN_CON3,
-			   MT6351_RG_EFUSE_CK_PDN, 0);
+	ret = regmap_update_bits(regmap, MT6351_TOP_CKHWEN_CON0,
+				 MT6351_RG_EFUSE_CK_PDN_HWEN, 0);
+	if (ret)
+		goto out;
+	ret = regmap_update_bits(regmap, MT6351_TOP_CKPDN_CON3,
+				 MT6351_RG_EFUSE_CK_PDN, 0);
+	if (ret)
+		goto out;
 
 	/* Software read mode, select the OTP row (two rows per word). */
-	regmap_update_bits(regmap, MT6351_OTP_CON11,
-			   MT6351_RG_OTP_RD_SW, MT6351_RG_OTP_RD_SW);
-	regmap_update_bits(regmap, MT6351_OTP_CON0, MT6351_RG_OTP_PA,
-			   FIELD_PREP(MT6351_RG_OTP_PA, word * 2));
+	ret = regmap_update_bits(regmap, MT6351_OTP_CON11,
+				 MT6351_RG_OTP_RD_SW, MT6351_RG_OTP_RD_SW);
+	if (ret)
+		goto out;
+	ret = regmap_update_bits(regmap, MT6351_OTP_CON0, MT6351_RG_OTP_PA,
+				 FIELD_PREP(MT6351_RG_OTP_PA, word * 2));
+	if (ret)
+		goto out;
 
 	/* Toggle the read trigger: it is edge triggered. */
-	udelay(100);
+	fsleep(100);
 	ret = regmap_read(regmap, MT6351_OTP_CON8, &val);
 	if (ret)
 		goto out;
-	regmap_update_bits(regmap, MT6351_OTP_CON8, MT6351_RG_OTP_RD_TRIG,
-			   (val & MT6351_RG_OTP_RD_TRIG) ? 0 : MT6351_RG_OTP_RD_TRIG);
+	ret = regmap_update_bits(regmap, MT6351_OTP_CON8, MT6351_RG_OTP_RD_TRIG,
+				 (val & MT6351_RG_OTP_RD_TRIG) ? 0 : MT6351_RG_OTP_RD_TRIG);
+	if (ret)
+		goto out;
 
 	/* Wait for the engine to finish. */
-	udelay(300);
+	fsleep(300);
 	ret = regmap_read_poll_timeout(regmap, MT6351_OTP_CON13, val,
 				       !(val & MT6351_RG_OTP_RD_BUSY),
 				       1000, 100000);
@@ -85,13 +95,13 @@ static int mt6351_efuse_read_word(struct mt6351_efuse *e, unsigned int word,
 	}
 
 	/* The data register needs ~1 ms to settle after busy clears. */
-	udelay(1000);
+	fsleep(1000);
 	ret = regmap_read(regmap, MT6351_OTP_CON12, &val);
 	if (ret)
 		goto out;
 	*out = val;
 out:
-	/* Gate the eFuse controller clock again. */
+	/* Always restore clock gating, best effort, without masking ret. */
 	regmap_update_bits(regmap, MT6351_TOP_CKPDN_CON3,
 			   MT6351_RG_EFUSE_CK_PDN, MT6351_RG_EFUSE_CK_PDN);
 	regmap_update_bits(regmap, MT6351_TOP_CKHWEN_CON0,
