@@ -2772,7 +2772,7 @@ config SND_SOC_MT6351
 
 config SND_SOC_MT6351_ACCDET
 	tristate "MediaTek MT6351 ACCDET driver"
-	depends on MTK_PMIC_WRAP
+	depends on MFD_MT6397
 	depends on IIO
 	help
 	  ACCDET means Accessory Detection technology, MediaTek develop it

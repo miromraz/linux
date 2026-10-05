@@ -69,12 +69,11 @@ properties:
     default: 0
 
   poll-interval:
-    $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 1
     description:
-      Poll interval in milliseconds. When present, scan the matrix at this
-      interval instead of requesting interrupts for the row GPIOs. Polling
-      cannot wake a suspended system.
+      When present, scan the matrix at this interval (in milliseconds)
+      instead of requesting interrupts for the row GPIOs. Polling cannot
+      wake a suspended system.
 
   drive-inactive-cols:
     type: boolean

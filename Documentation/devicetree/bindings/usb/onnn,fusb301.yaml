@@ -17,9 +17,11 @@ maintainers:
 
 properties:
   compatible:
-    enum:
-      - onnn,fusb301
-      - onnn,fusb301a
+    oneOf:
+      - const: onnn,fusb301
+      - items:
+          - const: onnn,fusb301a
+          - const: onnn,fusb301
 
   reg:
     maxItems: 1
@@ -29,7 +31,7 @@ properties:
 
   connector:
     type: object
-    $ref: ../connector/usb-connector.yaml#
+    $ref: /schemas/connector/usb-connector.yaml#
     unevaluatedProperties: false
     description:
       The managed USB Type-C connector. FUSB301 does not support Power

@@ -11,6 +11,23 @@ maintainers:
 
 allOf:
   - $ref: pwm.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6797-disp-pwm
+    then:
+      properties:
+        clocks:
+          maxItems: 1
+        clock-names:
+          maxItems: 1
+    else:
+      properties:
+        clocks:
+          minItems: 2
+        clock-names:
+          minItems: 2
 
 properties:
   compatible:
@@ -49,7 +66,7 @@ properties:
     minItems: 1
     items:
       - description: Main Clock
-      - description: MM Clock (required on SoCs that expose it)
+      - description: MM Clock
 
   clock-names:
     minItems: 1

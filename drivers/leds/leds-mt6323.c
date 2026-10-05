@@ -613,6 +613,19 @@ static int mt6323_led_probe(struct platform_device *pdev)
 
 		is_wled = of_property_read_bool(child, "mediatek,is-wled");
 
+		/*
+		 * The ISINK code path dereferences the full isink_con[] layout
+		 * (up to isink_con[2]) and the ISINK enable register. PMICs that
+		 * only expose WLEDs (e.g. MT6332) provide a truncated isink_con[]
+		 * and no isink_en_ctrl, so a non-WLED child would read past the
+		 * end of isink_con[]. Reject it instead.
+		 */
+		if (!is_wled && !regs->isink_en_ctrl) {
+			dev_err(dev, "ISINK LEDs not supported on this PMIC (reg %u)\n",
+				reg);
+			return -EINVAL;
+		}
+
 		leds->led[reg] = led;
 		leds->led[reg]->id = reg;
 		leds->led[reg]->cdev.max_brightness = spec->max_brightness;
@@ -709,8 +722,16 @@ static const struct mt6323_regs mt6332_registers = {
 	.num_isink_con = 1,
 	.isink_max_regs = 12, /* IWLED[0..2, 3..9] */
 	.iwled_en_ctrl = 0x8cda,
-	/* MT6332 exposes only WLEDs; the 32K gate is the single shared bit. */
 	.ck_32k_pdn_shift = 11,
+	/*
+	 * MT6332 exposes only WLEDs, but keep the ISINK layout identical to
+	 * the former hardcoded macros (clock select at bit 10, DIM duty at
+	 * bit 8, soft-start packed into the brightness register) so a legacy
+	 * mt6332-led ISINK node behaves exactly as before this refactor.
+	 */
+	.isink_ck_sel_shift = 10,
+	.isink_dim_duty_shift = 8,
+	.isink_sfstr_in_con = true,
 };
 
 static const struct mt6323_regs mt6351_registers = {

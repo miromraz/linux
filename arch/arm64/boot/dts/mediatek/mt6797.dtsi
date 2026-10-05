@@ -156,13 +156,13 @@
 	};
 
 	usb11: usb@11200000 {
-		compatible = "mediatek,mt6797-usb11", "mediatek,mtk-musb";
+		compatible = "mediatek,mt6797-usb11";
 		reg = <0 0x11200000 0 0x1000>;
 		interrupts = <GIC_SPI 73 IRQ_TYPE_LEVEL_LOW>;
 		interrupt-names = "mc";
 		clocks = <&infrasys CLK_INFRA_ICUSB>,
 				 <&infrasys CLK_INFRA_SSUSB_REF>;
-		clock-names = "infra_icusb", "sssub_ref_clk";
+		clock-names = "infra_icusb", "ssusb_ref_clk";
 		phys = <&usb11_u2 PHY_TYPE_USB2>;
 		dr_mode = "host";
 		status = "disabled";
@@ -318,8 +318,9 @@
 		clocks = <&topckgen CLK_TOP_MUX_MFG>,
 			 <&topckgen CLK_TOP_MUX_MFG_52M>,
 			 <&topckgen CLK_TOP_MUX_MM>,
-			 <&topckgen CLK_TOP_MUX_VDEC>;
-		clock-names = "mfg", "mfg_52m", "mm", "vdec";
+			 <&topckgen CLK_TOP_MUX_VDEC>,
+			 <&infrasys CLK_INFRA_MFG_VCG>;
+		clock-names = "mfg", "mfg_52m", "mm", "vdec", "mfg_vcg";
 		infracfg = <&infrasys>;
 	};
 
@@ -328,36 +329,6 @@
 		reg = <0 0x13000000 0 0x1000>;
 		#clock-cells = <1>;
 		status = "disabled";
-	};
-
-	gpu_opp_table: opp-table-gpu {
-		compatible = "operating-points-v2";
-		opp-shared;
-
-		opp-238000000 {
-			opp-hz = /bits/ 64 <238000000>;
-			opp-microvolt = <862500>;
-		};
-		opp-365000000 {
-			opp-hz = /bits/ 64 <365000000>;
-			opp-microvolt = <912500>;
-		};
-		opp-442500000 {
-			opp-hz = /bits/ 64 <442500000>;
-			opp-microvolt = <975000>;
-		};
-		opp-520000000 {
-			opp-hz = /bits/ 64 <520000000>;
-			opp-microvolt = <1006250>;
-		};
-		opp-610000000 {
-			opp-hz = /bits/ 64 <610000000>;
-			opp-microvolt = <1081250>;
-		};
-		opp-700000000 {
-			opp-hz = /bits/ 64 <700000000>;
-			opp-microvolt = <1131250>;
-		};
 	};
 
 	gpu: gpu@13040000 {
@@ -369,12 +340,13 @@
 		interrupt-names = "job", "mmu", "gpu";
 		clocks = <&mfgsys CLK_MFG_BG3D>;
 		clock-names = "core";
+		assigned-clocks = <&topckgen CLK_TOP_MUX_MFG>;
+		assigned-clock-parents = <&topckgen CLK_TOP_MFGPLL_CK>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MFG_CORE0>,
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE1>,
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE2>,
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE3>;
 		power-domain-names = "core0", "core1", "core2", "core3";
-		operating-points-v2 = <&gpu_opp_table>;
 		status = "disabled";
 	};
 
@@ -532,7 +504,7 @@
 	};
 
 	spi0: spi@1100a000 {
-		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt8183-spi";
 		reg = <0 0x1100a000 0 0x1000>;
 		interrupts = <GIC_SPI 122 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -546,7 +518,7 @@
 	};
 
 	spi1: spi@11012000 {
-		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt8183-spi";
 		reg = <0 0x11012000 0 0x1000>;
 		interrupts = <GIC_SPI 131 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -560,7 +532,7 @@
 	};
 
 	spi2: spi@11018000 {
-		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt8183-spi";
 		reg = <0 0x11018000 0 0x1000>;
 		interrupts = <GIC_SPI 132 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -574,7 +546,7 @@
 	};
 
 	spi3: spi@11019000 {
-		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt8183-spi";
 		reg = <0 0x11019000 0 0x1000>;
 		interrupts = <GIC_SPI 133 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -588,7 +560,7 @@
 	};
 
 	spi4: spi@1101a000 {
-		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt8183-spi";
 		reg = <0 0x1101a000 0 0x1000>;
 		interrupts = <GIC_SPI 134 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -602,7 +574,7 @@
 	};
 
 	spi5: spi@1101b000 {
-		compatible = "mediatek,mt6797-spi", "mediatek,mt6765-spi";
+		compatible = "mediatek,mt6797-spi", "mediatek,mt8183-spi";
 		reg = <0 0x1101b000 0 0x1000>;
 		interrupts = <GIC_SPI 135 IRQ_TYPE_LEVEL_LOW>;
 		clocks = <&topckgen CLK_TOP_SYSPLL3_D2>,
@@ -795,9 +767,9 @@
 		compatible = "mediatek,mt6797-mmc";
 		reg = <0 0x11230000 0 0x10000>;
 		interrupts = <GIC_SPI 79 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&infrasys CLK_INFRA_MSDC0>,
+		clocks = <&topckgen CLK_TOP_MUX_MSDC50_0>,
 			 <&topckgen CLK_TOP_MUX_MSDC50_0_HCLK>,
-			 <&topckgen CLK_TOP_MUX_MSDC50_0>;
+			 <&infrasys CLK_INFRA_MSDC0>;
 		clock-names = "source", "hclk", "source_cg";
 		status = "disabled";
 	};
@@ -806,9 +778,9 @@
 		compatible = "mediatek,mt6797-mmc";
 		reg = <0 0x11240000 0 0x10000>;
 		interrupts = <GIC_SPI 80 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&infrasys CLK_INFRA_MSDC1>,
+		clocks = <&topckgen CLK_TOP_MUX_MSDC30_1>,
 			 <&topckgen CLK_TOP_MUX_AXI>,
-			 <&topckgen CLK_TOP_MUX_MSDC30_1>;
+			 <&infrasys CLK_INFRA_MSDC1>;
 		clock-names = "source", "hclk", "source_cg";
 		status = "disabled";
 	};
@@ -849,7 +821,8 @@
 	};
 
 	ovl0: ovl@1400b000 {
-		compatible = "mediatek,mt6797-disp-ovl";
+		compatible = "mediatek,mt6797-disp-ovl",
+			     "mediatek,mt8167-disp-ovl";
 		reg = <0 0x1400b000 0 0x1000>;
 		interrupts = <GIC_SPI 213 IRQ_TYPE_LEVEL_LOW>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
@@ -889,7 +862,8 @@
 	};
 
 	color0: color@14013000 {
-		compatible = "mediatek,mt6797-disp-color";
+		compatible = "mediatek,mt6797-disp-color",
+			     "mediatek,mt8173-disp-color";
 		reg = <0 0x14013000 0 0x1000>;
 		interrupts = <GIC_SPI 221 IRQ_TYPE_LEVEL_LOW>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
@@ -928,6 +902,7 @@
 		compatible = "mediatek,mt6797-disp-od";
 		reg = <0 0x14017000 0 0x1000>;
 		interrupts = <GIC_SPI 225 IRQ_TYPE_LEVEL_LOW>;
+		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_OD>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1401XXXX 0x7000 0x1000>;
 	};

@@ -25,6 +25,43 @@
 		stdout-path = "serial0:921600n8";
 	};
 
+	/*
+	 * GPU operating points for this board's MT6797 speed bin. The
+	 * frequency/voltage pairs are the vendor 3.18 mt_gpufreq non-M-bin
+	 * grid (238-700 MHz); M-bin parts use a disjoint grid topping out at
+	 * 600 MHz, so this table is not valid for every MT6797 and lives in
+	 * the board DTS rather than the shared SoC dtsi.
+	 */
+	gpu_opp_table: opp-table-gpu {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-238000000 {
+			opp-hz = /bits/ 64 <238000000>;
+			opp-microvolt = <862500>;
+		};
+		opp-365000000 {
+			opp-hz = /bits/ 64 <365000000>;
+			opp-microvolt = <912500>;
+		};
+		opp-442500000 {
+			opp-hz = /bits/ 64 <442500000>;
+			opp-microvolt = <975000>;
+		};
+		opp-520000000 {
+			opp-hz = /bits/ 64 <520000000>;
+			opp-microvolt = <1006250>;
+		};
+		opp-610000000 {
+			opp-hz = /bits/ 64 <610000000>;
+			opp-microvolt = <1081250>;
+		};
+		opp-700000000 {
+			opp-hz = /bits/ 64 <700000000>;
+			opp-microvolt = <1131250>;
+		};
+	};
+
 	firmware {
 		mt6797_atag_devinfo: atag-devinfo {
 			compatible = "mediatek,mt6797-atag-devinfo";
@@ -83,7 +120,7 @@
 		compatible = "simple-battery";
 		charge-full-design-microamp-hours = <4268000>;
 		voltage-min-design-microvolt = <3400000>;
-		voltage-max-design-microvolt = <4357000>;
+		voltage-max-design-microvolt = <4416000>;
 		ocv-capacity-celsius = <25>;
 		ocv-capacity-table-0 =
 			<4357000 100>, <4301000 95>, <4248000 91>, <4196000 86>,
@@ -99,6 +136,16 @@
 		#size-cells = <2>;
 		ranges;
 
+		/*
+		 * Fixed firmware reservations carried over from the vendor
+		 * mt6797.dtsi. By base address the owners are: 0x40000000 the
+		 * preloader-preserved first DRAM page; 0x44400000 ram_console;
+		 * 0x44410000 pstore/ramoops; 0x444f0000 minirdump; 0x44600000
+		 * ARM Trusted Firmware; 0x44610000 ATF ramdump; 0x44640000
+		 * i-cache dump; 0x44800000 preloader; 0x46000000 LK. Linux must
+		 * not map any of them (no-map); the retained MT6797 LK adds its
+		 * further runtime mblock reservations after this DT is loaded.
+		 */
 		memory@40000000 {
 			reg = <0 0x40000000 0 0x1000>;
 			no-map;
@@ -211,11 +258,6 @@
 };
 
 &pio {
-	/*
-	 * MT6797 pinctrl currently supports pinmux only for these pads:
-	 * its descriptor has no pull, IES, or drive-strength register maps.
-	 * Keep boot-firmware pad configuration until those maps are recovered.
-	 */
 	uart0_gemini_pins: uart0-gemini-pins {
 		pins-rx-tx {
 			pinmux = <MT6797_GPIO97__FUNC_URXD0>,
@@ -249,6 +291,12 @@
 		};
 	};
 
+	/*
+	 * Pull and drive values follow the vendor aeon6797_6m_n.dts mmc1 groups
+	 * (cmd/dat pull-up, clk pull-down; drive-strength is written as a raw
+	 * MT6797 register code as on all MT6797 pads). Card detect is GPIO67
+	 * (vendor EINT6) with an internal pull-up.
+	 */
 	mmc1_pins_default: mmc1-default-pins {
 		pins-cmd-dat {
 			pinmux = <MT6797_GPIO130__FUNC_MSDC1_DAT0>,
@@ -256,10 +304,22 @@
 				 <MT6797_GPIO132__FUNC_MSDC1_DAT2>,
 				 <MT6797_GPIO133__FUNC_MSDC1_DAT3>,
 				 <MT6797_GPIO129__FUNC_MSDC1_CMD>;
+			drive-strength = <4>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
 		};
 
 		pins-clk {
 			pinmux = <MT6797_GPIO134__FUNC_MSDC1_CLK>;
+			drive-strength = <4>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	mmc1_cd_pins: mmc1-cd-pins {
+		pins-cd {
+			pinmux = <MT6797_GPIO67__FUNC_GPIO67>;
+			input-enable;
+			bias-pull-up;
 		};
 	};
 
@@ -292,8 +352,8 @@
 
 &mmc1 {
 	pinctrl-names = "default", "state_uhs";
-	pinctrl-0 = <&mmc1_pins_default>;
-	pinctrl-1 = <&mmc1_pins_default>;
+	pinctrl-0 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
+	pinctrl-1 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
 	bus-width = <4>;
 	max-frequency = <200000000>;
 	cap-sd-highspeed;
@@ -322,11 +382,15 @@
 
 		regulators {
 			da9214_bucka: BUCKA {
-				regulator-name = "da9214-bucka";
+				regulator-name = "vproc-little";
+				regulator-always-on;
+				regulator-boot-on;
 			};
 
 			da9214_buckb: BUCKB {
 				regulator-name = "vproc-big";
+				regulator-always-on;
+				regulator-boot-on;
 			};
 		};
 	};
@@ -374,6 +438,7 @@
 		mount-matrix = "0", "-1", "0",
 			       "-1", "0", "0",
 			       "0", "0", "-1";
+		status = "disabled";
 	};
 
 	/*
@@ -414,7 +479,7 @@
 		compatible = "sensortek,stk3310";
 		reg = <0x48>;
 		interrupt-parent = <&pio>;
-		interrupts = <11 IRQ_TYPE_LEVEL_LOW>;
+		interrupts = <11 IRQ_TYPE_EDGE_FALLING>;
 		proximity-near-level = <50>;
 	};
 };
@@ -425,21 +490,27 @@
 	status = "okay";
 
 	/*
-	 * Novatek NT36772 TDDI touchscreen. Verified against the vendor
-	 * aeon6797_6m_n.dts: I2C4 0x62, interrupt on GPIO85/EINT8, reset on
-	 * GPIO68. As a TDDI controller it shares the panel's always-on rails,
-	 * which are not switchable from this node, so no supply is described.
-	 * The driver applies the vendor portrait orientation (swap X/Y, invert
-	 * Y) internally, so no touchscreen-* transform properties are set.
-	 * Kept disabled until the reset polarity and the 0x62-to-0x01 target
-	 * transition are validated on hardware.
+	 * Novatek NT36772 TDDI touchscreen. The vendor aeon6797_6m_n.dts uses
+	 * I2C4 with the 0x62 bootloader address for firmware commands and the
+	 * 0x01 FW address for touch and parameter reads; the mainline driver
+	 * only needs the FW address, so the node sits at 0x01. Interrupt on
+	 * GPIO85/EINT8, reset (active-low RESX) on GPIO68. As a TDDI controller
+	 * it shares the panel's always-on rails, which are not switchable from
+	 * this node, so no supply is described (the dummy regulators cover it).
+	 * The vendor panel is mounted rotated, so express its orientation with
+	 * the standard touchscreen transform properties.
+	 *
+	 * Kept disabled until the reset polarity, the interrupt mapping and the
+	 * orientation are validated on hardware.
 	 */
-	touchscreen@62 {
+	touchscreen@1 {
 		compatible = "novatek,nt36772-ts";
-		reg = <0x62>;
+		reg = <0x01>;
 		interrupt-parent = <&pio>;
 		interrupts = <8 IRQ_TYPE_EDGE_RISING>;
-		reset-gpios = <&pio 68 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pio 68 GPIO_ACTIVE_LOW>;
+		touchscreen-swapped-x-y;
+		touchscreen-inverted-x;
 		status = "disabled";
 	};
 };
@@ -606,7 +677,6 @@
  */
 &u2port0 {
 	clocks = <&clk26m>;
-	mediatek,force-b-session-valid;
 };
 
 &ssusb {
@@ -653,7 +723,7 @@
 	 * on I2C1 has no usable interrupt line and is therefore not described.
 	 */
 	fusb301: typec@25 {
-		compatible = "onnn,fusb301a";
+		compatible = "onnn,fusb301a", "onnn,fusb301";
 		reg = <0x25>;
 		interrupt-parent = <&pio>;
 		interrupts = <3 IRQ_TYPE_LEVEL_LOW>;
@@ -661,8 +731,8 @@
 		connector {
 			compatible = "usb-c-connector";
 			label = "USB-C";
-			power-role = "dual";
-			data-role = "dual";
+			power-role = "source";
+			data-role = "host";
 			typec-power-opmode = "default";
 			pd-disable;
 			vbus-supply = <&usb_p1_vbus>;
@@ -708,7 +778,7 @@
 			fan49101_vout: vout {
 				regulator-name = "fan49101-vout";
 				regulator-min-microvolt = <603000>;
-				regulator-max-microvolt = <1413000>;
+				regulator-max-microvolt = <1411038>;
 			};
 		};
 	};
@@ -720,11 +790,11 @@
 	status = "okay";
 
 	/*
-	 * Awinic AW9120 20-channel constant-current LED controller (I2C3 0x2c,
-	 * PDN GPIO245; docs/driver-port-inventory.md). The per-channel colour
-	 * map is taken from the gemian-leds daemon (LightState.cpp
-	 * AWLEDCodeForStep plus the CH_6/CH_7 defines): five RGB indicator
-	 * blocks, an RGB status LED, a caps-lock LED and a power LED.
+	 * Awinic AW9120 20-channel constant-current LED controller on I2C3
+	 * (address 0x2c, PDN on GPIO245). The per-output colour map follows
+	 * the gemian-leds daemon (LightState.cpp AWLEDCodeForStep and the
+	 * CH_6/CH_7 defines): five RGB indicator blocks, an RGB status LED,
+	 * a caps-lock LED and a power LED.
 	 */
 	led-controller@2c {
 		compatible = "awinic,aw9120";
@@ -733,127 +803,147 @@
 		#size-cells = <0>;
 		enable-gpios = <&pio 245 GPIO_ACTIVE_HIGH>;
 
-		led@0 {
+		multi-led@0 {
 			reg = <0>;
-			color = <LED_COLOR_ID_RED>;
+			color = <LED_COLOR_ID_RGB>;
 			function = LED_FUNCTION_INDICATOR;
 			function-enumerator = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@0 {
+				reg = <0>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@1 {
+				reg = <1>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@2 {
+				reg = <2>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
 		};
 
-		led@1 {
-			reg = <1>;
-			color = <LED_COLOR_ID_GREEN>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <1>;
-		};
-
-		led@2 {
-			reg = <2>;
-			color = <LED_COLOR_ID_BLUE>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <1>;
-		};
-
-		led@3 {
+		multi-led@3 {
 			reg = <3>;
-			color = <LED_COLOR_ID_RED>;
+			color = <LED_COLOR_ID_RGB>;
 			function = LED_FUNCTION_INDICATOR;
 			function-enumerator = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@3 {
+				reg = <3>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@4 {
+				reg = <4>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@5 {
+				reg = <5>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
 		};
 
-		led@4 {
-			reg = <4>;
-			color = <LED_COLOR_ID_GREEN>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <3>;
-		};
-
-		led@5 {
-			reg = <5>;
-			color = <LED_COLOR_ID_BLUE>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <3>;
-		};
-
-		led@6 {
+		multi-led@6 {
 			reg = <6>;
-			color = <LED_COLOR_ID_RED>;
+			color = <LED_COLOR_ID_RGB>;
 			function = LED_FUNCTION_INDICATOR;
 			function-enumerator = <4>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@6 {
+				reg = <6>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@7 {
+				reg = <7>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@8 {
+				reg = <8>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
 		};
 
-		led@7 {
-			reg = <7>;
-			color = <LED_COLOR_ID_GREEN>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <4>;
-		};
-
-		led@8 {
-			reg = <8>;
-			color = <LED_COLOR_ID_BLUE>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <4>;
-		};
-
-		led@9 {
+		multi-led@9 {
 			reg = <9>;
-			color = <LED_COLOR_ID_RED>;
+			color = <LED_COLOR_ID_RGB>;
 			function = LED_FUNCTION_INDICATOR;
 			function-enumerator = <5>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@9 {
+				reg = <9>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@a {
+				reg = <10>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@b {
+				reg = <11>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
 		};
 
-		led@a {
-			reg = <10>;
-			color = <LED_COLOR_ID_GREEN>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <5>;
-		};
-
-		led@b {
-			reg = <11>;
-			color = <LED_COLOR_ID_BLUE>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <5>;
-		};
-
-		led@c {
+		multi-led@c {
 			reg = <12>;
-			color = <LED_COLOR_ID_RED>;
+			color = <LED_COLOR_ID_RGB>;
 			function = LED_FUNCTION_INDICATOR;
 			function-enumerator = <2>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@c {
+				reg = <12>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@d {
+				reg = <13>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@e {
+				reg = <14>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
 		};
 
-		led@d {
-			reg = <13>;
-			color = <LED_COLOR_ID_GREEN>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <2>;
-		};
-
-		led@e {
-			reg = <14>;
-			color = <LED_COLOR_ID_BLUE>;
-			function = LED_FUNCTION_INDICATOR;
-			function-enumerator = <2>;
-		};
-
-		led@f {
+		multi-led@f {
 			reg = <15>;
-			color = <LED_COLOR_ID_RED>;
+			color = <LED_COLOR_ID_RGB>;
 			function = LED_FUNCTION_STATUS;
-		};
+			#address-cells = <1>;
+			#size-cells = <0>;
 
-		led@10 {
-			reg = <16>;
-			color = <LED_COLOR_ID_GREEN>;
-			function = LED_FUNCTION_STATUS;
-		};
+			led@f {
+				reg = <15>;
+				color = <LED_COLOR_ID_RED>;
+			};
 
-		led@11 {
-			reg = <17>;
-			color = <LED_COLOR_ID_BLUE>;
-			function = LED_FUNCTION_STATUS;
+			led@10 {
+				reg = <16>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@11 {
+				reg = <17>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
 		};
 
 		led@12 {
@@ -876,6 +966,7 @@
 
 &gpu {
 	mali-supply = <&rt5735_vgpu>;
+	operating-points-v2 = <&gpu_opp_table>;
 	status = "okay";
 };
 
@@ -884,6 +975,7 @@
 		compatible = "gpio-keys";
 		pinctrl-names = "default";
 		pinctrl-0 = <&hall_pins>;
+		status = "disabled";
 
 		hall-switch {
 			/* Vendor hall.c maps raw low to FCOVER_CLOSE/SW_LID=1. */
@@ -916,10 +1008,11 @@
 	/*
 	 * NT36672-class FHD+ DSI video panel (vendor LCM
 	 * aeon_nt36672_fhd_dsi_vdo_x600_xinli): 4-lane burst mode, reset on
-	 * GPIO180 (LCM_RST). OUTP/OUTN are the TPS65132 bias rails; the vendor
-	 * sequence enables both before releasing reset. VDDI is not switched by
-	 * the vendor LCM (its PMIC VGP1 calls are commented out), so no digital
-	 * supply is described here.
+	 * GPIO180 (LCM_RST). The panel's AVDD/AVEE analog rails are supplied by
+	 * the TPS65132 bias OUTP/OUTN outputs; the vendor sequence enables both
+	 * before releasing reset. VDDI is not switched by the vendor LCM (its
+	 * PMIC VGP1 calls are commented out), so no digital supply is described
+	 * here.
 	 */
 	panel@0 {
 		compatible = "planet,gemini-pda-nt36672";
@@ -927,8 +1020,8 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&panel_pins>;
 		reset-gpios = <&pio 180 GPIO_ACTIVE_HIGH>;
-		outp-supply = <&reg_lcd_bias_outp>;
-		outn-supply = <&reg_lcd_bias_outn>;
+		avdd-supply = <&reg_lcd_bias_outp>;
+		avee-supply = <&reg_lcd_bias_outn>;
 		backlight = <&backlight>;
 
 		port {

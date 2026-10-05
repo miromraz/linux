@@ -16,22 +16,147 @@
 // accessory voltage used for button decoding is read through the PMIC AUXADC
 // (channel MT6351_AUXADC_ACCDET) via the IIO consumer API.
 
+#include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/iio/consumer.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/mt6397/core.h>
+#include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <sound/jack.h>
 #include <sound/soc.h>
 
-#include "mt6351-accdet.h"
+/*
+ * MT6351 PMIC register addresses in the PMIC wrapper (pwrap) address space.
+ * Values taken from the vendor GPL 3.18 kernel
+ * drivers/misc/mediatek/include/mt-plat/mt6797/include/mach/upmu_hw.h and
+ * drivers/misc/mediatek/accdet/mt6797/reg_accdet.h.
+ */
+#define MT6351_TOP_CKPDN_CON2_CLR	0x024a
+#define MT6351_TOP_RST_CON0_SET		0x02aa
+#define MT6351_TOP_RST_CON0_CLR		0x02ac
+#define MT6351_AUDENC_ANA_CON10		0x0d1c
+#define MT6351_AUDENC_ANA_CON11		0x0d1e
+/* ACCDET AUXADC auto-sample control (vendor MT6351_AUXADC_ACCDET register) */
+#define MT6351_AUXADC_ACCDET_AUTO	0x0ed8
+#define MT6351_ACCDET_CON0		0x0f46
+#define MT6351_ACCDET_CON1		0x0f48
+#define MT6351_ACCDET_CON2		0x0f4a
+#define MT6351_ACCDET_CON3		0x0f4c
+#define MT6351_ACCDET_CON4		0x0f4e
+#define MT6351_ACCDET_CON5		0x0f50
+#define MT6351_ACCDET_CON6		0x0f52
+#define MT6351_ACCDET_CON7		0x0f54
+#define MT6351_ACCDET_CON9		0x0f58
+#define MT6351_ACCDET_CON10		0x0f5a
+#define MT6351_ACCDET_CON12		0x0f5e
+#define MT6351_ACCDET_CON14		0x0f62
+#define MT6351_ACCDET_CON15		0x0f64
 
-static const struct snd_soc_component_driver mt6351_accdet_soc_driver = {
-	.name = "mt6351-accdet",
+/* MT6351_TOP_CKPDN_CON2: accessory detection clock gate */
+#define ACCDET_CK_PDN			BIT(9)
+/* MT6351_TOP_RST_CON0: accessory detection soft reset */
+#define ACCDET_RST			BIT(4)
+
+/* MT6351_ACCDET_CON0: reserved analog control, vendor init value */
+#define ACCDET_CON0_RSV_VAL		0x0010
+/* MT6351_ACCDET_CON1: accessory detection control */
+#define ACCDET_EN			BIT(0)
+#define ACCDET_EINT_EN			BIT(2)
+/* MT6351_ACCDET_CON2: comparator/vth/micbias PWM software control */
+#define ACCDET_SWCTRL_EN		0x07
+#define ACCDET_EINT_PWM_EN		BIT(3)
+#define ACCDET_SWCTRL_IDLE_EN		(0x07 << 4)
+/* MT6351_ACCDET_CON10: auxadc connection debounce, vendor value (2 ms) */
+#define ACCDET_DEBOUNCE4_VAL		0x42
+/* MT6351_ACCDET_CON12: interrupt status and clear */
+#define ACCDET_IRQ_STATUS		BIT(0)
+#define ACCDET_EINT_IRQ_STATUS		BIT(2)
+#define ACCDET_IRQ_CLR			BIT(8)
+#define ACCDET_EINT_IRQ_CLR		BIT(10)
+#define ACCDET_EINT_IRQ_POL		BIT(15)
+/* MT6351_ACCDET_CON14: comparator A/B state */
+#define ACCDET_STATE_AB_SHIFT		6
+#define ACCDET_STATE_AB_MASK		0x03
+/* MT6351_ACCDET_CON15: EINT (plug) PWM and debounce control */
+#define ACCDET_EINT_DEB_MASK		(0x07 << 4)
+#define ACCDET_EINT_DEB_IN		0x60	/* 256 ms, wait for plug-in */
+#define ACCDET_EINT_DEB_OUT		0x00	/* 1 ms, wait for plug-out */
+#define ACCDET_EINT_PWM_THRESH		0x400
+
+/* MT6351_AUXADC_ACCDET_AUTO: route the accessory sense to AUXADC channel 5 */
+#define ACCDET_AUXADC_AUTO_SET		BIT(0)
+
+/* MT6351_AUDENC_ANA_CON10: micbias1 reference and low-power control */
+#define ACCDET_MICBIAS_VREF_MASK	(0x07 << 4)
+#define ACCDET_MICBIAS_VREF_SHIFT	4
+#define ACCDET_MICBIAS_LOWPEN		BIT(7)
+#define ACCDET_MICBIAS_MODE6		0x0104
+/* MT6351_AUDENC_ANA_CON11: accessory analog detection control */
+#define ACCDET_ANA_PULLLOW		0x0f
+#define ACCDET_EINT_CON_EN		BIT(11)
+#define ACCDET_ANA_MODE26		0x08c0
+
+/* mic-mode values (mediatek,mic-mode) */
+#define MT6351_ACCDET_MODE_ACC		1
+#define MT6351_ACCDET_MODE_LOW_COST	2
+#define MT6351_ACCDET_MODE_LOW_COST_BIAS 6
+
+#define MT6351_ACCDET_JACK_MASK		(SND_JACK_HEADPHONE | \
+					 SND_JACK_HEADSET | \
+					 SND_JACK_BTN_0 | \
+					 SND_JACK_BTN_1 | \
+					 SND_JACK_BTN_2 | \
+					 SND_JACK_BTN_3)
+
+struct mt6351_accdet_deb {
+	u32 pwm_width;
+	u32 pwm_thresh;
+	u32 fall_delay;
+	u32 rise_delay;
+	u32 debounce0;
+	u32 debounce1;
+	u32 debounce3;
+};
+
+struct mt6351_accdet_three_key {
+	u32 mid;
+	u32 up;
+	u32 down;
+};
+
+struct mt6351_accdet_four_key {
+	u32 mid;
+	u32 voice;
+	u32 up;
+	u32 down;
+};
+
+struct mt6351_accdet_data {
+	u32 mic_vol;
+	u32 mic_mode;
+	u32 eint_pol;
+	bool four_key_mode;
+	struct mt6351_accdet_deb deb;
+	struct mt6351_accdet_three_key three_key;
+	struct mt6351_accdet_four_key four_key;
+};
+
+struct mt6351_accdet {
+	struct snd_soc_jack *jack;
+	struct device *dev;
+	struct regmap *regmap;
+	struct iio_channel *adc;
+	struct mt6351_accdet_data data;
+	struct mutex res_lock; /* serialises the shared ACCDET IRQ register */
+	bool plugged;
+	unsigned int jack_type;
+	unsigned int btn_type;
 };
 
 static void mt6351_accdet_jack_report(struct mt6351_accdet *priv)
@@ -85,14 +210,13 @@ static void mt6351_accdet_check_button(struct mt6351_accdet *priv,
  */
 static void mt6351_accdet_check_jack(struct mt6351_accdet *priv)
 {
-	unsigned int val;
+	unsigned int val, ab;
 	int v;
 
 	regmap_read(priv->regmap, MT6351_ACCDET_CON14, &val);
-	priv->accdet_status =
-		(val >> ACCDET_STATE_AB_SHIFT) & ACCDET_STATE_AB_MASK;
+	ab = (val >> ACCDET_STATE_AB_SHIFT) & ACCDET_STATE_AB_MASK;
 
-	switch (priv->accdet_status) {
+	switch (ab) {
 	case 0:
 		if (priv->jack_type == SND_JACK_HEADSET) {
 			v = mt6351_accdet_read_voltage(priv);
@@ -108,12 +232,23 @@ static void mt6351_accdet_check_jack(struct mt6351_accdet *priv)
 			priv->btn_type = 0;
 		} else {
 			priv->jack_type = SND_JACK_HEADSET;
+			/* AB=11 debounce lengthened while a headset is in */
 			regmap_write(priv->regmap, MT6351_ACCDET_CON9,
 				     priv->data.deb.debounce3 * 30);
 		}
 		break;
-	default:
-		priv->jack_type = 0;
+	case 2:
+		/*
+		 * Transient comparator state: the vendor driver ignores it in
+		 * EINT mode and lets the EINT own plug-out, so do nothing.
+		 */
+		break;
+	default: /* AB = 3 */
+		/*
+		 * The vendor driver explicitly does not emit a plug-out event
+		 * here ("do not send plug out event in plug out"); only the
+		 * EINT reports unplug.  Just drop any pending button.
+		 */
 		priv->btn_type = 0;
 		break;
 	}
@@ -145,13 +280,14 @@ static void mt6351_accdet_handle_eint(struct mt6351_accdet *priv)
 
 	/*
 	 * The EINT is level triggered and only fires on one polarity, so flip
-	 * it to catch the opposite transition next.  The board uses the
-	 * default active-low polarity: set the polarity bit when plugging in,
-	 * clear it when plugging out.
+	 * it to catch the opposite transition next.  Which level means
+	 * "plugged" comes from mediatek,eint-level-pol (0 = active low,
+	 * the board default).
 	 */
 	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
 			   ACCDET_EINT_IRQ_POL,
-			   priv->plugged ? 0 : ACCDET_EINT_IRQ_POL);
+			   (priv->data.eint_pol ? priv->plugged : !priv->plugged) ?
+			   ACCDET_EINT_IRQ_POL : 0);
 
 	/* clear the EINT interrupt, preserving the polarity bit */
 	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
@@ -174,6 +310,13 @@ static void mt6351_accdet_handle_eint(struct mt6351_accdet *priv)
 		priv->plugged = false;
 		regmap_update_bits(priv->regmap, MT6351_ACCDET_CON15,
 				   ACCDET_EINT_DEB_MASK, ACCDET_EINT_DEB_IN);
+		/*
+		 * Restore the plug-in (AB=11) debounce the vendor re-applies on
+		 * every plug-out; otherwise it stays at the x30 value written
+		 * when a headset was detected and later insertions are slow.
+		 */
+		regmap_write(priv->regmap, MT6351_ACCDET_CON9,
+			     priv->data.deb.debounce3);
 		mt6351_accdet_disable(priv);
 		priv->jack_type = 0;
 		priv->btn_type = 0;
@@ -236,11 +379,14 @@ static void mt6351_accdet_init(struct mt6351_accdet *priv)
 	regmap_write(priv->regmap, MT6351_ACCDET_CON9, d->deb.debounce3);
 	regmap_write(priv->regmap, MT6351_ACCDET_CON10, ACCDET_DEBOUNCE4_VAL);
 
-	/* clear then enable the accessory and EINT interrupts */
+	/*
+	 * Make sure both interrupt-clear bits are released.  The accessory and
+	 * EINT PMIC interrupts themselves are unmasked by the mt6397 irqchip
+	 * when the threaded handlers are requested, so do not poke INT_CON0
+	 * here.
+	 */
 	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
-			   ACCDET_EINT_IRQ_CLR, 0);
-	regmap_write(priv->regmap, MT6351_INT_CON0_SET,
-		     ACCDET_INT_EN | ACCDET_EINT_INT_EN);
+			   ACCDET_IRQ_CLR | ACCDET_EINT_IRQ_CLR, 0);
 
 	/* analog setup: pull-low, micbias reference, internal EINT connection */
 	regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
@@ -275,32 +421,32 @@ static void mt6351_accdet_init(struct mt6351_accdet *priv)
 	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON1,
 			   ACCDET_EINT_EN, ACCDET_EINT_EN);
 
+	/* prime the EINT polarity so it fires on the first plug-in */
+	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
+			   ACCDET_EINT_IRQ_POL,
+			   d->eint_pol ? ACCDET_EINT_IRQ_POL : 0);
+
 	/*
 	 * Route the accessory sense of the ACCDET comparator to AUXADC
 	 * channel 5 so the voltage read for button decoding reflects it.
 	 */
-	regmap_update_bits(priv->regmap, MT6351_AUXADC_ACCDET,
+	regmap_update_bits(priv->regmap, MT6351_AUXADC_ACCDET_AUTO,
 			   ACCDET_AUXADC_AUTO_SET, ACCDET_AUXADC_AUTO_SET);
 }
 
-static int mt6351_accdet_parse_dt(struct mt6351_accdet *priv)
+static void mt6351_accdet_parse_dt(struct mt6351_accdet *priv)
 {
 	struct mt6351_accdet_data *d = &priv->data;
-	struct device_node *node;
+	struct device *dev = priv->dev;
 	u32 deb[7];
 	u32 key_mode = 0;
 
-	node = of_get_child_by_name(priv->dev->parent->of_node, "accdet");
-	if (!node)
-		return -EINVAL;
-
-	if (of_property_read_u32(node, "mediatek,mic-vol", &d->mic_vol))
+	if (device_property_read_u32(dev, "mediatek,mic-vol", &d->mic_vol))
 		d->mic_vol = 7;
-	if (of_property_read_u32(node, "mediatek,mic-mode", &d->mic_mode))
+	if (device_property_read_u32(dev, "mediatek,mic-mode", &d->mic_mode))
 		d->mic_mode = MT6351_ACCDET_MODE_ACC;
-	if (of_property_read_u32(node, "mediatek,plugout-debounce",
-				 &d->plugout_deb))
-		d->plugout_deb = 1;
+	/* 0 (active low) is the board default EINT "plugged" level */
+	device_property_read_u32(dev, "mediatek,eint-level-pol", &d->eint_pol);
 
 	/*
 	 * Defaults taken from the vendor DTS (aeon6797_6m_n.dts
@@ -314,8 +460,8 @@ static int mt6351_accdet_parse_dt(struct mt6351_accdet *priv)
 	d->deb.debounce0 = 0x800;
 	d->deb.debounce1 = 0x800;
 	d->deb.debounce3 = 0x20;
-	if (!of_property_read_u32_array(node, "mediatek,pwm-deb-setting",
-					deb, ARRAY_SIZE(deb))) {
+	if (!device_property_read_u32_array(dev, "mediatek,pwm-deb-setting",
+					   deb, ARRAY_SIZE(deb))) {
 		d->deb.pwm_width = deb[0];
 		d->deb.pwm_thresh = deb[1];
 		d->deb.fall_delay = deb[2];
@@ -325,13 +471,13 @@ static int mt6351_accdet_parse_dt(struct mt6351_accdet *priv)
 		d->deb.debounce3 = deb[6];
 	}
 
-	of_property_read_u32(node, "mediatek,key-mode", &key_mode);
+	device_property_read_u32(dev, "mediatek,key-mode", &key_mode);
 	if (key_mode == 1) {
 		u32 four[5] = { 0, 58, 121, 192, 400 };
 
 		d->four_key_mode = true;
-		of_property_read_u32_array(node, "mediatek,four-key-thr",
-					   four, ARRAY_SIZE(four));
+		device_property_read_u32_array(dev, "mediatek,four-key-thr",
+					       four, ARRAY_SIZE(four));
 		d->four_key.mid = four[1];
 		d->four_key.voice = four[2];
 		d->four_key.up = four[3];
@@ -339,43 +485,62 @@ static int mt6351_accdet_parse_dt(struct mt6351_accdet *priv)
 	} else {
 		u32 three[4] = { 0, 80, 220, 400 };
 
-		of_property_read_u32_array(node, "mediatek,three-key-thr",
-					   three, ARRAY_SIZE(three));
+		device_property_read_u32_array(dev, "mediatek,three-key-thr",
+					       three, ARRAY_SIZE(three));
 		d->three_key.mid = three[1];
 		d->three_key.up = three[2];
 		d->three_key.down = three[3];
 	}
-
-	of_node_put(node);
-
-	return 0;
 }
 
-int mt6351_accdet_enable_jack_detect(struct snd_soc_component *component,
-				     struct snd_soc_jack *jack)
+/*
+ * The machine driver lists this component as a card aux_dev and hands the
+ * headset jack in through the generic set_jack path, so the card core owns the
+ * component lifetime and the jack is cleared on teardown (jack == NULL).
+ */
+static int mt6351_accdet_set_jack(struct snd_soc_component *component,
+				  struct snd_soc_jack *jack, void *data)
 {
 	struct mt6351_accdet *priv = snd_soc_component_get_drvdata(component);
 
-	snd_jack_set_key(jack->jack, SND_JACK_BTN_0, KEY_PLAYPAUSE);
-	snd_jack_set_key(jack->jack, SND_JACK_BTN_1, KEY_VOLUMEDOWN);
-	snd_jack_set_key(jack->jack, SND_JACK_BTN_2, KEY_VOLUMEUP);
-	snd_jack_set_key(jack->jack, SND_JACK_BTN_3, KEY_VOICECOMMAND);
+	if (jack) {
+		snd_jack_set_key(jack->jack, SND_JACK_BTN_0, KEY_PLAYPAUSE);
+		snd_jack_set_key(jack->jack, SND_JACK_BTN_1, KEY_VOLUMEDOWN);
+		snd_jack_set_key(jack->jack, SND_JACK_BTN_2, KEY_VOLUMEUP);
+		snd_jack_set_key(jack->jack, SND_JACK_BTN_3, KEY_VOICECOMMAND);
+	}
 
 	mutex_lock(&priv->res_lock);
 	priv->jack = jack;
 	mutex_unlock(&priv->res_lock);
 
-	mt6351_accdet_jack_report(priv);
+	if (jack)
+		mt6351_accdet_jack_report(priv);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(mt6351_accdet_enable_jack_detect);
+
+static void mt6351_accdet_component_remove(struct snd_soc_component *component)
+{
+	struct mt6351_accdet *priv = snd_soc_component_get_drvdata(component);
+
+	/* drop the jack before the card frees it, so the IRQ never uses it */
+	mutex_lock(&priv->res_lock);
+	priv->jack = NULL;
+	mutex_unlock(&priv->res_lock);
+}
+
+static const struct snd_soc_component_driver mt6351_accdet_soc_driver = {
+	.name = "mt6351-accdet",
+	.set_jack = mt6351_accdet_set_jack,
+	.remove = mt6351_accdet_component_remove,
+};
 
 static int mt6351_accdet_probe(struct platform_device *pdev)
 {
 	struct mt6397_chip *mt6397 = dev_get_drvdata(pdev->dev.parent);
 	struct mt6351_accdet *priv;
-	int ret;
+	int accdet_irq, eint_irq, ret;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -389,31 +554,19 @@ static int mt6351_accdet_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, PTR_ERR(priv->adc),
 				     "failed to get accdet ADC channel\n");
 
-	ret = mt6351_accdet_parse_dt(priv);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "failed to parse DT\n");
+	mt6351_accdet_parse_dt(priv);
 
-	mutex_init(&priv->res_lock);
-
-	priv->accdet_irq = platform_get_irq(pdev, 0);
-	if (priv->accdet_irq < 0)
-		return priv->accdet_irq;
-	ret = devm_request_threaded_irq(&pdev->dev, priv->accdet_irq, NULL,
-					mt6351_accdet_irq, IRQF_ONESHOT,
-					"ACCDET_IRQ", priv);
+	ret = devm_mutex_init(&pdev->dev, &priv->res_lock);
 	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to request ACCDET IRQ\n");
+		return ret;
 
-	priv->eint_irq = platform_get_irq(pdev, 1);
-	if (priv->eint_irq < 0)
-		return priv->eint_irq;
-	ret = devm_request_threaded_irq(&pdev->dev, priv->eint_irq, NULL,
-					mt6351_accdet_irq, IRQF_ONESHOT,
-					"ACCDET_EINT", priv);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to request ACCDET EINT\n");
+	accdet_irq = platform_get_irq_byname(pdev, "accdet_irq");
+	if (accdet_irq < 0)
+		return accdet_irq;
+
+	eint_irq = platform_get_irq_byname(pdev, "accdet_eint");
+	if (eint_irq < 0)
+		return eint_irq;
 
 	platform_set_drvdata(pdev, priv);
 
@@ -424,17 +577,49 @@ static int mt6351_accdet_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "failed to register component\n");
 
+	/*
+	 * Reset the block to a known unplugged state and clear any pending
+	 * interrupt before unmasking, so a plug left in across a rebind does
+	 * not desync the software plug state.
+	 */
 	mt6351_accdet_init(priv);
-	mt6351_accdet_jack_report(priv);
+
+	ret = devm_request_threaded_irq(&pdev->dev, accdet_irq, NULL,
+					mt6351_accdet_irq, IRQF_ONESHOT,
+					"accdet_irq", priv);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "failed to request ACCDET IRQ\n");
+
+	ret = devm_request_threaded_irq(&pdev->dev, eint_irq, NULL,
+					mt6351_accdet_irq, IRQF_ONESHOT,
+					"accdet_eint", priv);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "failed to request ACCDET EINT\n");
 
 	return 0;
 }
 
+static const struct of_device_id mt6351_accdet_of_match[] = {
+	{ .compatible = "mediatek,mt6351-accdet" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, mt6351_accdet_of_match);
+
+static const struct platform_device_id mt6351_accdet_id[] = {
+	{ "mt6351-accdet" },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, mt6351_accdet_id);
+
 static struct platform_driver mt6351_accdet_driver = {
 	.driver = {
 		.name = "mt6351-accdet",
+		.of_match_table = mt6351_accdet_of_match,
 	},
 	.probe = mt6351_accdet_probe,
+	.id_table = mt6351_accdet_id,
 };
 module_platform_driver(mt6351_accdet_driver);
 

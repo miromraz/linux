@@ -19,6 +19,7 @@ static const struct mtk_gate_regs cam_cg_regs = {
 		 &mtk_clk_gate_ops_setclr)
 
 static const struct mtk_gate cam_clks[] = {
+	GATE_DUMMY(CLK_DUMMY, "cam_dummy"),
 	GATE_CAM(CLK_CAM_CAMSV2, "cam_camsv2", "mm_sel", 11),
 	GATE_CAM(CLK_CAM_CAMSV1, "cam_camsv1", "mm_sel", 10),
 	GATE_CAM(CLK_CAM_CAMSV0, "cam_camsv0", "mm_sel", 9),

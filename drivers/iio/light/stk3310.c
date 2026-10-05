@@ -42,6 +42,12 @@
 #define STK3311S34_CHIP_ID_VAL			0x1E
 #define STK3311X_CHIP_ID_VAL			0x12
 #define STK3335_CHIP_ID_VAL			0x51
+/*
+ * STK3311-family part fitted on the Planet Computers Gemini PDA. Its
+ * product-ID register (0x3e) reads 0x11, which shares the STK3311 register
+ * map; the marketed suffix of this variant is unconfirmed.
+ */
+#define STK3311_GEMINI_CHIP_ID_VAL		0x11
 #define STK3310_PSINT_EN			0x01
 #define STK3310_PS_MAX_VAL			0xFFFF
 
@@ -90,12 +96,7 @@ static const u8 stk3310_chip_ids[] = {
 	STK3311X_CHIP_ID_VAL,
 	STK3311_CHIP_ID_VAL,
 	STK3335_CHIP_ID_VAL,
-	/*
-	 * STK3311-family part fitted on the Planet Computers Gemini PDA.
-	 * Its product-ID register (0x3e) reads 0x11, which shares the
-	 * STK3311 register map but whose marketed suffix is unconfirmed.
-	 */
-	0x11,
+	STK3311_GEMINI_CHIP_ID_VAL,
 };
 
 /* Estimate maximum proximity values with regard to measurement scale. */

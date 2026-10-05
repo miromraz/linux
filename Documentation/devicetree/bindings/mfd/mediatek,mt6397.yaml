@@ -169,10 +169,14 @@ properties:
         enum: [1, 2, 6]
         default: 1
 
-      mediatek,plugout-debounce:
+      mediatek,eint-level-pol:
         $ref: /schemas/types.yaml#/definitions/uint32
-        description: Plug-out debounce time in milliseconds.
-        default: 1
+        description: |
+          Internal EINT level that means a jack is plugged in:
+            0 - active low (default)
+            1 - active high
+        enum: [0, 1]
+        default: 0
 
       mediatek,key-mode:
         $ref: /schemas/types.yaml#/definitions/uint32
@@ -314,6 +318,18 @@ required:
   - regulators
 
 additionalProperties: false
+
+allOf:
+  # The accessory detection block is only present on the MT6351 PMIC.
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              const: mediatek,mt6351
+    then:
+      properties:
+        accdet: false
 
 examples:
   - |

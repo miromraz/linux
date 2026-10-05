@@ -434,7 +434,7 @@ static const struct mtk_ddp_comp_funcs ddp_ovl_adaptor = {
 	.mode_valid = mtk_ovl_adaptor_mode_valid,
 };
 
-static const struct of_device_id mtk_ddp_comp_dt_ids[] = {
+static const struct of_device_id mtk_ddp_comp_data_ids[] = {
 	{ .compatible = "mediatek,mt6797-disp-od", .data = &mt6797_od_data },
 	{ /* sentinel */ }
 };
@@ -702,7 +702,7 @@ int mtk_ddp_comp_init(struct device *dev, struct device_node *node, struct mtk_d
 	if (!priv)
 		return -ENOMEM;
 
-	match = of_match_node(mtk_ddp_comp_dt_ids, node);
+	match = of_match_node(mtk_ddp_comp_data_ids, node);
 	if (match)
 		priv->data = match->data;
 

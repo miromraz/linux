@@ -1113,10 +1113,6 @@ static const struct mtk_dpi_factor dpi_factor_mt8173[] = {
 	{ 27000, 48 }, { 84000, 24 }, { 167000, 12 }, { U32_MAX, 6 }
 };
 
-static const struct mtk_dpi_factor dpi_factor_mt6797[] = {
-	{ 27000, 48 }, { 84000, 24 }, { 167000, 12 }, { U32_MAX, 6 }
-};
-
 static const struct mtk_dpi_factor dpi_factor_mt8183[] = {
 	{ 27000, 8 }, { 167000, 4 }, { U32_MAX, 2 }
 };
@@ -1144,8 +1140,9 @@ static const struct mtk_dpi_conf mt8173_conf = {
 };
 
 static const struct mtk_dpi_conf mt6797_conf = {
-	.dpi_factor = dpi_factor_mt6797,
-	.num_dpi_factor = ARRAY_SIZE(dpi_factor_mt6797),
+	/* Same clock-to-PLL factors as MT8173; the TVDPLL mux is not modelled. */
+	.dpi_factor = dpi_factor_mt8173,
+	.num_dpi_factor = ARRAY_SIZE(dpi_factor_mt8173),
 	.max_clock_khz = 300000,
 	.output_fmts = mt8173_output_fmts,
 	.num_output_fmts = ARRAY_SIZE(mt8173_output_fmts),
