@@ -158,6 +158,12 @@ enum scpsys_mtcmos_type {
  * @sta_mask: The mask for power on/off status bit.
  * @sta2nd_mask: The mask for second power on/off status bit.
  * @ctl_offs: The offset for main power control register.
+ * @sram_pdn_offs: The offset for the SRAM power-down control register, when it
+ *		   is separate from ctl_offs. Zero means sram_pdn_bits live in
+ *		   ctl_offs.
+ * @sram_ack_offs: The offset for the SRAM power-down acknowledge register, when
+ *		   it is separate from ctl_offs. Zero means sram_pdn_ack_bits
+ *		   live in ctl_offs.
  * @sram_pdn_bits: The mask for sram power control bits.
  * @sram_pdn_ack_bits: The mask for sram power control acked bits.
  * @ext_buck_iso_offs: The offset for external buck isolation
@@ -171,6 +177,8 @@ struct scpsys_domain_data {
 	u32 sta_mask;
 	u32 sta2nd_mask;
 	int ctl_offs;
+	int sram_pdn_offs;
+	int sram_ack_offs;
 	u32 sram_pdn_bits;
 	u32 sram_pdn_ack_bits;
 	int ext_buck_iso_offs;
