@@ -11,6 +11,7 @@
 #include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/usb/role.h>
 #include <linux/usb/typec.h>
 
 #define FUSB301_REG_DEVICE_ID	0x01
@@ -57,6 +58,7 @@ struct fusb301 {
 	struct typec_port *port;
 	struct typec_partner *partner;
 	struct fwnode_handle *connector;
+	struct usb_role_switch *role_sw;
 	struct regulator *vbus;
 	bool vbus_on;
 	int irq;
@@ -205,6 +207,7 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		fusb->partner_type = 0;
 		pwr_role = fusb301_default_role(fusb);
 		data_role = pwr_role == TYPEC_SOURCE ? TYPEC_HOST : TYPEC_DEVICE;
+		usb_role_switch_set_role(fusb->role_sw, USB_ROLE_NONE);
 		typec_set_data_role(fusb->port, data_role);
 		typec_set_pwr_role(fusb->port, pwr_role);
 		typec_set_vconn_role(fusb->port, pwr_role);
@@ -235,6 +238,9 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		}
 
 		data_role = pwr_role == TYPEC_SOURCE ? TYPEC_HOST : TYPEC_DEVICE;
+		usb_role_switch_set_role(fusb->role_sw,
+					 pwr_role == TYPEC_SOURCE ?
+					 USB_ROLE_HOST : USB_ROLE_DEVICE);
 		typec_set_pwr_role(fusb->port, pwr_role);
 		typec_set_vconn_role(fusb->port, pwr_role);
 		typec_set_data_role(fusb->port, data_role);
@@ -356,6 +362,18 @@ static int fusb301_probe(struct i2c_client *client)
 		fusb->vbus = NULL;
 	}
 
+	/*
+	 * The USB controller behind the connector learns its host/device role
+	 * from this optional role switch. Absence is fine (e.g. a host-only
+	 * port); -EPROBE_DEFER means the switch is not ready yet.
+	 */
+	fusb->role_sw = fwnode_usb_role_switch_get(fusb->connector);
+	if (IS_ERR(fusb->role_sw)) {
+		ret = dev_err_probe(dev, PTR_ERR(fusb->role_sw),
+				    "failed to get USB role switch\n");
+		goto err_put_connector;
+	}
+
 	fusb->cap.revision = USB_TYPEC_REV_1_1;
 	fusb->cap.orientation_aware = true;
 	fusb->cap.driver_data = fusb;
@@ -363,12 +381,12 @@ static int fusb301_probe(struct i2c_client *client)
 
 	ret = fusb301_hw_init(fusb);
 	if (ret)
-		goto err_put_connector;
+		goto err_put_role_sw;
 
 	fusb->port = typec_register_port(dev, &fusb->cap);
 	if (IS_ERR(fusb->port)) {
 		ret = PTR_ERR(fusb->port);
-		goto err_put_connector;
+		goto err_put_role_sw;
 	}
 
 	ret = fusb301_update_status(fusb);
@@ -389,6 +407,8 @@ err_unregister_port:
 	fusb301_vbus_set(fusb, false);
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
+err_put_role_sw:
+	usb_role_switch_put(fusb->role_sw);
 err_put_connector:
 	fwnode_handle_put(fusb->connector);
 	return ret;
@@ -402,6 +422,7 @@ static void fusb301_remove(struct i2c_client *client)
 	fusb301_vbus_set(fusb, false);
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
+	usb_role_switch_put(fusb->role_sw);
 }
 
 static void fusb301_shutdown(struct i2c_client *client)
