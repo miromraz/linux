@@ -113,18 +113,21 @@
 #define P2C_RG_UART_EN			BIT(16)
 #define P2C_FORCE_VBUSVALID		BIT(13)
 #define P2C_FORCE_SESSEND		BIT(12)
+#define P2C_FORCE_BVALID		BIT(11)
 #define P2C_FORCE_AVALID		BIT(10)
 #define P2C_FORCE_IDDIG		BIT(9)
 #define P2C_RG_VBUSVALID		BIT(5)
 #define P2C_RG_SESSEND			BIT(4)
+#define P2C_RG_BVALID			BIT(3)
 #define P2C_RG_AVALID			BIT(2)
 #define P2C_RG_IDDIG			BIT(1)
 /*
- * MT6797 cannot sense VBUS or session state, so the VBUSVALID/AVALID/SESSEND
- * signals must be forced to the RG_* values driven by power on/off.
+ * MT6797 cannot sense VBUS or session state, so the VBUSVALID/AVALID/BVALID/
+ * SESSEND signals must be forced to the RG_* values driven by power on/off.
  */
 #define P2C_FORCE_VBUS_SENSE \
-		(P2C_FORCE_VBUSVALID | P2C_FORCE_AVALID | P2C_FORCE_SESSEND)
+		(P2C_FORCE_VBUSVALID | P2C_FORCE_AVALID | P2C_FORCE_BVALID | \
+		 P2C_FORCE_SESSEND)
 
 #define U3P_U2PHYBC12C		0x080
 #define P2C_RG_CHGDT_EN		BIT(0)
@@ -294,7 +297,7 @@ enum mtk_phy_version {
  *                            that is pointed at in the device tree node for this PHY
  * @slew_ref_clock_mhz:         Default reference clock (in MHz) for slew rate calibration
  * @slew_rate_coefficient:    Coefficient for slew rate calibration
- * @force_vbus_sense:         Force VBUSVALID/AVALID/SESSEND on U2 PHY power on
+ * @force_vbus_sense:         Force VBUSVALID/AVALID/BVALID/SESSEND on U2 PHY power on
  *                            (MT6797, which cannot sense VBUS/session state)
  * @version:                  PHY IP Version
  */
@@ -890,7 +893,8 @@ static void u2_phy_instance_power_on(struct mtk_tphy *tphy,
 
 	mtk_phy_clear_bits(com + U3P_U2PHYDTM1, P2C_RG_SESSEND);
 	if (tphy->pdata->force_vbus_sense)
-		mtk_phy_set_bits(com + U3P_U2PHYDTM1, P2C_FORCE_VBUS_SENSE);
+		mtk_phy_set_bits(com + U3P_U2PHYDTM1,
+				 P2C_FORCE_VBUS_SENSE | P2C_RG_BVALID);
 
 	if (tphy->pdata->avoid_rx_sen_degradation && index) {
 		mtk_phy_set_bits(com + U3D_U2PHYDCR0, P2C_RG_SIF_U2PLL_FORCE_ON);
@@ -914,7 +918,8 @@ static void u2_phy_instance_power_off(struct mtk_tphy *tphy,
 
 	mtk_phy_set_bits(com + U3P_U2PHYDTM1, P2C_RG_SESSEND);
 	if (tphy->pdata->force_vbus_sense)
-		mtk_phy_clear_bits(com + U3P_U2PHYDTM1, P2C_FORCE_VBUS_SENSE);
+		mtk_phy_clear_bits(com + U3P_U2PHYDTM1,
+				   P2C_FORCE_VBUS_SENSE | P2C_RG_BVALID);
 
 	if (tphy->pdata->avoid_rx_sen_degradation && index) {
 		mtk_phy_clear_bits(com + U3P_U2PHYDTM0, P2C_RG_SUSPENDM | P2C_FORCE_SUSPENDM);
