@@ -852,7 +852,7 @@
 	};
 
 	rdma0: rdma@1400f000 {
-		compatible = "mediatek,mt6797-disp-rdma";
+		compatible = "mediatek,mt6797-disp-rdma", "mediatek,mt8173-disp-rdma";
 		reg = <0 0x1400f000 0 0x1000>;
 		interrupts = <GIC_SPI 217 IRQ_TYPE_LEVEL_LOW>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
