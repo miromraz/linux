@@ -438,6 +438,18 @@
 		#iommu-cells = <1>;
 	};
 
+	efuse: efuse@10206000 {
+		compatible = "mediatek,mt6797-efuse",
+			     "mediatek,efuse";
+		reg = <0 0x10206000 0 0x1000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		thermal_calibration: calib@180 {
+			reg = <0x180 0xc>;
+		};
+	};
+
 	gce: mailbox@10212000 {
 		compatible = "mediatek,mt6797-gce",
 			     "mediatek,mt8173-gce";
@@ -745,6 +757,8 @@
 		mediatek,auxadc = <&auxadc>;
 		mediatek,apmixedsys = <&apmixedsys>;
 		#thermal-sensor-cells = <0>;
+		nvmem-cells = <&thermal_calibration>;
+		nvmem-cell-names = "calibration-data";
 		status = "disabled";
 	};
 
