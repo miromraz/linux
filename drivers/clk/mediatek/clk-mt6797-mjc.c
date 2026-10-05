@@ -19,6 +19,7 @@ static const struct mtk_gate_regs mjc_cg_regs = {
 		 &mtk_clk_gate_ops_setclr)
 
 static const struct mtk_gate mjc_clks[] = {
+	GATE_DUMMY(CLK_DUMMY, "mjc_dummy"),
 	GATE_MJC(CLK_MJC_SMI_LARB, "mjc_smi_larb", 0),
 	GATE_MJC(CLK_MJC_TOP_CLK_0, "mjc_top_clk_0", 1),
 	GATE_MJC(CLK_MJC_TOP_CLK_1, "mjc_top_clk_1", 2),

@@ -144,10 +144,6 @@ static const struct mtk_disp_color_data mt8173_color_driver_data = {
 	.color_offset = DISP_COLOR_START_MT8173,
 };
 
-static const struct mtk_disp_color_data mt6797_color_driver_data = {
-	.color_offset = DISP_COLOR_START_MT8173,
-};
-
 static const struct of_device_id mtk_disp_color_driver_dt_match[] = {
 	{ .compatible = "mediatek,mt2701-disp-color",
 	  .data = &mt2701_color_driver_data},
@@ -155,8 +151,6 @@ static const struct of_device_id mtk_disp_color_driver_dt_match[] = {
 	  .data = &mt8167_color_driver_data},
 	{ .compatible = "mediatek,mt8173-disp-color",
 	  .data = &mt8173_color_driver_data},
-	{ .compatible = "mediatek,mt6797-disp-color",
-	  .data = &mt6797_color_driver_data},
 	{},
 };
 MODULE_DEVICE_TABLE(of, mtk_disp_color_driver_dt_match);

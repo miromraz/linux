@@ -6,9 +6,11 @@
 
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include "clk-gate.h"
 #include "clk-mtk.h"
+#include "clk-mux.h"
 #include "clk-pll.h"
 #include "reset.h"
 
@@ -334,7 +336,14 @@ static const struct mtk_composite top_muxes[] = {
 	MUX_GATE(CLK_TOP_MUX_PWM, "pwm_sel", pwm_parents, 0x0050, 0, 3, 7),
 	MUX_GATE(CLK_TOP_MUX_VDEC, "vdec_sel", vdec_parents, 0x0050, 8, 3, 15),
 	MUX_GATE(CLK_TOP_MUX_VENC, "venc_sel", venc_parents, 0x0050, 16, 2, 23),
-	MUX_GATE(CLK_TOP_MUX_MFG, "mfg_sel", mfg_parents, 0x0050, 24, 2, 31),
+	/*
+	 * Keep mfg_sel on its assigned parent (mfgpll_ck) across rate changes:
+	 * a GPU devfreq clk_set_rate() must retune MFGPLL, not reparent to
+	 * syspll_d3/univpll_d3, which would retune the critical MAINPLL/UNIVPLL
+	 * and hang the SoC.
+	 */
+	MUX_GATE_FLAGS(CLK_TOP_MUX_MFG, "mfg_sel", mfg_parents, 0x0050, 24, 2, 31,
+		       CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT),
 	MUX_GATE(CLK_TOP_MUX_CAMTG, "camtg_sel", camtg, 0x0060, 0, 2, 7),
 	MUX_GATE(CLK_TOP_MUX_UART, "uart_sel", uart_parents, 0x0060, 8, 1, 15),
 	MUX_GATE(CLK_TOP_MUX_SPI, "spi_sel", spi_parents, 0x0060, 16, 2, 23),
@@ -380,11 +389,41 @@ static const struct mtk_composite top_muxes[] = {
 	    0x0104, 1, 2),
 };
 
+/*
+ * Register a clk mux notifier for the MFG mux.
+ *
+ * The GPU runs off MFGPLL through the mfg_sel mux, so reprogramming MFGPLL
+ * on a GPU OPP change would glitch the clock feeding the running GPU. Before
+ * the rate change the mux is transparently switched to the 26 MHz crystal
+ * (mfg_parents[0]), and switched back afterwards. This matches the vendor
+ * gpufreq driver, which parks the mux on its clk_sub_parent (clk26m) while
+ * modifying MFGPLL_CON1.
+ *
+ * mfg_sel is registered as an mtk_composite, so feed the common mux notifier
+ * the composite's own clk_ops; the notifier callback drives get_parent() and
+ * set_parent() on the mux clk it is registered on.
+ */
+static int clk_mt6797_reg_mfg_mux_notifier(struct device *dev, struct clk *clk)
+{
+	struct clk_composite *composite = to_clk_composite(__clk_get_hw(clk));
+	struct mtk_mux_nb *mfg_mux_nb;
+
+	mfg_mux_nb = devm_kzalloc(dev, sizeof(*mfg_mux_nb), GFP_KERNEL);
+	if (!mfg_mux_nb)
+		return -ENOMEM;
+
+	mfg_mux_nb->ops = &composite->ops;
+	mfg_mux_nb->bypass_index = 0; /* Bypass to 26M crystal */
+
+	return devm_mtk_clk_mux_notifier_register(dev, clk, mfg_mux_nb);
+}
+
 static int mtk_topckgen_init(struct platform_device *pdev)
 {
 	struct clk_hw_onecell_data *clk_data;
 	void __iomem *base;
 	struct device_node *node = pdev->dev.of_node;
+	int ret;
 
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
@@ -401,7 +440,12 @@ static int mtk_topckgen_init(struct platform_device *pdev)
 				    ARRAY_SIZE(top_muxes), base,
 				    &mt6797_clk_lock, clk_data);
 
-	return of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	ret = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	if (ret)
+		return ret;
+
+	return clk_mt6797_reg_mfg_mux_notifier(&pdev->dev,
+					       clk_data->hws[CLK_TOP_MUX_MFG]->clk);
 }
 
 static const struct mtk_gate_regs infra0_cg_regs = {
@@ -540,14 +584,20 @@ static const struct mtk_fixed_factor infra_fixed_divs[] = {
 	FACTOR(CLK_INFRA_13M, "clk13m", "clk26m", 1, 2),
 };
 
+/*
+ * The three INFRA_GLOBALCON_RST banks each expose a separate SET and CLR
+ * register: 0x120/0x124 (RST0), 0x130/0x134 (RST1) and 0x140/0x144 (RST2,
+ * the always-on bank that carries the PMIC wrapper reset). The array holds
+ * the SET offset of each bank; the set/clear ops derive CLR as SET + 0x4.
+ */
 static u16 infra_rst_ofs[] = {
-	0x120,
-	0x124,
-	0x128,
+	INFRA_RST0_SET_OFFSET,
+	INFRA_RST1_SET_OFFSET,
+	INFRA_RST2_SET_OFFSET,
 };
 
 static const struct mtk_clk_rst_desc infra_rst_desc = {
-	.version = MTK_RST_SIMPLE,
+	.version = MTK_RST_SET_CLR,
 	.rst_bank_ofs = infra_rst_ofs,
 	.rst_bank_nr = ARRAY_SIZE(infra_rst_ofs),
 };

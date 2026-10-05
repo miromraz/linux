@@ -610,7 +610,7 @@ static const int mt6797_adcpnp[MT6797_NUM_SENSORS_PER_ZONE] = {
 };
 
 static const int mt6797_mux_values[MT6797_NUM_SENSORS] = {
-	0, 1, 2, 3, 0,
+	0, 1, 2, 3, 0x10,
 };
 
 static const int mt6797_vts_index[MT6797_NUM_SENSORS] = {
@@ -640,11 +640,11 @@ static const struct mtk_thermal_data mt6797_thermal_data = {
 	.sensor_mux_values = mt6797_mux_values,
 	.version = MTK_THERMAL_V4,
 	.apmixed_buffer_ctl_reg = APMIXED_SYS_TS_CON1,
-	.apmixed_buffer_ctl_mask = GENMASK(31, 6) | BIT(3),
-	.apmixed_buffer_ctl_set = BIT(0),
+	/* vendor TS_TURN_ON (0xFFFFFFCF) only clears the TS_CON1[5:4] bias */
+	.apmixed_buffer_ctl_mask = (u32) ~GENMASK(5, 4),
+	.apmixed_buffer_ctl_set = 0,
 	.temp_ahbpoll = 0x30d,
 	.temp_msrctl0 = 0x492,
-	.temp_adcvalidmask = 0x2c,
 };
 
 /*
@@ -1030,7 +1030,8 @@ static void mtk_thermal_init_bank(struct mtk_thermal *mt, int num,
 	writel(auxadc_phys_base + AUXADC_CON1_CLR_V,
 	       controller_base + TEMP_ADCMUXADDR);
 
-	if (mt->conf->version == MTK_THERMAL_V1) {
+	if (mt->conf->version == MTK_THERMAL_V1 ||
+	    mt->conf->version == MTK_THERMAL_V4) {
 		/* AHB address for pnp sensor mux selection */
 		writel(apmixed_phys_base + APMIXED_SYS_TS_CON1,
 		       controller_base + TEMP_PNPMUXADDR);
@@ -1195,14 +1196,20 @@ static int mtk_thermal_extract_efuse_v4(struct mtk_thermal *mt, u32 *buf)
 	if (!((buf[0] >> 9) & 0x1))
 		mt->o_slope = 0;
 
-	if (mt->adc_ge < 265 || mt->adc_ge > 758 ||
-	    mt->adc_oe < 265 || mt->adc_oe > 758 ||
-	    mt->degc_cali < 1 || mt->degc_cali > 63)
-		return -EINVAL;
+	/*
+	 * The vendor eDataCorrector() resets each out-of-range field to its
+	 * default individually instead of discarding the whole calibration.
+	 */
+	if (mt->adc_ge < 265 || mt->adc_ge > 758)
+		mt->adc_ge = 512;
+	if (mt->adc_oe < 265 || mt->adc_oe > 758)
+		mt->adc_oe = 512;
+	if (mt->degc_cali < 1 || mt->degc_cali > 63)
+		mt->degc_cali = 40;
 
 	for (i = 0; i < mt->conf->num_sensors; i++)
 		if (mt->vts[mt->conf->vts_index[i]] > 484)
-			return -EINVAL;
+			mt->vts[mt->conf->vts_index[i]] = 260;
 
 	return 0;
 }
@@ -1302,9 +1309,6 @@ static const struct of_device_id mtk_thermal_of_match[] = {
 		.data = (void *)&mt8365_thermal_data,
 	}, {
 		.compatible = "mediatek,mt6797-thermal",
-		.data = (void *)&mt6797_thermal_data,
-	}, {
-		.compatible = "mediatek,mt6797-therm_ctrl",
 		.data = (void *)&mt6797_thermal_data,
 	},
 	{ /* sentinel */ },

@@ -27,6 +27,7 @@ static const unsigned long regulator_enable_loads[] = {
 
 struct panel_desc {
 	const char * const *supply_names;
+	const unsigned long *supply_loads;
 	unsigned int num_supplies;
 	const struct drm_display_mode *display_mode;
 	u32 width_mm;
@@ -378,10 +379,8 @@ static void nt36672e_gemini_write_cmd(struct mipi_dsi_multi_context *ctx,
 }
 
 /*
- * Generated from the pinned Planet vendor object by
- * experiments/2026-07-11-gemini-panel-recovery/scripts/
- * emit-gemini-panel-init.py. Keep the source commit in the experiment
- * record; do not hand-edit this command sequence.
+ * Initialisation sequence for the Planet Gemini PDA NT36672 panel, derived
+ * from the vendor aeon_nt36672_fhd_dsi_vdo_x600_xinli LCM.
  */
 static void nt36672e_gemini_1080x2160_init(struct mipi_dsi_multi_context *ctx)
 {
@@ -796,6 +795,7 @@ static const struct drm_display_mode nt36672e_1080x2408_60hz = {
 
 static const struct panel_desc nt36672e_panel_desc = {
 	.supply_names = regulator_names,
+	.supply_loads = regulator_enable_loads,
 	.num_supplies = ARRAY_SIZE(regulator_names),
 	.display_mode = &nt36672e_1080x2408_60hz,
 	.width_mm = 74,
@@ -816,20 +816,25 @@ static const struct panel_desc nt36672e_panel_desc = {
 };
 
 static const char * const gemini_regulator_names[] = {
-	"outp",
-	"outn",
+	"avdd",
+	"avee",
 };
 
-static const struct drm_display_mode gemini_1080x2160_60hz = {
+static const struct drm_display_mode gemini_1080x2160 = {
 	.name = "1080x2160",
-	.clock = 138839,
+	/*
+	 * Vendor video-mode DSI link runs at PLL 440 MHz (880 Mbps/lane); with
+	 * 4 lanes at 24 bpp that is a 146.667 MHz pixel clock, ~57 Hz over the
+	 * vendor timing totals.
+	 */
+	.clock = 146667,
 	.hdisplay = 1080,
-	.hsync_start = 1090,
+	.hsync_start = 1122,
 	.hsync_end = 1132,
 	.htotal = 1174,
 	.vdisplay = 2160,
-	.vsync_start = 2163,
-	.vsync_end = 2178,
+	.vsync_start = 2170,
+	.vsync_end = 2173,
 	.vtotal = 2188,
 	.flags = 0,
 };
@@ -837,7 +842,7 @@ static const struct drm_display_mode gemini_1080x2160_60hz = {
 static const struct panel_desc gemini_panel_desc = {
 	.supply_names = gemini_regulator_names,
 	.num_supplies = ARRAY_SIZE(gemini_regulator_names),
-	.display_mode = &gemini_1080x2160_60hz,
+	.display_mode = &gemini_1080x2160,
 	/* 5.99in diagonal specification, converted from the 2:1 active area. */
 	.width_mm = 68,
 	.height_mm = 136,
@@ -906,7 +911,8 @@ static int nt36672e_panel_probe(struct mipi_dsi_device *dsi)
 
 	for (i = 0; i < ctx->desc->num_supplies; i++) {
 		ctx->supplies[i].supply = ctx->desc->supply_names[i];
-		ctx->supplies[i].init_load_uA = regulator_enable_loads[i];
+		if (ctx->desc->supply_loads)
+			ctx->supplies[i].init_load_uA = ctx->desc->supply_loads[i];
 	}
 
 	ret = devm_regulator_bulk_get(dev, ctx->desc->num_supplies,

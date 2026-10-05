@@ -121,12 +121,13 @@
 #define P2C_RG_BVALID			BIT(3)
 #define P2C_RG_AVALID			BIT(2)
 #define P2C_RG_IDDIG			BIT(1)
-#define P2C_FORCE_SESS_MSK \
-		(P2C_FORCE_VBUSVALID | P2C_FORCE_SESSEND | \
-		 P2C_FORCE_BVALID | P2C_FORCE_AVALID | P2C_FORCE_IDDIG)
-#define P2C_RG_SESS_VALID_MSK \
-		(P2C_RG_VBUSVALID | P2C_RG_BVALID | \
-		 P2C_RG_AVALID | P2C_RG_IDDIG)
+/*
+ * MT6797 cannot sense VBUS or session state, so the VBUSVALID/AVALID/BVALID/
+ * SESSEND signals must be forced to the RG_* values driven by power on/off.
+ */
+#define P2C_FORCE_VBUS_SENSE \
+		(P2C_FORCE_VBUSVALID | P2C_FORCE_AVALID | P2C_FORCE_BVALID | \
+		 P2C_FORCE_SESSEND)
 
 #define U3P_U2PHYBC12C		0x080
 #define P2C_RG_CHGDT_EN		BIT(0)
@@ -296,6 +297,8 @@ enum mtk_phy_version {
  *                            that is pointed at in the device tree node for this PHY
  * @slew_ref_clock_mhz:         Default reference clock (in MHz) for slew rate calibration
  * @slew_rate_coefficient:    Coefficient for slew rate calibration
+ * @force_vbus_sense:         Force VBUSVALID/AVALID/BVALID/SESSEND on U2 PHY power on
+ *                            (MT6797, which cannot sense VBUS/session state)
  * @version:                  PHY IP Version
  */
 struct mtk_phy_pdata {
@@ -304,6 +307,7 @@ struct mtk_phy_pdata {
 	bool sw_efuse_supported;
 	u8 slew_ref_clock_mhz;
 	u8 slew_rate_coefficient;
+	bool force_vbus_sense;
 	enum mtk_phy_version version;
 };
 
@@ -344,7 +348,6 @@ struct mtk_phy_instance {
 	int discth;
 	int pre_emphasis;
 	bool bc12_en;
-	bool force_b_session_valid;
 	bool type_force_mode;
 };
 
@@ -889,12 +892,9 @@ static void u2_phy_instance_power_on(struct mtk_tphy *tphy,
 	mtk_phy_set_bits(com + U3P_U2PHYDTM1, P2C_RG_VBUSVALID | P2C_RG_AVALID);
 
 	mtk_phy_clear_bits(com + U3P_U2PHYDTM1, P2C_RG_SESSEND);
-	if (instance->force_b_session_valid) {
+	if (tphy->pdata->force_vbus_sense)
 		mtk_phy_set_bits(com + U3P_U2PHYDTM1,
-				 P2C_FORCE_SESS_MSK | P2C_RG_SESS_VALID_MSK);
-		dev_info(tphy->dev,
-			 "u2 phy%d: forcing valid B-device session\n", index);
-	}
+				 P2C_FORCE_VBUS_SENSE | P2C_RG_BVALID);
 
 	if (tphy->pdata->avoid_rx_sen_degradation && index) {
 		mtk_phy_set_bits(com + U3D_U2PHYDCR0, P2C_RG_SIF_U2PLL_FORCE_ON);
@@ -917,9 +917,9 @@ static void u2_phy_instance_power_off(struct mtk_tphy *tphy,
 	mtk_phy_clear_bits(com + U3P_U2PHYDTM1, P2C_RG_VBUSVALID | P2C_RG_AVALID);
 
 	mtk_phy_set_bits(com + U3P_U2PHYDTM1, P2C_RG_SESSEND);
-	if (instance->force_b_session_valid)
+	if (tphy->pdata->force_vbus_sense)
 		mtk_phy_clear_bits(com + U3P_U2PHYDTM1,
-				   P2C_FORCE_SESS_MSK | P2C_RG_SESS_VALID_MSK);
+				   P2C_FORCE_VBUS_SENSE | P2C_RG_BVALID);
 
 	if (tphy->pdata->avoid_rx_sen_degradation && index) {
 		mtk_phy_clear_bits(com + U3P_U2PHYDTM0, P2C_RG_SUSPENDM | P2C_FORCE_SUSPENDM);
@@ -1154,8 +1154,6 @@ static void phy_parse_property(struct mtk_tphy *tphy,
 		return;
 
 	instance->bc12_en = device_property_read_bool(dev, "mediatek,bc12");
-	instance->force_b_session_valid = device_property_read_bool(dev,
-						"mediatek,force-b-session-valid");
 	device_property_read_u32(dev, "mediatek,eye-src",
 				 &instance->eye_src);
 	device_property_read_u32(dev, "mediatek,eye-vrt",
@@ -1574,12 +1572,19 @@ static const struct mtk_phy_pdata mt8195_pdata = {
 	.version = MTK_PHY_V3,
 };
 
+static const struct mtk_phy_pdata mt6797_pdata = {
+	.slew_ref_clock_mhz = 26,
+	.slew_rate_coefficient = 28,
+	.force_vbus_sense = true,
+	.version = MTK_PHY_V1,
+};
+
 static const struct of_device_id mtk_tphy_id_table[] = {
 	{ .compatible = "mediatek,mt2701-u3phy", .data = &tphy_v1_pdata },
 	{ .compatible = "mediatek,mt2712-u3phy", .data = &tphy_v2_pdata },
 	{ .compatible = "mediatek,mt8173-u3phy", .data = &mt8173_pdata },
 	{ .compatible = "mediatek,mt8195-tphy", .data = &mt8195_pdata },
-	{ .compatible = "mediatek,mt6797-tphy", .data = &tphy_v1_pdata },
+	{ .compatible = "mediatek,mt6797-tphy", .data = &mt6797_pdata },
 	{ .compatible = "mediatek,generic-tphy-v1", .data = &tphy_v1_pdata },
 	{ .compatible = "mediatek,generic-tphy-v2", .data = &tphy_v2_pdata },
 	{ .compatible = "mediatek,generic-tphy-v3", .data = &tphy_v3_pdata },

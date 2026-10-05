@@ -15,6 +15,7 @@ static const struct mtk_gate_regs mfg_cg_regs = {
 };
 
 static const struct mtk_gate mfg_clks[] = {
+	GATE_DUMMY(CLK_DUMMY, "mfg_dummy"),
 	/*
 	 * Propagate rate requests to mfg_sel/MFGPLL so the GPU devfreq OPPs
 	 * reach the PLL, matching the MT8183 MFG gate.

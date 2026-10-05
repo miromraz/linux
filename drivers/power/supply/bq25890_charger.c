@@ -1548,6 +1548,8 @@ static int bq25890_probe(struct i2c_client *client)
 			return ret;
 	} else {
 		/* No INT line: poll the status registers periodically. */
+		dev_info(dev, "No irq resource found, polling charger status\n");
+
 		ret = devm_delayed_work_autocancel(dev, &bq->status_work,
 						   bq25890_status_work);
 		if (ret)
@@ -1607,6 +1609,7 @@ static int bq25890_suspend(struct device *dev)
 {
 	struct bq25890_device *bq = dev_get_drvdata(dev);
 	struct i2c_client *client = to_i2c_client(dev);
+	int ret;
 
 	if (client->irq <= 0)
 		cancel_delayed_work_sync(&bq->status_work);
@@ -1615,7 +1618,16 @@ static int bq25890_suspend(struct device *dev)
 	 * If charger is removed, while in suspend, make sure ADC is diabled
 	 * since it consumes slightly more power.
 	 */
-	return bq25890_field_write(bq, F_CONV_RATE, 0);
+	ret = bq25890_field_write(bq, F_CONV_RATE, 0);
+	if (ret < 0 && client->irq <= 0)
+		/*
+		 * Suspend is aborted on error, so resume will not run to
+		 * re-arm the poll.  Restart it here or status updates stop
+		 * until reboot.
+		 */
+		schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
+
+	return ret;
 }
 
 static int bq25890_resume(struct device *dev)

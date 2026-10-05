@@ -150,12 +150,14 @@ config LEDS_AW2013
 
 config LEDS_AW9120
 	tristate "LED support for Awinic AW9120"
-	depends on LEDS_CLASS && I2C && OF
+	depends on LEDS_CLASS && I2C
+	select LEDS_CLASS_MULTICOLOR
 	select REGMAP_I2C
 	help
 	  This option enables support for the Awinic AW9120 20-channel
 	  constant-current LED controller, which is controlled over I2C and
-	  exposes one LED class device per output.
+	  exposes RGB outputs through the multicolor LED class and remaining
+	  outputs as single-colour LED class devices.
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called leds-aw9120.

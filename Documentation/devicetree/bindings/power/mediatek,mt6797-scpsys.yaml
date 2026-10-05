@@ -7,8 +7,7 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: MediaTek MT6797 SCPSYS power controller
 
 maintainers:
-  - Matthias Brugger <mbrugger@suse.com>
-  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
+  - Miroslav Mraz <miroslav.mraz@techmania.cz>
 
 description: |
   The MT6797 System Control Processor System (SCPSYS) provides the generic
@@ -35,14 +34,16 @@ properties:
 
   clocks:
     minItems: 4
-    maxItems: 4
+    maxItems: 5
 
   clock-names:
+    minItems: 4
     items:
       - const: mfg
       - const: mfg_52m
       - const: mm
       - const: vdec
+      - const: mfg_vcg
 
 required:
   - compatible
@@ -71,7 +72,8 @@ examples:
             clocks = <&topckgen CLK_TOP_MUX_MFG>,
                      <&topckgen CLK_TOP_MUX_MFG_52M>,
                      <&topckgen CLK_TOP_MUX_MM>,
-                     <&topckgen CLK_TOP_MUX_VDEC>;
-            clock-names = "mfg", "mfg_52m", "mm", "vdec";
+                     <&topckgen CLK_TOP_MUX_VDEC>,
+                     <&infracfg CLK_INFRA_MFG_VCG>;
+            clock-names = "mfg", "mfg_52m", "mm", "vdec", "mfg_vcg";
         };
     };
