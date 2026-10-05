@@ -82,7 +82,6 @@ enum clk_id {
 	CLK_NONE,
 	CLK_MM,
 	CLK_MFG,
-	CLK_MFG_52M,
 	CLK_VENC,
 	CLK_VENC_LT,
 	CLK_ETHIF,
@@ -90,7 +89,6 @@ enum clk_id {
 	CLK_HIFSEL,
 	CLK_JPGDEC,
 	CLK_AUDIO,
-	CLK_MFG_VCG,
 	CLK_MAX,
 };
 
@@ -98,7 +96,6 @@ static const char * const clk_names[] = {
 	NULL,
 	"mm",
 	"mfg",
-	"mfg_52m",
 	"venc",
 	"venc_lt",
 	"ethif",
@@ -106,7 +103,6 @@ static const char * const clk_names[] = {
 	"hif_sel",
 	"jpgdec",
 	"audio",
-	"mfg_vcg",
 	NULL,
 };
 
@@ -117,8 +113,6 @@ static const char * const clk_names[] = {
  * @name: The domain name.
  * @sta_mask: The mask for power on/off status bit.
  * @ctl_offs: The offset for main power control register.
- * @sram_pdn_ctl_offs: Optional offset for SRAM power-down control bits.
- * @sram_pdn_ack_offs: Optional offset for SRAM power-down acknowledge bits.
  * @sram_pdn_bits: The mask for sram power control bits.
  * @sram_pdn_ack_bits: The mask for sram power control acked bits.
  * @bus_prot_mask: The mask for single step bus protection.
@@ -129,8 +123,6 @@ struct scp_domain_data {
 	const char *name;
 	u32 sta_mask;
 	int ctl_offs;
-	int sram_pdn_ctl_offs;
-	int sram_pdn_ack_offs;
 	u32 sram_pdn_bits;
 	u32 sram_pdn_ack_bits;
 	u32 bus_prot_mask;
@@ -238,16 +230,15 @@ static int scpsys_clk_enable(struct clk *clk[], int max_num)
 	return ret;
 }
 
-static int scpsys_sram_enable(struct scp_domain *scpd, void __iomem *pdn_addr,
-				      void __iomem *ack_addr)
+static int scpsys_sram_enable(struct scp_domain *scpd, void __iomem *ctl_addr)
 {
 	u32 val;
 	u32 pdn_ack = scpd->data->sram_pdn_ack_bits;
 	int tmp;
 
-	val = readl(pdn_addr);
+	val = readl(ctl_addr);
 	val &= ~scpd->data->sram_pdn_bits;
-	writel(val, pdn_addr);
+	writel(val, ctl_addr);
 
 	/* Either wait until SRAM_PDN_ACK all 0 or have a force wait */
 	if (MTK_SCPD_CAPS(scpd, MTK_SCPD_FWAIT_SRAM)) {
@@ -259,7 +250,7 @@ static int scpsys_sram_enable(struct scp_domain *scpd, void __iomem *pdn_addr,
 		usleep_range(12000, 12100);
 	} else {
 		/* Either wait until SRAM_PDN_ACK all 1 or 0 */
-		int ret = readl_poll_timeout(ack_addr, tmp,
+		int ret = readl_poll_timeout(ctl_addr, tmp,
 				(tmp & pdn_ack) == 0,
 				MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
 		if (ret < 0)
@@ -269,19 +260,18 @@ static int scpsys_sram_enable(struct scp_domain *scpd, void __iomem *pdn_addr,
 	return 0;
 }
 
-static int scpsys_sram_disable(struct scp_domain *scpd, void __iomem *pdn_addr,
-				       void __iomem *ack_addr)
+static int scpsys_sram_disable(struct scp_domain *scpd, void __iomem *ctl_addr)
 {
 	u32 val;
 	u32 pdn_ack = scpd->data->sram_pdn_ack_bits;
 	int tmp;
 
-	val = readl(pdn_addr);
+	val = readl(ctl_addr);
 	val |= scpd->data->sram_pdn_bits;
-	writel(val, pdn_addr);
+	writel(val, ctl_addr);
 
 	/* Either wait until SRAM_PDN_ACK all 1 or 0 */
-	return readl_poll_timeout(ack_addr, tmp,
+	return readl_poll_timeout(ctl_addr, tmp,
 			(tmp & pdn_ack) == pdn_ack,
 			MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
 }
@@ -315,10 +305,6 @@ static int scpsys_power_on(struct generic_pm_domain *genpd)
 	struct scp_domain *scpd = container_of(genpd, struct scp_domain, genpd);
 	struct scp *scp = scpd->scp;
 	void __iomem *ctl_addr = scp->base + scpd->data->ctl_offs;
-	void __iomem *sram_pdn_addr = scp->base + (scpd->data->sram_pdn_ctl_offs ?
-		scpd->data->sram_pdn_ctl_offs : scpd->data->ctl_offs);
-	void __iomem *sram_ack_addr = scp->base + (scpd->data->sram_pdn_ack_offs ?
-		scpd->data->sram_pdn_ack_offs : scpd->data->ctl_offs);
 	u32 val;
 	int ret, tmp;
 
@@ -352,7 +338,7 @@ static int scpsys_power_on(struct generic_pm_domain *genpd)
 	val |= PWR_RST_B_BIT;
 	writel(val, ctl_addr);
 
-	ret = scpsys_sram_enable(scpd, sram_pdn_addr, sram_ack_addr);
+	ret = scpsys_sram_enable(scpd, ctl_addr);
 	if (ret < 0)
 		goto err_pwr_ack;
 
@@ -377,10 +363,6 @@ static int scpsys_power_off(struct generic_pm_domain *genpd)
 	struct scp_domain *scpd = container_of(genpd, struct scp_domain, genpd);
 	struct scp *scp = scpd->scp;
 	void __iomem *ctl_addr = scp->base + scpd->data->ctl_offs;
-	void __iomem *sram_pdn_addr = scp->base + (scpd->data->sram_pdn_ctl_offs ?
-		scpd->data->sram_pdn_ctl_offs : scpd->data->ctl_offs);
-	void __iomem *sram_ack_addr = scp->base + (scpd->data->sram_pdn_ack_offs ?
-		scpd->data->sram_pdn_ack_offs : scpd->data->ctl_offs);
 	u32 val;
 	int ret, tmp;
 
@@ -388,7 +370,7 @@ static int scpsys_power_off(struct generic_pm_domain *genpd)
 	if (ret < 0)
 		goto out;
 
-	ret = scpsys_sram_disable(scpd, sram_pdn_addr, sram_ack_addr);
+	ret = scpsys_sram_disable(scpd, ctl_addr);
 	if (ret < 0)
 		goto out;
 
@@ -433,14 +415,8 @@ static void init_clks(struct platform_device *pdev, struct clk **clk)
 {
 	int i;
 
-	/*
-	 * Fetch each clock optionally: a domain may name a clock that a given
-	 * board's device tree does not describe (e.g. an mt6797 DTB predating
-	 * the MFG 52 MHz preclock), and such a DTB must still probe instead of
-	 * failing the whole power controller.
-	 */
 	for (i = CLK_NONE + 1; i < CLK_MAX; i++)
-		clk[i] = devm_clk_get_optional(&pdev->dev, clk_names[i]);
+		clk[i] = devm_clk_get(&pdev->dev, clk_names[i]);
 }
 
 static struct scp *init_scp(struct platform_device *pdev,
@@ -776,8 +752,6 @@ static const struct scp_subdomain scp_subdomain_mt2712[] = {
  * MT6797 power domain support
  */
 
-#define SPM_MFG_SRAM_CON_MT6797		0x033c
-
 static const struct scp_domain_data scp_domain_data_mt6797[] = {
 	[MT6797_POWER_DOMAIN_VDEC] = {
 		.name = "vdec",
@@ -826,59 +800,7 @@ static const struct scp_domain_data scp_domain_data_mt6797[] = {
 		.ctl_offs = 0x334,
 		.sram_pdn_bits = 0,
 		.sram_pdn_ack_bits = 0,
-		.clk_id = {CLK_MFG_52M, CLK_MFG_VCG},
-	},
-	[MT6797_POWER_DOMAIN_MFG] = {
-		.name = "mfg",
-		.sta_mask = BIT(12),
-		.ctl_offs = 0x338,
-		/* INFRA_TOPAXI_PROTECTEN MFG bit, per clk-mt6797-pg.c MFG_PROT_MASK */
-		.bus_prot_mask = BIT(21),
-		.sram_pdn_ctl_offs = SPM_MFG_SRAM_CON_MT6797,
-		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
-		.sram_pdn_bits = GENMASK(1, 0),
-		.sram_pdn_ack_bits = GENMASK(17, 16),
-		.clk_id = {CLK_MFG_52M},
-	},
-	[MT6797_POWER_DOMAIN_MFG_CORE0] = {
-		.name = "mfg_core0",
-		.sta_mask = BIT(11),
-		.ctl_offs = 0x340,
-		.sram_pdn_ctl_offs = 0x340,
-		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
-		.sram_pdn_bits = BIT(8),
-		.sram_pdn_ack_bits = BIT(20),
-		.clk_id = {CLK_MFG_52M},
-	},
-	[MT6797_POWER_DOMAIN_MFG_CORE1] = {
-		.name = "mfg_core1",
-		.sta_mask = BIT(10),
-		.ctl_offs = 0x344,
-		.sram_pdn_ctl_offs = 0x344,
-		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
-		.sram_pdn_bits = BIT(8),
-		.sram_pdn_ack_bits = BIT(21),
-		.clk_id = {CLK_MFG_52M},
-	},
-	[MT6797_POWER_DOMAIN_MFG_CORE2] = {
-		.name = "mfg_core2",
-		.sta_mask = BIT(9),
-		.ctl_offs = 0x348,
-		.sram_pdn_ctl_offs = 0x348,
-		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
-		.sram_pdn_bits = BIT(8),
-		.sram_pdn_ack_bits = BIT(22),
-		.clk_id = {CLK_MFG_52M},
-	},
-	[MT6797_POWER_DOMAIN_MFG_CORE3] = {
-		.name = "mfg_core3",
-		.sta_mask = BIT(8),
-		.ctl_offs = 0x34c,
-		.sram_pdn_ctl_offs = 0x34c,
-		.sram_pdn_ack_offs = SPM_MFG_SRAM_CON_MT6797,
-		.sram_pdn_bits = BIT(8),
-		.sram_pdn_ack_bits = BIT(23),
-		.clk_id = {CLK_MFG_52M},
+		.clk_id = {CLK_MFG},
 	},
 	[MT6797_POWER_DOMAIN_MJC] = {
 		.name = "mjc",
@@ -898,11 +820,6 @@ static const struct scp_subdomain scp_subdomain_mt6797[] = {
 	{MT6797_POWER_DOMAIN_MM, MT6797_POWER_DOMAIN_ISP},
 	{MT6797_POWER_DOMAIN_MM, MT6797_POWER_DOMAIN_VENC},
 	{MT6797_POWER_DOMAIN_MM, MT6797_POWER_DOMAIN_MJC},
-	{MT6797_POWER_DOMAIN_MFG_ASYNC, MT6797_POWER_DOMAIN_MFG},
-	{MT6797_POWER_DOMAIN_MFG, MT6797_POWER_DOMAIN_MFG_CORE0},
-	{MT6797_POWER_DOMAIN_MFG, MT6797_POWER_DOMAIN_MFG_CORE1},
-	{MT6797_POWER_DOMAIN_MFG, MT6797_POWER_DOMAIN_MFG_CORE2},
-	{MT6797_POWER_DOMAIN_MFG, MT6797_POWER_DOMAIN_MFG_CORE3},
 };
 
 /*

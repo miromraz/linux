@@ -311,17 +311,102 @@
 		};
 	};
 
-	scpsys: power-controller@10006000 {
-		compatible = "mediatek,mt6797-scpsys";
-		#power-domain-cells = <1>;
+	syscon@10006000 {
+		compatible = "mediatek,mt6797-scpsys", "syscon", "simple-mfd";
 		reg = <0 0x10006000 0 0x1000>;
-		clocks = <&topckgen CLK_TOP_MUX_MFG>,
-			 <&topckgen CLK_TOP_MUX_MFG_52M>,
-			 <&topckgen CLK_TOP_MUX_MM>,
-			 <&topckgen CLK_TOP_MUX_VDEC>,
-			 <&infrasys CLK_INFRA_MFG_VCG>;
-		clock-names = "mfg", "mfg_52m", "mm", "vdec", "mfg_vcg";
-		infracfg = <&infrasys>;
+
+		scpsys: power-controller {
+			compatible = "mediatek,mt6797-power-controller";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#power-domain-cells = <1>;
+
+			/* power domains of the SoC */
+			power-domain@MT6797_POWER_DOMAIN_MM {
+				reg = <MT6797_POWER_DOMAIN_MM>;
+				clocks = <&topckgen CLK_TOP_MUX_MM>;
+				clock-names = "mm";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+				mediatek,infracfg = <&infrasys>;
+
+				power-domain@MT6797_POWER_DOMAIN_VDEC {
+					reg = <MT6797_POWER_DOMAIN_VDEC>;
+					clocks = <&topckgen CLK_TOP_MUX_VDEC>;
+					clock-names = "vdec";
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6797_POWER_DOMAIN_ISP {
+					reg = <MT6797_POWER_DOMAIN_ISP>;
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6797_POWER_DOMAIN_VENC {
+					reg = <MT6797_POWER_DOMAIN_VENC>;
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT6797_POWER_DOMAIN_MJC {
+					reg = <MT6797_POWER_DOMAIN_MJC>;
+					#power-domain-cells = <0>;
+				};
+			};
+
+			power-domain@MT6797_POWER_DOMAIN_AUDIO {
+				reg = <MT6797_POWER_DOMAIN_AUDIO>;
+				#power-domain-cells = <0>;
+			};
+
+			power-domain@MT6797_POWER_DOMAIN_MFG_ASYNC {
+				reg = <MT6797_POWER_DOMAIN_MFG_ASYNC>;
+				clocks = <&topckgen CLK_TOP_MUX_MFG_52M>,
+					 <&infrasys CLK_INFRA_MFG_VCG>;
+				clock-names = "mfg", "mfg_vcg";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+
+				power-domain@MT6797_POWER_DOMAIN_MFG {
+					reg = <MT6797_POWER_DOMAIN_MFG>;
+					clocks = <&topckgen CLK_TOP_MUX_MFG_52M>;
+					clock-names = "mfg";
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#power-domain-cells = <1>;
+					mediatek,infracfg = <&infrasys>;
+
+					power-domain@MT6797_POWER_DOMAIN_MFG_CORE0 {
+						reg = <MT6797_POWER_DOMAIN_MFG_CORE0>;
+						clocks = <&topckgen CLK_TOP_MUX_MFG_52M>;
+						clock-names = "mfg";
+						#power-domain-cells = <0>;
+					};
+
+					power-domain@MT6797_POWER_DOMAIN_MFG_CORE1 {
+						reg = <MT6797_POWER_DOMAIN_MFG_CORE1>;
+						clocks = <&topckgen CLK_TOP_MUX_MFG_52M>;
+						clock-names = "mfg";
+						#power-domain-cells = <0>;
+					};
+
+					power-domain@MT6797_POWER_DOMAIN_MFG_CORE2 {
+						reg = <MT6797_POWER_DOMAIN_MFG_CORE2>;
+						clocks = <&topckgen CLK_TOP_MUX_MFG_52M>;
+						clock-names = "mfg";
+						#power-domain-cells = <0>;
+					};
+
+					power-domain@MT6797_POWER_DOMAIN_MFG_CORE3 {
+						reg = <MT6797_POWER_DOMAIN_MFG_CORE3>;
+						clocks = <&topckgen CLK_TOP_MUX_MFG_52M>;
+						clock-names = "mfg";
+						#power-domain-cells = <0>;
+					};
+				};
+			};
+		};
 	};
 
 	mfgsys: syscon@13000000 {
@@ -388,6 +473,20 @@
 				compatible = "mediatek,mt6351-regulator";
 			};
 
+			pmic_efuse: efuse {
+				compatible = "mediatek,mt6351-efuse";
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					accdet_calibration: accdet-offset@6 {
+						reg = <0x6 0x2>;
+					};
+				};
+			};
+
 			rtc {
 				compatible = "mediatek,mt6351-rtc";
 			};
@@ -436,6 +535,18 @@
 		mediatek,larbs = <&larb0>, <&larb1>, <&larb2>, <&larb3>,
 				 <&larb4>, <&larb5>, <&larb6>;
 		#iommu-cells = <1>;
+	};
+
+	efuse: efuse@10206000 {
+		compatible = "mediatek,mt6797-efuse",
+			     "mediatek,efuse";
+		reg = <0 0x10206000 0 0x1000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		thermal_calibration: calib@180 {
+			reg = <0x180 0xc>;
+		};
 	};
 
 	gce: mailbox@10212000 {
@@ -745,6 +856,8 @@
 		mediatek,auxadc = <&auxadc>;
 		mediatek,apmixedsys = <&apmixedsys>;
 		#thermal-sensor-cells = <0>;
+		nvmem-cells = <&thermal_calibration>;
+		nvmem-cell-names = "calibration-data";
 		status = "disabled";
 	};
 
@@ -852,7 +965,7 @@
 	};
 
 	rdma0: rdma@1400f000 {
-		compatible = "mediatek,mt6797-disp-rdma";
+		compatible = "mediatek,mt6797-disp-rdma", "mediatek,mt8173-disp-rdma";
 		reg = <0 0x1400f000 0 0x1000>;
 		interrupts = <GIC_SPI 217 IRQ_TYPE_LEVEL_LOW>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
@@ -926,7 +1039,7 @@
 	};
 
 	dsi0: dsi@1401c000 {
-		compatible = "mediatek,mt6797-dsi";
+		compatible = "mediatek,mt6797-dsi", "mediatek,mt8173-dsi";
 		reg = <0 0x1401c000 0 0x1000>;
 		interrupts = <GIC_SPI 229 IRQ_TYPE_LEVEL_LOW>;
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;

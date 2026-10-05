@@ -62,19 +62,6 @@
 		};
 	};
 
-	firmware {
-		mt6797_atag_devinfo: atag-devinfo {
-			compatible = "mediatek,mt6797-atag-devinfo";
-			#address-cells = <1>;
-			#size-cells = <1>;
-			read-only;
-
-			mt6797_thermal_calibration: calibration-data@0 {
-				reg = <0 12>;
-			};
-		};
-	};
-
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0 0x40000000 1 0>;
@@ -400,7 +387,7 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c7_pins_a>;
 
-	/* Live Gemian identifies the external GPU buck as RT5735 at 0x1c. */
+	/* External GPU buck: Richtek RT5735 at I2C address 0x1c. */
 	rt5735_vgpu: regulator@1c {
 		compatible = "richtek,rt5735";
 		reg = <0x1c>;
@@ -427,7 +414,8 @@
 
 	/*
 	 * Bosch BMI160 accelerometer/gyroscope. The vendor rewrites its logical
-	 * 0x68 client to 0x69 in probe, which is the live I2C1 address. The
+	 * 0x68 client to 0x69 in probe, which is the I2C1 address used on the
+	 * board. The
 	 * mount-matrix is the vendor coordinate direction 7 (aeon6797_6m_n.dts
 	 * cust_accel@1/cust_gyro@1) expanded through the MediaTek hwmsen
 	 * conversion table (sign {-1,-1,-1}, axis map {1,0,2}).
@@ -672,8 +660,8 @@
 
 /*
  * The left USB-C connector is wired to the MTU3 device controller. Keep the
- * controller disabled in the normal board description; a bounded diagnostic
- * overlay may enable these already-described resources for bring-up.
+ * controller disabled until device-mode operation has been validated on
+ * this board.
  */
 &u2port0 {
 	clocks = <&clk26m>;
@@ -705,11 +693,6 @@
 
 &usb11 {
 	status = "okay";
-};
-
-&thermal {
-	nvmem-cells = <&mt6797_thermal_calibration>;
-	nvmem-cell-names = "calibration-data";
 };
 
 &i2c0 {
@@ -792,9 +775,8 @@
 	/*
 	 * Awinic AW9120 20-channel constant-current LED controller on I2C3
 	 * (address 0x2c, PDN on GPIO245). The per-output colour map follows
-	 * the gemian-leds daemon (LightState.cpp AWLEDCodeForStep and the
-	 * CH_6/CH_7 defines): five RGB indicator blocks, an RGB status LED,
-	 * a caps-lock LED and a power LED.
+	 * the vendor Android LED mapping: five RGB indicator blocks, an RGB
+	 * status LED, a caps-lock LED and a power LED.
 	 */
 	led-controller@2c {
 		compatible = "awinic,aw9120";
@@ -1051,6 +1033,8 @@
 		compatible = "mediatek,mt6351-accdet";
 		io-channels = <&pmic_adc MT6351_AUXADC_ACCDET>;
 		io-channel-names = "accdet";
+		nvmem-cells = <&accdet_calibration>;
+		nvmem-cell-names = "accdet-offset";
 		mediatek,mic-vol = <7>;
 		mediatek,mic-mode = <1>;
 		mediatek,key-mode = <0>;

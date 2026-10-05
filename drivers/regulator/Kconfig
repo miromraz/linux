@@ -1376,8 +1376,13 @@ config REGULATOR_RT5735
 	depends on I2C
 	select REGMAP_I2C
 	help
-	  This driver supports the VSEL0 output of the Richtek RT5735
-	  regulator used by the MT6797 Gemini GPU.
+	  This driver supports the VSEL0 output of the Richtek RT5735 I2C
+	  step-down regulator.  On the MediaTek MT6797 Gemini PDA it supplies
+	  the external GPU buck rail, and its output voltage is configured
+	  over I2C through the regulator framework.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called rt5735-regulator.
 
 config REGULATOR_RT5759
 	tristate "Richtek RT5759 Regulator"
@@ -1912,6 +1917,10 @@ config REGULATOR_FAN49101
 	help
 	  This driver supports the onsemi FAN49101 I2C buck-boost regulator.
 	  It has a register protocol distinct from the FAN53555 family and
-	  provides one standard regulator output.
+	  provides one standard regulator output whose voltage is set over
+	  I2C through the regulator framework.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called fan49101.
 
 endif
