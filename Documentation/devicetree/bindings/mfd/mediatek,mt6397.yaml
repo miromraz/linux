@@ -152,6 +152,15 @@ properties:
       io-channel-names:
         const: accdet
 
+      nvmem-cells:
+        maxItems: 1
+        description:
+          eFuse cell holding the factory AUXADC offset applied before button
+          decoding.
+
+      nvmem-cell-names:
+        const: accdet-offset
+
       mediatek,mic-vol:
         $ref: /schemas/types.yaml#/definitions/uint32
         description: MICBIAS1 reference voltage selection.
@@ -214,6 +223,23 @@ properties:
       - compatible
       - io-channels
       - io-channel-names
+
+  efuse:
+    type: object
+    allOf:
+      - $ref: /schemas/nvmem/nvmem.yaml#
+      - $ref: /schemas/nvmem/nvmem-deprecated-cells.yaml#
+    unevaluatedProperties: false
+    description:
+      MT6351 PMIC eFuse (OTP), holding factory calibration such as the ACCDET
+      AUXADC offset. Read-only.
+
+    properties:
+      compatible:
+        const: mediatek,mt6351-efuse
+
+    required:
+      - compatible
 
   clocks:
     type: object
@@ -320,7 +346,7 @@ required:
 additionalProperties: false
 
 allOf:
-  # The accessory detection block is only present on the MT6351 PMIC.
+  # The accessory detection block and the eFuse are only described for MT6351.
   - if:
       not:
         properties:
@@ -330,6 +356,7 @@ allOf:
     then:
       properties:
         accdet: false
+        efuse: false
 
 examples:
   - |
