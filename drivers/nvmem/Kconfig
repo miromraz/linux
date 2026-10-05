@@ -216,6 +216,17 @@ config NVMEM_MICROCHIP_OTPC
 	  This driver enable the OTP controller available on Microchip SAMA7G5
 	  SoCs. It controls the access to the OTP memory connected to it.
 
+config NVMEM_MT6351_EFUSE
+	tristate "MediaTek MT6351 PMIC eFuse support"
+	depends on MFD_MT6397 || COMPILE_TEST
+	help
+	  This is a read-only driver to access the eFuse (OTP) array embedded in
+	  the MediaTek MT6351 PMIC, read through the OTP engine over the PMIC
+	  wrapper. It holds factory calibration such as the ACCDET AUXADC offset.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called nvmem_mt6351-efuse.
+
 config NVMEM_MTK_EFUSE
 	tristate "Mediatek SoCs EFUSE support"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
