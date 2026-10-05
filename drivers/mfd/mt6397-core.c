@@ -253,6 +253,9 @@ static const struct mfd_cell mt6351_devs[] = {
 		.num_resources = ARRAY_SIZE(mt6351_accdet_resources),
 		.resources = mt6351_accdet_resources,
 		.of_compatible = "mediatek,mt6351-accdet",
+	}, {
+		.name = "mt6351-efuse",
+		.of_compatible = "mediatek,mt6351-efuse",
 	},
 };
 

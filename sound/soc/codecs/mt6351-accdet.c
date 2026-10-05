@@ -24,6 +24,7 @@
 #include <linux/mfd/mt6397/core.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
+#include <linux/nvmem-consumer.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -154,6 +155,7 @@ struct mt6351_accdet {
 	struct iio_channel *adc;
 	struct mt6351_accdet_data data;
 	struct mutex res_lock; /* serialises the shared ACCDET IRQ register */
+	int cali_offset; /* efuse AUXADC offset in mV, subtracted before decode */
 	bool plugged;
 	unsigned int jack_type;
 	unsigned int btn_type;
@@ -177,7 +179,14 @@ static int mt6351_accdet_read_voltage(struct mt6351_accdet *priv)
 	if (ret < 0)
 		return ret;
 
-	return val;
+	/*
+	 * Subtract the factory AUXADC offset the vendor applies before button
+	 * decoding (drivers/misc/mediatek/accdet/mt6797/accdet.c
+	 * Accdet_PMIC_IMM_GetOneChannelValue(): vol_val -= accdet_auxadc_offset).
+	 */
+	val -= priv->cali_offset;
+
+	return max(val, 0);
 }
 
 static void mt6351_accdet_check_button(struct mt6351_accdet *priv,
@@ -434,6 +443,39 @@ static void mt6351_accdet_init(struct mt6351_accdet *priv)
 			   ACCDET_AUXADC_AUTO_SET, ACCDET_AUXADC_AUTO_SET);
 }
 
+/*
+ * Read the factory AUXADC offset from the PMIC efuse. The vendor driver takes
+ * OTP word 3, extracts bits [12:5] and halves them to get the offset in mV
+ * (reg_accdet.h RG_OTP_PA_ADDR_WORD_INDEX/RG_OTP_PA_ACCDET_BIT_SHIFT,
+ * accdet.c accdet_pmic_Read_Efuse_HPOffset()). The nvmem cell exposes that
+ * word little-endian. The cell is optional: without it the offset stays 0.
+ */
+static void mt6351_accdet_read_cali(struct mt6351_accdet *priv)
+{
+	struct device *dev = priv->dev;
+	struct nvmem_cell *cell;
+	size_t len;
+	u8 *buf;
+
+	cell = devm_nvmem_cell_get(dev, "accdet-offset");
+	if (IS_ERR(cell)) {
+		dev_dbg(dev, "no accdet-offset efuse cell, using offset 0\n");
+		return;
+	}
+
+	buf = nvmem_cell_read(cell, &len);
+	if (IS_ERR(buf))
+		return;
+
+	if (len >= sizeof(u16)) {
+		u16 word = buf[0] | (buf[1] << 8);
+
+		priv->cali_offset = ((word >> 5) & 0xff) / 2;
+		dev_dbg(dev, "accdet AUXADC offset %d mV\n", priv->cali_offset);
+	}
+	kfree(buf);
+}
+
 static void mt6351_accdet_parse_dt(struct mt6351_accdet *priv)
 {
 	struct mt6351_accdet_data *d = &priv->data;
@@ -555,6 +597,7 @@ static int mt6351_accdet_probe(struct platform_device *pdev)
 				     "failed to get accdet ADC channel\n");
 
 	mt6351_accdet_parse_dt(priv);
+	mt6351_accdet_read_cali(priv);
 
 	ret = devm_mutex_init(&pdev->dev, &priv->res_lock);
 	if (ret)

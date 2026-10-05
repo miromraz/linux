@@ -1177,23 +1177,26 @@ static int mtk_thermal_extract_efuse_v4(struct mtk_thermal *mt, u32 *buf)
 {
 	int i;
 
-	/* MT6797 calibration-enable is bit 0 of efuse word 0x10206180. */
-	if (!(buf[1] & BIT(0)))
+	/*
+	 * buf[0..2] are the consecutive efuse words 0x10206180, 0x10206184
+	 * and 0x10206188.  calibration-enable is bit 0 of 0x10206180 (buf[0]).
+	 */
+	if (!(buf[0] & BIT(0)))
 		return -EINVAL;
 
-	mt->adc_ge = (buf[0] >> 22) & 0x3ff;
-	mt->adc_oe = (buf[0] >> 12) & 0x3ff;
-	mt->degc_cali = (buf[1] >> 1) & 0x3f;
-	mt->o_slope = (buf[1] >> 26) & 0x3f;
-	mt->o_slope_sign = (buf[1] >> 7) & 0x1;
-	mt->vts[VTS1] = (buf[1] >> 17) & 0x1ff;
-	mt->vts[VTS2] = (buf[1] >> 8) & 0x1ff;
-	mt->vts[VTS3] = buf[0] & 0x1ff;
+	mt->adc_ge = (buf[1] >> 22) & 0x3ff;
+	mt->adc_oe = (buf[1] >> 12) & 0x3ff;
+	mt->degc_cali = (buf[0] >> 1) & 0x3f;
+	mt->o_slope = (buf[0] >> 26) & 0x3f;
+	mt->o_slope_sign = (buf[0] >> 7) & 0x1;
+	mt->vts[VTS1] = (buf[0] >> 17) & 0x1ff;
+	mt->vts[VTS2] = (buf[0] >> 8) & 0x1ff;
+	mt->vts[VTS3] = buf[1] & 0x1ff;
 	mt->vts[VTS4] = (buf[2] >> 23) & 0x1ff;
 	mt->vts[VTSABB] = (buf[2] >> 14) & 0x1ff;
 
 	/* ID=0 samples ignore the slope fuse in the vendor contract. */
-	if (!((buf[0] >> 9) & 0x1))
+	if (!((buf[1] >> 9) & 0x1))
 		mt->o_slope = 0;
 
 	/*
