@@ -1051,6 +1051,8 @@
 		compatible = "mediatek,mt6351-accdet";
 		io-channels = <&pmic_adc MT6351_AUXADC_ACCDET>;
 		io-channel-names = "accdet";
+		nvmem-cells = <&accdet_calibration>;
+		nvmem-cell-names = "accdet-offset";
 		mediatek,mic-vol = <7>;
 		mediatek,mic-mode = <1>;
 		mediatek,key-mode = <0>;
