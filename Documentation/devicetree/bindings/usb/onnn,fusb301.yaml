@@ -71,6 +71,12 @@ examples:
           data-role = "dual";
           typec-power-opmode = "default";
           pd-disable;
+
+          port {
+            fusb301_ep: endpoint {
+              remote-endpoint = <&usb_hs_ep>;
+            };
+          };
         };
       };
     };
