@@ -442,6 +442,7 @@
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE2>,
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE3>;
 		power-domain-names = "core0", "core1", "core2", "core3";
+		mediatek,infracfg = <&infrasys>;
 		status = "disabled";
 	};
 
