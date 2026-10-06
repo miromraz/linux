@@ -15,7 +15,6 @@
 
 #include <dt-bindings/power/mt2701-power.h>
 #include <dt-bindings/power/mt2712-power.h>
-#include <dt-bindings/power/mt6797-power.h>
 #include <dt-bindings/power/mt7622-power.h>
 #include <dt-bindings/power/mt7623a-power.h>
 #include <dt-bindings/power/mt8173-power.h>
@@ -749,80 +748,6 @@ static const struct scp_subdomain scp_subdomain_mt2712[] = {
 };
 
 /*
- * MT6797 power domain support
- */
-
-static const struct scp_domain_data scp_domain_data_mt6797[] = {
-	[MT6797_POWER_DOMAIN_VDEC] = {
-		.name = "vdec",
-		.sta_mask = BIT(7),
-		.ctl_offs = 0x300,
-		.sram_pdn_bits = GENMASK(8, 8),
-		.sram_pdn_ack_bits = GENMASK(12, 12),
-		.clk_id = {CLK_VDEC},
-	},
-	[MT6797_POWER_DOMAIN_VENC] = {
-		.name = "venc",
-		.sta_mask = BIT(21),
-		.ctl_offs = 0x304,
-		.sram_pdn_bits = GENMASK(11, 8),
-		.sram_pdn_ack_bits = GENMASK(15, 12),
-		.clk_id = {CLK_NONE},
-	},
-	[MT6797_POWER_DOMAIN_ISP] = {
-		.name = "isp",
-		.sta_mask = BIT(5),
-		.ctl_offs = 0x308,
-		.sram_pdn_bits = GENMASK(9, 8),
-		.sram_pdn_ack_bits = GENMASK(13, 12),
-		.clk_id = {CLK_NONE},
-	},
-	[MT6797_POWER_DOMAIN_MM] = {
-		.name = "mm",
-		.sta_mask = BIT(3),
-		.ctl_offs = 0x30C,
-		.sram_pdn_bits = GENMASK(8, 8),
-		.sram_pdn_ack_bits = GENMASK(12, 12),
-		.clk_id = {CLK_MM},
-		.bus_prot_mask = (BIT(1) | BIT(2)),
-	},
-	[MT6797_POWER_DOMAIN_AUDIO] = {
-		.name = "audio",
-		.sta_mask = BIT(24),
-		.ctl_offs = 0x314,
-		.sram_pdn_bits = GENMASK(11, 8),
-		.sram_pdn_ack_bits = GENMASK(15, 12),
-		.clk_id = {CLK_NONE},
-	},
-	[MT6797_POWER_DOMAIN_MFG_ASYNC] = {
-		.name = "mfg_async",
-		.sta_mask = BIT(13),
-		.ctl_offs = 0x334,
-		.sram_pdn_bits = 0,
-		.sram_pdn_ack_bits = 0,
-		.clk_id = {CLK_MFG},
-	},
-	[MT6797_POWER_DOMAIN_MJC] = {
-		.name = "mjc",
-		.sta_mask = BIT(20),
-		.ctl_offs = 0x310,
-		.sram_pdn_bits = GENMASK(8, 8),
-		.sram_pdn_ack_bits = GENMASK(12, 12),
-		.clk_id = {CLK_NONE},
-	},
-};
-
-#define SPM_PWR_STATUS_MT6797		0x0180
-#define SPM_PWR_STATUS_2ND_MT6797	0x0184
-
-static const struct scp_subdomain scp_subdomain_mt6797[] = {
-	{MT6797_POWER_DOMAIN_MM, MT6797_POWER_DOMAIN_VDEC},
-	{MT6797_POWER_DOMAIN_MM, MT6797_POWER_DOMAIN_ISP},
-	{MT6797_POWER_DOMAIN_MM, MT6797_POWER_DOMAIN_VENC},
-	{MT6797_POWER_DOMAIN_MM, MT6797_POWER_DOMAIN_MJC},
-};
-
-/*
  * MT7622 power domain support
  */
 
@@ -1041,18 +966,6 @@ static const struct scp_soc_data mt2712_data = {
 	.bus_prot_reg_update = false,
 };
 
-static const struct scp_soc_data mt6797_data = {
-	.domains = scp_domain_data_mt6797,
-	.num_domains = ARRAY_SIZE(scp_domain_data_mt6797),
-	.subdomains = scp_subdomain_mt6797,
-	.num_subdomains = ARRAY_SIZE(scp_subdomain_mt6797),
-	.regs = {
-		.pwr_sta_offs = SPM_PWR_STATUS_MT6797,
-		.pwr_sta2nd_offs = SPM_PWR_STATUS_2ND_MT6797
-	},
-	.bus_prot_reg_update = true,
-};
-
 static const struct scp_soc_data mt7622_data = {
 	.domains = scp_domain_data_mt7622,
 	.num_domains = ARRAY_SIZE(scp_domain_data_mt7622),
@@ -1096,9 +1009,6 @@ static const struct of_device_id of_scpsys_match_tbl[] = {
 	}, {
 		.compatible = "mediatek,mt2712-scpsys",
 		.data = &mt2712_data,
-	}, {
-		.compatible = "mediatek,mt6797-scpsys",
-		.data = &mt6797_data,
 	}, {
 		.compatible = "mediatek,mt7622-scpsys",
 		.data = &mt7622_data,
