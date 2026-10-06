@@ -777,9 +777,11 @@ static const struct mt6323_hwspec mt6351_spec = {
 	/*
 	 * MT6351 drives the red/green indicator LEDs from ISINK0/ISINK1. The
 	 * duty, period and current-step fields have the same widths as the
-	 * MT6323 ISINK, so the MT6323 timing parameters apply.
+	 * MT6323 ISINK, so the MT6323 timing parameters apply. The vendor
+	 * ISINKx_CON0 FSEL field tops out at 1999, so the period (written as
+	 * FSEL = period - 1) must not exceed 2000.
 	 */
-	.max_period = 10000,
+	.max_period = 2000,
 	.max_leds = 2,
 	.max_brightness = 6,
 	.unit_duty = 3125,
