@@ -853,8 +853,8 @@ static int raw_to_mcelsius_v4(struct mtk_thermal *mt, int sensno, s32 raw)
 	if (gain <= 0)
 		return THERMAL_TEMP_INVALID;
 
-	x_roomt = (((((s64)mt->vts[sensno] + 3350 - mt->adc_oe) *
-		      10000) >> 12) * 10000) / gain;
+	x_roomt = (((((s64)mt->vts[mt->conf->vts_index[sensno]] + 3350 -
+		      mt->adc_oe) * 10000) >> 12) * 10000) / gain;
 	measured = (((((s64)raw - mt->adc_oe) * 10000) >> 12) *
 		    10000) / gain;
 	delta = (measured - x_roomt) * 15 / 18;

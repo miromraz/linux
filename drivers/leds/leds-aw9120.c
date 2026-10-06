@@ -67,6 +67,7 @@ struct aw9120_led {
 		struct led_classdev_mc mcdev;
 	};
 	u32 channel;
+	bool rgb;
 };
 
 struct aw9120 {
@@ -128,8 +129,7 @@ static int aw9120_claim_channel(struct aw9120 *chip, u32 channel)
 }
 
 static int aw9120_setup_rgb(struct aw9120 *chip, struct fwnode_handle *fwnode,
-			    struct aw9120_led *led,
-			    struct led_init_data *init_data)
+			    struct aw9120_led *led)
 {
 	struct mc_subled *info;
 	int num_colors, i = 0, ret;
@@ -171,13 +171,11 @@ static int aw9120_setup_rgb(struct aw9120 *chip, struct fwnode_handle *fwnode,
 	led->mcdev.led_cdev.max_brightness = AW9120_MAX_BRIGHTNESS;
 	led->mcdev.led_cdev.brightness_set_blocking = aw9120_brightness_mc_set;
 
-	return devm_led_classdev_multicolor_register_ext(chip->dev, &led->mcdev,
-							 init_data);
+	return 0;
 }
 
 static int aw9120_setup_single(struct aw9120 *chip, struct fwnode_handle *fwnode,
-			       struct aw9120_led *led,
-			       struct led_init_data *init_data)
+			       struct aw9120_led *led)
 {
 	u32 reg;
 	int ret;
@@ -195,14 +193,19 @@ static int aw9120_setup_single(struct aw9120 *chip, struct fwnode_handle *fwnode
 	led->cdev.max_brightness = AW9120_MAX_BRIGHTNESS;
 	led->cdev.brightness_set_blocking = aw9120_brightness_single_set;
 
-	return devm_led_classdev_register_ext(chip->dev, &led->cdev, init_data);
+	return 0;
 }
 
-static int aw9120_add_led(struct aw9120 *chip, struct fwnode_handle *fwnode,
-			  unsigned int index)
+/*
+ * Claim the DT-described channels and fill the classdev structs, but do not
+ * register yet: the chip must be initialised (which programs the per-channel
+ * enables from the complete used_mask) before any LED is exposed, or an early
+ * brightness write from a default-on LED would be dropped.
+ */
+static int aw9120_prepare_led(struct aw9120 *chip, struct fwnode_handle *fwnode,
+			      unsigned int index)
 {
 	struct aw9120_led *led = &chip->leds[index];
-	struct led_init_data init_data = { .fwnode = fwnode };
 	u32 color = 0;
 	int ret;
 
@@ -214,10 +217,25 @@ static int aw9120_add_led(struct aw9120 *chip, struct fwnode_handle *fwnode,
 		return dev_err_probe(chip->dev, ret, "bad colour in %pfw\n",
 				     fwnode);
 
-	if (color == LED_COLOR_ID_RGB)
-		return aw9120_setup_rgb(chip, fwnode, led, &init_data);
+	if (color == LED_COLOR_ID_RGB) {
+		led->rgb = true;
+		return aw9120_setup_rgb(chip, fwnode, led);
+	}
 
-	return aw9120_setup_single(chip, fwnode, led, &init_data);
+	return aw9120_setup_single(chip, fwnode, led);
+}
+
+static int aw9120_register_led(struct aw9120 *chip, struct fwnode_handle *fwnode,
+			       unsigned int index)
+{
+	struct aw9120_led *led = &chip->leds[index];
+	struct led_init_data init_data = { .fwnode = fwnode };
+
+	if (led->rgb)
+		return devm_led_classdev_multicolor_register_ext(chip->dev,
+							&led->mcdev, &init_data);
+
+	return devm_led_classdev_register_ext(chip->dev, &led->cdev, &init_data);
 }
 
 static int aw9120_chip_init(struct aw9120 *chip)
@@ -321,12 +339,23 @@ static int aw9120_probe(struct i2c_client *client)
 				     "unexpected chip id 0x%04x\n", chip_id);
 
 	device_for_each_child_node_scoped(dev, child) {
-		ret = aw9120_add_led(chip, child, i++);
+		ret = aw9120_prepare_led(chip, child, i++);
 		if (ret)
 			return ret;
 	}
 
-	return aw9120_chip_init(chip);
+	ret = aw9120_chip_init(chip);
+	if (ret)
+		return ret;
+
+	i = 0;
+	device_for_each_child_node_scoped(dev, child) {
+		ret = aw9120_register_led(chip, child, i++);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 static const struct of_device_id aw9120_of_match[] = {

@@ -218,6 +218,28 @@
 		regulator-min-microvolt = <2800000>;
 		regulator-max-microvolt = <2800000>;
 	};
+
+	/*
+	 * USB rails for the left-port MTU3 T-PHY (u2port0). The MT6351 VUSB33
+	 * (3.3 V) and VA10 (PHY analog) outputs must be live before the T-PHY
+	 * registers at 0x11290800 are written; U-Boot's working fastboot gadget
+	 * powers both. VUSB33 is enabled on demand by the mtu3 driver through
+	 * its vusb33-supply; VA10 has no mainline T-PHY consumer, so keep it on.
+	 */
+	mt6351_vusb33_reg: ldo-vusb33 {
+		regulator-name = "vusb33";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+	};
+
+	mt6351_va10_reg: ldo-va10 {
+		regulator-name = "va10";
+		regulator-min-microvolt = <950000>;
+		regulator-max-microvolt = <950000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
 };
 
 &pmic {
@@ -504,7 +526,7 @@
 };
 
 &watchdog {
-	interrupts = <GIC_SPI 137 IRQ_TYPE_EDGE_FALLING>;
+	interrupts = <GIC_SPI 137 IRQ_TYPE_LEVEL_LOW>;
 };
 
 /*
@@ -659,20 +681,42 @@
 };
 
 /*
- * The left USB-C connector is wired to the MTU3 device controller. Keep the
- * controller disabled until device-mode operation has been validated on
- * this board.
+ * The left USB-C connector is wired to the MTU3 dual-role controller. Run it as
+ * a USB2 (high-speed) peripheral/gadget via the u2port0 T-PHY. Enabling these
+ * nodes previously hung the kernel before /init with no console; the hang was
+ * never root-caused (a bare MMIO access to an unclocked or unpowered SSUSB/
+ * T-PHY block, or the assigned-clock reparent, are the leading suspects). One
+ * concrete gap is that the mtu3 vusb33-supply was undescribed, so the MT6351
+ * VUSB33/VA10 PHY rails stayed off where U-Boot's working fastboot gadget turns
+ * them on; wire them up here (VA10 always-on, VUSB33 via vusb33-supply below).
  */
+&u3phy {
+	status = "okay";
+};
+
 &u2port0 {
-	clocks = <&clk26m>;
+	clocks = <&clk26m>, <&apmixedsys CLK_APMIXED_SSUSB_REF>;
+	clock-names = "ref", "da_ref";
+	status = "okay";
+};
+
+/*
+ * The MT6797 USBMAC/VUSB10 power-up that the T-PHY applies for the MTU3 gadget
+ * lives in the U3 PHYA and shared CHIP banks, so u3port0 must be powered on even
+ * though the gadget runs at high speed only. Keep the dtsi phys list (u2 + u3);
+ * maximum-speed below caps enumeration at high speed.
+ */
+&u3port0 {
+	status = "okay";
 };
 
 &ssusb {
 	assigned-clocks = <&topckgen CLK_TOP_MUX_SSUSB_TOP_SYS>;
 	assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL3_D2>;
-	phys = <&u2port0 PHY_TYPE_USB2>;
 	dr_mode = "peripheral";
 	maximum-speed = "high-speed";
+	vusb33-supply = <&mt6351_vusb33_reg>;
+	status = "okay";
 };
 
 /*
@@ -942,6 +986,16 @@
 	};
 };
 
+&mfg_async {
+	/*
+	 * Keep the GPU (MFG) rail up while the MFG_ASYNC/MFG power domains
+	 * are powered. Without it the MFG power-on ack times out, the
+	 * power-controller probe fails and its cleanup powers off the
+	 * already-on MM domain, blanking the LK-enabled display.
+	 */
+	domain-supply = <&rt5735_vgpu>;
+};
+
 &mfgsys {
 	status = "okay";
 };
@@ -1027,6 +1081,19 @@
 &pmic {
 	mt6351_codec: audio-codec {
 		compatible = "mediatek,mt6351-sound";
+	};
+
+	keys {
+		compatible = "mediatek,mt6351-keys";
+
+		power {
+			linux,keycodes = <KEY_POWER>;
+			wakeup-source;
+		};
+
+		home {
+			linux,keycodes = <KEY_HOME>;
+		};
 	};
 
 	accdet: accdet {
