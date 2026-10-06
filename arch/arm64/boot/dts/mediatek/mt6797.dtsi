@@ -360,7 +360,7 @@
 				#power-domain-cells = <0>;
 			};
 
-			power-domain@MT6797_POWER_DOMAIN_MFG_ASYNC {
+			mfg_async: power-domain@MT6797_POWER_DOMAIN_MFG_ASYNC {
 				reg = <MT6797_POWER_DOMAIN_MFG_ASYNC>;
 				clocks = <&topckgen CLK_TOP_MUX_MFG_52M>,
 					 <&infrasys CLK_INFRA_MFG_VCG>;
