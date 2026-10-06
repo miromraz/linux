@@ -509,9 +509,7 @@
 	 * this node, so no supply is described (the dummy regulators cover it).
 	 * The vendor panel is mounted rotated, so express its orientation with
 	 * the standard touchscreen transform properties.
-	 *
-	 * Kept disabled until the reset polarity, the interrupt mapping and the
-	 * orientation are validated on hardware.
+	 * The orientation transform is not yet verified on hardware.
 	 */
 	touchscreen@1 {
 		compatible = "novatek,nt36772-ts";
@@ -521,7 +519,6 @@
 		reset-gpios = <&pio 68 GPIO_ACTIVE_LOW>;
 		touchscreen-swapped-x-y;
 		touchscreen-inverted-x;
-		status = "disabled";
 	};
 };
 
