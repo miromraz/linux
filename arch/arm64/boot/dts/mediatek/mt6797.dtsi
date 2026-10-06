@@ -122,8 +122,9 @@
 
 		u2port0: usb-phy@11290800 {
 			reg = <0 0x11290800 0 0x100>;
-			clocks = <&infrasys CLK_INFRA_SSUSB_REF>;
-			clock-names = "ref";
+			clocks = <&infrasys CLK_INFRA_SSUSB_REF>,
+				 <&apmixedsys CLK_APMIXED_SSUSB_REF>;
+			clock-names = "ref", "da_ref";
 			#phy-cells = <1>;
 			status = "disabled";
 		};
