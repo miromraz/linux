@@ -504,7 +504,7 @@
 };
 
 &watchdog {
-	interrupts = <GIC_SPI 137 IRQ_TYPE_EDGE_FALLING>;
+	interrupts = <GIC_SPI 137 IRQ_TYPE_LEVEL_LOW>;
 };
 
 /*
