@@ -67,6 +67,7 @@
 #define PA5_RG_U2_HS_100U_U3_EN	BIT(11)
 
 #define U3P_USBPHYACR6		0x018
+#define PA6_RG_U2_ISO_EN		BIT(31)	/* MT6797 E60802: power-domain isolation */
 #define PA6_RG_U2_PRE_EMP		GENMASK(31, 30)
 #define PA6_RG_U2_BC11_SW_EN		BIT(23)
 #define PA6_RG_U2_OTG_VBUSCMP_EN	BIT(20)
@@ -140,6 +141,17 @@
 #define U3P_U3_CHIP_GPIO_CTLE		0x10
 #define P3C_RG_SWRST_U3_PHYD		BIT(25)
 #define P3C_RG_SWRST_U3_PHYD_FORCE_EN	BIT(24)
+/*
+ * MT6797 E60802: LK's USB save-current path powers the T-PHY down, so the
+ * generic power-on sequence is not enough. The registers below re-apply the
+ * vendor mt_usb_phy_recover() writes (3.18 mu3phy/mt6797/mtk-phy-asic.c). On
+ * this SoC the shared U3 CHIP bank (sif_base + 0x300) also carries the SSUSB
+ * IPPC USBMAC-mode control; the offsets match U-Boot phy-mtk-tphy.c relative to
+ * sif_base (0x300 mode, 0x30c = GPIO_CTLD IP reset, 0x310 = GPIO_CTLE port en).
+ */
+#define U3P_U3_CHIP_MT6797_MODE		0x00
+#define MT6797_USBMAC_DEV_MODE		0x62910002	/* device mode (host: 0x62910008) */
+#define MT6797_U3_PORT_CTRL_EN		GENMASK(3, 0)	/* in U3P_U3_CHIP_GPIO_CTLE */
 
 #define U3P_U3_PHYA_REG0	0x000
 #define P3A_RG_IEXT_INTR		GENMASK(15, 10)
@@ -147,6 +159,7 @@
 
 #define U3P_U3_PHYA_REG1	0x004
 #define P3A_RG_CLKDRV_AMP		GENMASK(31, 29)
+#define P3A_MT6797_RG_SSUSB_VUSB10_ON	BIT(29)	/* E60802 U3D_USB30_PHYA_REG1 */
 
 #define U3P_U3_PHYA_REG6	0x018
 #define P3A_RG_TX_EIDLE_CM		GENMASK(31, 28)
@@ -299,6 +312,9 @@ enum mtk_phy_version {
  * @slew_rate_coefficient:    Coefficient for slew rate calibration
  * @force_vbus_sense:         Force VBUSVALID/AVALID/BVALID/SESSEND on U2 PHY power on
  *                            (MT6797, which cannot sense VBUS/session state)
+ * @recover_phy:              Re-apply the vendor USB PHY power-up sequence during
+ *                            bring-up (MT6797, whose boot firmware leaves the T-PHY
+ *                            powered down)
  * @version:                  PHY IP Version
  */
 struct mtk_phy_pdata {
@@ -308,6 +324,7 @@ struct mtk_phy_pdata {
 	u8 slew_ref_clock_mhz;
 	u8 slew_rate_coefficient;
 	bool force_vbus_sense;
+	bool recover_phy;
 	enum mtk_phy_version version;
 };
 
@@ -811,6 +828,24 @@ static void u3_phy_instance_init(struct mtk_tphy *tphy,
 
 	mtk_phy_update_field(phyd + U3P_U3_PHYD_RXDET2, P3D_RG_RXDET_STB2_SET_P3, 0x10);
 
+	if (tphy->pdata->recover_phy) {
+		/*
+		 * vendor mt_usb_phy_recover(): assert RG_SSUSB_VUSB10_ON once the
+		 * VUSB10 rail is up, then route the SSUSB IP into USBMAC device
+		 * mode, release its software reset and enable the U3 port. These
+		 * sit in the U3 PHYA / shared CHIP banks, so they ride on the U3
+		 * phy power-on even though only USB2 is wired up on this board.
+		 */
+		mtk_phy_set_bits(phya + U3P_U3_PHYA_REG1,
+				 P3A_MT6797_RG_SSUSB_VUSB10_ON);
+
+		writel(MT6797_USBMAC_DEV_MODE,
+		       u3_banks->chip + U3P_U3_CHIP_MT6797_MODE);
+		writel(0, u3_banks->chip + U3P_U3_CHIP_GPIO_CTLD);
+		mtk_phy_set_bits(u3_banks->chip + U3P_U3_CHIP_GPIO_CTLE,
+				 MT6797_U3_PORT_CTRL_EN);
+	}
+
 	dev_dbg(tphy->dev, "%s(%d)\n", __func__, instance->index);
 }
 
@@ -895,6 +930,17 @@ static void u2_phy_instance_power_on(struct mtk_tphy *tphy,
 	if (tphy->pdata->force_vbus_sense)
 		mtk_phy_set_bits(com + U3P_U2PHYDTM1,
 				 P2C_FORCE_VBUS_SENSE | P2C_RG_BVALID);
+
+	if (tphy->pdata->recover_phy) {
+		/*
+		 * vendor mt_usb_phy_recover(): drop U2 PHY power-domain
+		 * isolation, then wait for the 480 MHz PLL to settle. BC11,
+		 * HS_100U and FORCE_SUSPENDM are already handled the same way by
+		 * the generic init/power-on above, so only ISO_EN is missing.
+		 */
+		mtk_phy_clear_bits(com + U3P_USBPHYACR6, PA6_RG_U2_ISO_EN);
+		usleep_range(800, 1000);
+	}
 
 	if (tphy->pdata->avoid_rx_sen_degradation && index) {
 		mtk_phy_set_bits(com + U3D_U2PHYDCR0, P2C_RG_SIF_U2PLL_FORCE_ON);
@@ -1576,6 +1622,7 @@ static const struct mtk_phy_pdata mt6797_pdata = {
 	.slew_ref_clock_mhz = 26,
 	.slew_rate_coefficient = 28,
 	.force_vbus_sense = true,
+	.recover_phy = true,
 	.version = MTK_PHY_V1,
 };
 
