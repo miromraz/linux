@@ -561,14 +561,24 @@
 };
 
 &u2port0 {
-	clocks = <&clk26m>;
+	clocks = <&clk26m>, <&apmixedsys CLK_APMIXED_SSUSB_REF>;
+	clock-names = "ref", "da_ref";
+	status = "okay";
+};
+
+/*
+ * The MT6797 USBMAC/VUSB10 power-up that the T-PHY applies for the MTU3 gadget
+ * lives in the U3 PHYA and shared CHIP banks, so u3port0 must be powered on even
+ * though the gadget runs at high speed only. Keep the dtsi phys list (u2 + u3);
+ * maximum-speed below caps enumeration at high speed.
+ */
+&u3port0 {
 	status = "okay";
 };
 
 &ssusb {
 	assigned-clocks = <&topckgen CLK_TOP_MUX_SSUSB_TOP_SYS>;
 	assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL3_D2>;
-	phys = <&u2port0 PHY_TYPE_USB2>;
 	dr_mode = "peripheral";
 	maximum-speed = "high-speed";
 	vusb33-supply = <&mt6351_vusb33_reg>;
