@@ -4,7 +4,11 @@
  * Author: Kevin Chen <kevin-cw.chen@mediatek.com>
  */
 
+#include <linux/clk-provider.h>
+#include <linux/delay.h>
+#include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
@@ -714,18 +718,123 @@ static const struct mtk_pll_data plls[] = {
 	    0x2B4, 4, 0x2BC, 0x2B8, 0),
 };
 
+/*
+ * SSUSB 26 MHz USB reference clock, enabled through APMIXEDSYS. LK's USB
+ * save-current path leaves this gated after boot, so the SSUSB PLL never locks
+ * and every T-PHY register access is dropped until it is re-enabled. Mirror the
+ * vendor enable_ssusb_xtal_clock() (3.18 mu3phy/mt6797/mtk-phy-asic.c): first
+ * AP_PLL_CON0 enables the LTE clock-square source (RG_LTECLKSQ_EN, then after it
+ * settles RG_LTECLKSQ_LPF_EN), then AP_PLL_CON2 forwards it to USB
+ * (DA_REF2USB_TX_EN, settle, DA_REF2USB_TX_LPF_EN | _OUT_EN). Both stages wait
+ * 100 us, matching LK.
+ */
+#define AP_PLL_CON0			0x0
+#define CON0_RG_LTECLKSQ_EN		BIT(0)
+#define CON0_RG_LTECLKSQ_LPF_EN		BIT(1)
+#define CON0_LTECLKSQ_MASK		(CON0_RG_LTECLKSQ_EN | CON0_RG_LTECLKSQ_LPF_EN)
+
+#define AP_PLL_CON2			0x8
+#define CON2_DA_REF2USB_TX_EN		BIT(0)
+#define CON2_DA_REF2USB_TX_LPF_EN	BIT(1)
+#define CON2_DA_REF2USB_TX_OUT_EN	BIT(2)
+#define CON2_REF2USB_MASK		(CON2_DA_REF2USB_TX_EN | \
+					 CON2_DA_REF2USB_TX_LPF_EN | \
+					 CON2_DA_REF2USB_TX_OUT_EN)
+
+struct mt6797_ssusb_ref {
+	struct clk_hw hw;
+	void __iomem *base;
+};
+
+#define to_mt6797_ssusb_ref(_hw) \
+	container_of(_hw, struct mt6797_ssusb_ref, hw)
+
+static int mt6797_ssusb_ref_is_prepared(struct clk_hw *hw)
+{
+	struct mt6797_ssusb_ref *ref = to_mt6797_ssusb_ref(hw);
+
+	return (readl(ref->base + AP_PLL_CON0) & CON0_LTECLKSQ_MASK) == CON0_LTECLKSQ_MASK &&
+	       (readl(ref->base + AP_PLL_CON2) & CON2_REF2USB_MASK) == CON2_REF2USB_MASK;
+}
+
+static int mt6797_ssusb_ref_prepare(struct clk_hw *hw)
+{
+	struct mt6797_ssusb_ref *ref = to_mt6797_ssusb_ref(hw);
+	u32 val;
+
+	val = readl(ref->base + AP_PLL_CON0) | CON0_RG_LTECLKSQ_EN;
+	writel(val, ref->base + AP_PLL_CON0);
+	udelay(100);
+	writel(val | CON0_RG_LTECLKSQ_LPF_EN, ref->base + AP_PLL_CON0);
+
+	val = readl(ref->base + AP_PLL_CON2) | CON2_DA_REF2USB_TX_EN;
+	writel(val, ref->base + AP_PLL_CON2);
+	udelay(100);
+	writel(val | CON2_DA_REF2USB_TX_LPF_EN | CON2_DA_REF2USB_TX_OUT_EN,
+	       ref->base + AP_PLL_CON2);
+
+	return 0;
+}
+
+/*
+ * No .unprepare: AP_PLL_CON0 RG_LTECLKSQ_* is the shared LTE 26 MHz
+ * clock-square, not a USB-only gate, and the vendor never turns it (or the
+ * CON2 forwarding) off. The clock is also flagged CLK_IGNORE_UNUSED so
+ * clk_disable_unused() leaves it alone before the T-PHY binds.
+ */
+static const struct clk_ops mt6797_ssusb_ref_ops = {
+	.is_prepared	= mt6797_ssusb_ref_is_prepared,
+	.prepare	= mt6797_ssusb_ref_prepare,
+};
+
 static int mtk_apmixedsys_init(struct platform_device *pdev)
 {
 	struct clk_hw_onecell_data *clk_data;
 	struct device_node *node = pdev->dev.of_node;
+	struct clk_init_data init = {
+		.name = "ssusb_ref",
+		.ops = &mt6797_ssusb_ref_ops,
+		.flags = CLK_IGNORE_UNUSED,
+		.parent_names = (const char *[]){ "clk26m" },
+		.num_parents = 1,
+	};
+	struct mt6797_ssusb_ref *ssusb_ref;
+	void __iomem *base;
+	int ret;
+
+	base = of_iomap(node, 0);
+	if (!base)
+		return -ENOMEM;
 
 	clk_data = mtk_alloc_clk_data(CLK_APMIXED_NR);
-	if (!clk_data)
+	if (!clk_data) {
+		iounmap(base);
 		return -ENOMEM;
+	}
 
 	mtk_clk_register_plls(&pdev->dev, plls, ARRAY_SIZE(plls), clk_data);
 
-	return of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	ssusb_ref = devm_kzalloc(&pdev->dev, sizeof(*ssusb_ref), GFP_KERNEL);
+	if (!ssusb_ref) {
+		ret = -ENOMEM;
+		goto err;
+	}
+	ssusb_ref->base = base;
+	ssusb_ref->hw.init = &init;
+	ret = devm_clk_hw_register(&pdev->dev, &ssusb_ref->hw);
+	if (ret)
+		goto err;
+	clk_data->hws[CLK_APMIXED_SSUSB_REF] = &ssusb_ref->hw;
+
+	ret = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	if (ret)
+		goto err;
+
+	return 0;
+
+err:
+	iounmap(base);
+	return ret;
 }
 
 static const struct of_device_id of_match_clk_mt6797[] = {
