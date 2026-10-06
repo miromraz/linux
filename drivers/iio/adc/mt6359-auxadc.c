@@ -60,6 +60,10 @@
 #define MT6351_AUXADC_CK_AON		BIT(15)
 #define MT6351_TOP_CKPDN_CON0		0x023a
 #define MT6351_AUXADC_SMPS_CK_PDN	BIT(9)
+#define MT6351_TOP_CKPDN_CON1		0x0240
+#define MT6351_AUXADC_CK_PDN		BIT(10)
+#define MT6351_TOP_CKHWEN_CON0		0x0282
+#define MT6351_AUXADC_SMPS_CK_PDN_HWEN	BIT(4)
 
 #define MT6363_EXT_CHAN_MASK		GENMASK(2, 0)
 #define MT6363_EXT_PURES_MASK		GENMASK(4, 3)
@@ -227,10 +231,10 @@ struct mtk_pmic_auxadc_info {
 static const struct iio_chan_spec mt6351_auxadc_channels[] = {
 	MTK_PMIC_IIO_CHAN(MT6351, bat_adc, BATADC, 23, 15, IIO_RESISTANCE),
 	MTK_PMIC_IIO_CHAN(MT6351, isense, ISENSE, 25, 15, IIO_CURRENT),
-	MTK_PMIC_IIO_CHAN(MT6351, cdt_v, VCDT, 2, 12, IIO_TEMP),
+	MTK_PMIC_IIO_CHAN(MT6351, cdt_v, VCDT, 2, 12, IIO_VOLTAGE),
 	MTK_PMIC_IIO_CHAN(MT6351, batt_temp, BAT_TEMP, 3, 12, IIO_TEMP),
 	MTK_PMIC_IIO_CHAN(MT6351, chip_temp, CHIP_TEMP, 4, 12, IIO_TEMP),
-	MTK_PMIC_IIO_CHAN(MT6351, acc_det, ACCDET, 5, 12, IIO_RESISTANCE),
+	MTK_PMIC_IIO_CHAN(MT6351, acc_det, ACCDET, 5, 12, IIO_VOLTAGE),
 	MTK_PMIC_IIO_CHAN(MT6351, tsx_temp, TSX_TEMP, 18, 15, IIO_TEMP),
 	MTK_PMIC_IIO_CHAN(MT6351, bif_v, VBIF, 11, 12, IIO_VOLTAGE),
 };
@@ -262,8 +266,18 @@ static int mt6351_auxadc_init(struct mt6359_auxadc *adc_dev)
 	if (ret)
 		return ret;
 
-	return regmap_clear_bits(regmap, MT6351_TOP_CKPDN_CON0,
-				 MT6351_AUXADC_SMPS_CK_PDN);
+	ret = regmap_clear_bits(regmap, MT6351_TOP_CKPDN_CON0,
+				MT6351_AUXADC_SMPS_CK_PDN);
+	if (ret)
+		return ret;
+
+	ret = regmap_clear_bits(regmap, MT6351_TOP_CKPDN_CON1,
+				MT6351_AUXADC_CK_PDN);
+	if (ret)
+		return ret;
+
+	return regmap_clear_bits(regmap, MT6351_TOP_CKHWEN_CON0,
+				 MT6351_AUXADC_SMPS_CK_PDN_HWEN);
 }
 
 static const struct iio_chan_spec mt6357_auxadc_channels[] = {
