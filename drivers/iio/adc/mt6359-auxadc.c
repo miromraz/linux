@@ -63,6 +63,7 @@
 #define MT6351_TOP_CKPDN_CON1		0x0240
 #define MT6351_AUXADC_CK_PDN		BIT(10)
 #define MT6351_TOP_CKHWEN_CON0		0x0282
+#define MT6351_AUXADC_CK_PDN_HWEN	BIT(3)
 #define MT6351_AUXADC_SMPS_CK_PDN_HWEN	BIT(4)
 
 #define MT6363_EXT_CHAN_MASK		GENMASK(2, 0)
@@ -277,6 +278,7 @@ static int mt6351_auxadc_init(struct mt6359_auxadc *adc_dev)
 		return ret;
 
 	return regmap_clear_bits(regmap, MT6351_TOP_CKHWEN_CON0,
+				 MT6351_AUXADC_CK_PDN_HWEN |
 				 MT6351_AUXADC_SMPS_CK_PDN_HWEN);
 }
 
