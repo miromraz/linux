@@ -464,13 +464,22 @@ static int mt6351_accdet_read_cali(struct mt6351_accdet *priv)
 			dev_dbg(dev, "no accdet-offset efuse cell, using offset 0\n");
 			return 0;
 		}
-		return dev_err_probe(dev, PTR_ERR(cell),
-				     "failed to get accdet-offset efuse cell\n");
+		if (PTR_ERR(cell) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		/* Any other error is non-fatal: fall back to offset 0. */
+		dev_warn(dev, "failed to get accdet-offset efuse cell (%pe), using offset 0\n",
+			 cell);
+		return 0;
 	}
 
 	buf = nvmem_cell_read(cell, &len);
-	if (IS_ERR(buf))
-		return PTR_ERR(buf);
+	if (IS_ERR(buf)) {
+		if (PTR_ERR(buf) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_warn(dev, "failed to read accdet-offset efuse (%pe), using offset 0\n",
+			 buf);
+		return 0;
+	}
 
 	if (len >= sizeof(u16)) {
 		u16 word = buf[0] | (buf[1] << 8);

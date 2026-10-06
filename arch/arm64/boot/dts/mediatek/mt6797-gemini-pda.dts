@@ -408,6 +408,7 @@
 &i2c7 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c7_pins_a>;
+	status = "okay";
 
 	/* External GPU buck: Richtek RT5735 at I2C address 0x1c. */
 	rt5735_vgpu: regulator@1c {
