@@ -682,12 +682,22 @@
 };
 
 /*
- * The left USB-C connector is wired to the MTU3 device controller. Keep the
- * controller disabled until device-mode operation has been validated on
- * this board.
+ * The left USB-C connector is wired to the MTU3 dual-role controller. Run it as
+ * a USB2 (high-speed) peripheral/gadget via the u2port0 T-PHY. Enabling these
+ * nodes previously hung the kernel before /init with no console; the hang was
+ * never root-caused (a bare MMIO access to an unclocked or unpowered SSUSB/
+ * T-PHY block, or the assigned-clock reparent, are the leading suspects). One
+ * concrete gap is that the mtu3 vusb33-supply was undescribed, so the MT6351
+ * VUSB33/VA10 PHY rails stayed off where U-Boot's working fastboot gadget turns
+ * them on; wire them up here (VA10 always-on, VUSB33 via vusb33-supply below).
  */
+&u3phy {
+	status = "okay";
+};
+
 &u2port0 {
 	clocks = <&clk26m>;
+	status = "okay";
 };
 
 &ssusb {
@@ -696,6 +706,8 @@
 	phys = <&u2port0 PHY_TYPE_USB2>;
 	dr_mode = "peripheral";
 	maximum-speed = "high-speed";
+	vusb33-supply = <&mt6351_vusb33_reg>;
+	status = "okay";
 };
 
 /*
