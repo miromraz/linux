@@ -422,6 +422,7 @@
 		compatible = "mediatek,mt6797-mfgsys", "syscon";
 		reg = <0 0x13000000 0 0x1000>;
 		#clock-cells = <1>;
+		power-domains = <&scpsys MT6797_POWER_DOMAIN_MFG>;
 		status = "disabled";
 	};
 
@@ -911,6 +912,7 @@
 		compatible = "mediatek,mt6797-mjcsys", "syscon";
 		reg = <0 0x12000000 0 0x1000>;
 		#clock-cells = <1>;
+		power-domains = <&scpsys MT6797_POWER_DOMAIN_MJC>;
 	};
 
 	larb4: larb@12002000 {
@@ -1143,6 +1145,7 @@
 		compatible = "mediatek,mt6797-imgsys", "syscon";
 		reg = <0 0x15000000 0 0x1000>;
 		#clock-cells = <1>;
+		power-domains = <&scpsys MT6797_POWER_DOMAIN_ISP>;
 	};
 
 	larb6: larb@15001000 {
@@ -1160,6 +1163,7 @@
 		compatible = "mediatek,mt6797-vdecsys", "syscon";
 		reg = <0 0x16000000 0 0x10000>;
 		#clock-cells = <1>;
+		power-domains = <&scpsys MT6797_POWER_DOMAIN_VDEC>;
 	};
 
 	larb1: larb@16010000 {
@@ -1177,6 +1181,7 @@
 		compatible = "mediatek,mt6797-vencsys", "syscon";
 		reg = <0 0x17000000 0 0x1000>;
 		#clock-cells = <1>;
+		power-domains = <&scpsys MT6797_POWER_DOMAIN_VENC>;
 	};
 
 	larb3: larb@17001000 {
@@ -1205,6 +1210,7 @@
 		compatible = "mediatek,mt6797-camsys", "syscon";
 		reg = <0 0x1a000000 0 0x1000>;
 		#clock-cells = <1>;
+		power-domains = <&scpsys MT6797_POWER_DOMAIN_ISP>;
 	};
 
 	larb2: larb@1a001000 {
