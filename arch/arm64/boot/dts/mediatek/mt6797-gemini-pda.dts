@@ -1085,6 +1085,19 @@
 		#sound-dai-cells = <0>;
 	};
 
+	keys {
+		compatible = "mediatek,mt6351-keys";
+
+		power {
+			linux,keycodes = <KEY_POWER>;
+			wakeup-source;
+		};
+
+		home {
+			linux,keycodes = <KEY_HOME>;
+		};
+	};
+
 	accdet: accdet {
 		compatible = "mediatek,mt6351-accdet";
 		io-channels = <&pmic_adc MT6351_AUXADC_ACCDET>;
