@@ -222,6 +222,28 @@
 			function = LED_FUNCTION_INDICATOR;
 		};
 	};
+
+	/*
+	 * USB rails for the left-port MTU3 T-PHY (u2port0). The MT6351 VUSB33
+	 * (3.3 V) and VA10 (PHY analog) outputs must be live before the T-PHY
+	 * registers at 0x11290800 are written; U-Boot's working fastboot gadget
+	 * powers both. VUSB33 is enabled on demand by the mtu3 driver through
+	 * its vusb33-supply; VA10 has no mainline T-PHY consumer, so keep it on.
+	 */
+	mt6351_vusb33_reg: ldo-vusb33 {
+		regulator-name = "vusb33";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+	};
+
+	mt6351_va10_reg: ldo-va10 {
+		regulator-name = "va10";
+		regulator-min-microvolt = <950000>;
+		regulator-max-microvolt = <950000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
 };
 
 &pio {
