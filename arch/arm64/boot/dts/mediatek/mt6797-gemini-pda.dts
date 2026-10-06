@@ -942,6 +942,16 @@
 	};
 };
 
+&mfg_async {
+	/*
+	 * Keep the GPU (MFG) rail up while the MFG_ASYNC/MFG power domains
+	 * are powered. Without it the MFG power-on ack times out, the
+	 * power-controller probe fails and its cleanup powers off the
+	 * already-on MM domain, blanking the LK-enabled display.
+	 */
+	domain-supply = <&rt5735_vgpu>;
+};
+
 &mfgsys {
 	status = "okay";
 };
