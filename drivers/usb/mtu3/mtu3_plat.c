@@ -110,6 +110,15 @@ static int ssusb_phy_power_on(struct ssusb_mtk *ssusb)
 		ret = phy_power_on(ssusb->phys[i]);
 		if (ret)
 			goto power_off_phy;
+
+		/*
+		 * A peripheral-only port must present a B-device ID to its PHY.
+		 * On SoCs that cannot sense the ID pin (e.g. MT6797) the PHY
+		 * otherwise stays in host mode and the gadget never enumerates.
+		 * Host-only ports keep the ID handling they had before.
+		 */
+		if (ssusb->dr_mode == USB_DR_MODE_PERIPHERAL)
+			phy_set_mode(ssusb->phys[i], PHY_MODE_USB_DEVICE);
 	}
 	return 0;
 
