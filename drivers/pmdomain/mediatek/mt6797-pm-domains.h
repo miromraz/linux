@@ -92,6 +92,14 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.pwr_sta2nd_offs = MT6797_PWR_STATUS_2ND,
 		.sram_pdn_bits = 0,
 		.sram_pdn_ack_bits = 0,
+		/*
+		 * The GPU (MFG) rail is an off-SoC I2C buck that is not
+		 * guaranteed on at boot. Enable it via domain-supply before
+		 * the MFG_ASYNC/MFG domains are powered, like mt8173 does on
+		 * its mfg_async domain, otherwise the MFG power-on ack times
+		 * out.
+		 */
+		.caps = MTK_SCPD_DOMAIN_SUPPLY,
 	},
 	[MT6797_POWER_DOMAIN_MFG] = {
 		.name = "mfg",

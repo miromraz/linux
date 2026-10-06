@@ -408,6 +408,7 @@ err_unregister_port:
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
 err_put_role_sw:
+	usb_role_switch_set_role(fusb->role_sw, USB_ROLE_NONE);
 	usb_role_switch_put(fusb->role_sw);
 err_put_connector:
 	fwnode_handle_put(fusb->connector);
@@ -422,6 +423,7 @@ static void fusb301_remove(struct i2c_client *client)
 	fusb301_vbus_set(fusb, false);
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
+	usb_role_switch_set_role(fusb->role_sw, USB_ROLE_NONE);
 	usb_role_switch_put(fusb->role_sw);
 }
 

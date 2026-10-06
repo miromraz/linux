@@ -450,7 +450,7 @@ static void mt6351_accdet_init(struct mt6351_accdet *priv)
  * accdet.c accdet_pmic_Read_Efuse_HPOffset()). The nvmem cell exposes that
  * word little-endian. The cell is optional: without it the offset stays 0.
  */
-static void mt6351_accdet_read_cali(struct mt6351_accdet *priv)
+static int mt6351_accdet_read_cali(struct mt6351_accdet *priv)
 {
 	struct device *dev = priv->dev;
 	struct nvmem_cell *cell;
@@ -459,13 +459,18 @@ static void mt6351_accdet_read_cali(struct mt6351_accdet *priv)
 
 	cell = devm_nvmem_cell_get(dev, "accdet-offset");
 	if (IS_ERR(cell)) {
-		dev_dbg(dev, "no accdet-offset efuse cell, using offset 0\n");
-		return;
+		/* The cell is optional; only its absence leaves the offset 0. */
+		if (PTR_ERR(cell) == -ENOENT) {
+			dev_dbg(dev, "no accdet-offset efuse cell, using offset 0\n");
+			return 0;
+		}
+		return dev_err_probe(dev, PTR_ERR(cell),
+				     "failed to get accdet-offset efuse cell\n");
 	}
 
 	buf = nvmem_cell_read(cell, &len);
 	if (IS_ERR(buf))
-		return;
+		return PTR_ERR(buf);
 
 	if (len >= sizeof(u16)) {
 		u16 word = buf[0] | (buf[1] << 8);
@@ -474,6 +479,7 @@ static void mt6351_accdet_read_cali(struct mt6351_accdet *priv)
 		dev_dbg(dev, "accdet AUXADC offset %d mV\n", priv->cali_offset);
 	}
 	kfree(buf);
+	return 0;
 }
 
 static void mt6351_accdet_parse_dt(struct mt6351_accdet *priv)
@@ -597,7 +603,9 @@ static int mt6351_accdet_probe(struct platform_device *pdev)
 				     "failed to get accdet ADC channel\n");
 
 	mt6351_accdet_parse_dt(priv);
-	mt6351_accdet_read_cali(priv);
+	ret = mt6351_accdet_read_cali(priv);
+	if (ret)
+		return ret;
 
 	ret = devm_mutex_init(&pdev->dev, &priv->res_lock);
 	if (ret)

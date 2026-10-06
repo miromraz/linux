@@ -122,8 +122,9 @@
 
 		u2port0: usb-phy@11290800 {
 			reg = <0 0x11290800 0 0x100>;
-			clocks = <&infrasys CLK_INFRA_SSUSB_REF>;
-			clock-names = "ref";
+			clocks = <&infrasys CLK_INFRA_SSUSB_REF>,
+				 <&apmixedsys CLK_APMIXED_SSUSB_REF>;
+			clock-names = "ref", "da_ref";
 			#phy-cells = <1>;
 			status = "disabled";
 		};
@@ -139,7 +140,7 @@
 
 	usb11_tphy: t-phy@11210000 {
 		compatible = "mediatek,mt6797-tphy", "mediatek,generic-tphy-v1";
-		reg = <0 0x11210000 0 0x1000>;
+		reg = <0 0x11210000 0 0x800>;
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
@@ -359,7 +360,7 @@
 				#power-domain-cells = <0>;
 			};
 
-			power-domain@MT6797_POWER_DOMAIN_MFG_ASYNC {
+			mfg_async: power-domain@MT6797_POWER_DOMAIN_MFG_ASYNC {
 				reg = <MT6797_POWER_DOMAIN_MFG_ASYNC>;
 				clocks = <&topckgen CLK_TOP_MUX_MFG_52M>,
 					 <&infrasys CLK_INFRA_MFG_VCG>;
@@ -880,9 +881,9 @@
 		compatible = "mediatek,mt6797-mmc";
 		reg = <0 0x11230000 0 0x10000>;
 		interrupts = <GIC_SPI 79 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&topckgen CLK_TOP_MUX_MSDC50_0>,
+		clocks = <&infrasys CLK_INFRA_MSDC0>,
 			 <&topckgen CLK_TOP_MUX_MSDC50_0_HCLK>,
-			 <&infrasys CLK_INFRA_MSDC0>;
+			 <&topckgen CLK_TOP_MUX_MSDC50_0>;
 		clock-names = "source", "hclk", "source_cg";
 		status = "disabled";
 	};
@@ -891,9 +892,9 @@
 		compatible = "mediatek,mt6797-mmc";
 		reg = <0 0x11240000 0 0x10000>;
 		interrupts = <GIC_SPI 80 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&topckgen CLK_TOP_MUX_MSDC30_1>,
+		clocks = <&infrasys CLK_INFRA_MSDC1>,
 			 <&topckgen CLK_TOP_MUX_AXI>,
-			 <&infrasys CLK_INFRA_MSDC1>;
+			 <&topckgen CLK_TOP_MUX_MSDC30_1>;
 		clock-names = "source", "hclk", "source_cg";
 		status = "disabled";
 	};
