@@ -1151,9 +1151,13 @@
 &{/} {
 	/*
 	 * Two one-wire pulse controlled class-D loudspeaker amplifiers
-	 * (AW8736-style), both fed by MT6351 LINEOUT L.  The vendor kernel
-	 * pulses EXT_SPKAMP_EN (GPIO243) and EXT_SPKAMP2_EN (GPIO244) three
-	 * times (2 us low/high) to enable them.
+	 * (AW8736-style). The vendor kernel pulses EXT_SPKAMP_EN (GPIO243) and
+	 * EXT_SPKAMP2_EN (GPIO244) three times (2 us low/high) to enable them.
+	 * They are fed from the MT6351 headphone outputs, not LINEOUT: playing
+	 * through LINEOUT L is silent, while routing DACL/DACR to HPL/HPR makes
+	 * the speakers play (vendor Headset_Speaker_Amp_Change(),
+	 * mt_soc_codec_63xx.c:2388, drives the headphone buffers for the
+	 * external amps).
 	 */
 	speaker_amp1: audio-amplifier-0 {
 		compatible = "awinic,aw8738";
@@ -1175,7 +1179,7 @@
 		mediatek,audio-codec = <&mt6351_codec>;
 		mediatek,accdet = <&accdet>;
 		aux-devs = <&speaker_amp1>, <&speaker_amp2>;
-		audio-routing = "Speaker Amp 1 IN", "LINEOUT L",
-				"Speaker Amp 2 IN", "LINEOUT L";
+		audio-routing = "Speaker Amp 1 IN", "Headphone L",
+				"Speaker Amp 2 IN", "Headphone R";
 	};
 };
