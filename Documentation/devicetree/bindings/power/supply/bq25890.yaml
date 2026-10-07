@@ -88,6 +88,14 @@ properties:
   ti,ibatcomp-clamp-microvolt:
     description: max. charging voltage adjustment due to expected voltage drop on in-series resistor
 
+  linux,skip-reset:
+    description: |
+      Do not reset the charger registers when the driver binds or unbinds.
+      Preserve firmware register settings when resetting would disrupt an
+      active charging or power path. Parts with D+/D- detection may also
+      restart source detection; the BQ25896 uses PSEL instead.
+    type: boolean
+
 required:
   - compatible
   - reg
