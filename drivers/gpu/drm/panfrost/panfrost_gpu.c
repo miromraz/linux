@@ -146,6 +146,8 @@ void panfrost_gpu_mt6797_quirk(struct panfrost_device *pfdev)
 	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_RSV3, 0x0f0f0f0f);
 	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_RSV4, 0x0000000f);
 	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_EN, 0x000001ff);
+	/* Let the LDO settle before the cores are powered (vendor: >= 100 us). */
+	usleep_range(100, 200);
 }
 
 static void panfrost_gpu_init_quirks(struct panfrost_device *pfdev)
