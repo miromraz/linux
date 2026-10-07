@@ -41,6 +41,24 @@
 #define OVL_CONST_BLEND					BIT(28)
 #define DISP_REG_OVL_RDMA_CTRL(n)		(0x00c0 + 0x20 * (n))
 #define DISP_REG_OVL_RDMA_GMC(n)		(0x00c8 + 0x20 * (n))
+#define DISP_REG_OVL_RDMA_FIFO_CTRL(n)		(0x00d0 + 0x20 * (n))
+#define DISP_REG_OVL_RDMA_GREQ_NUM		0x01f8
+#define DISP_REG_OVL_RDMA_GREQ_URG_NUM		0x01fc
+#define DISP_REG_OVL_RDMA_ULTRA_SRC		0x020c
+#define DISP_REG_OVL_RDMA_BUF_LOW(n)		(0x0210 + 0x04 * (n))
+#define DISP_REG_OVL_FUNC_DCM0			0x02a0
+#define DISP_REG_OVL_FUNC_DCM1			0x02a4
+/*
+ * "Golden" layer-RDMA bandwidth settings taken from the vendor real-time
+ * display path. The reset-default request credits are too small to sustain
+ * a high-resolution video-mode panel; without these the OVL stalls with a
+ * frame underrun on the first frame.
+ */
+#define OVL_RDMA_GREQ_NUM_BASE			0x51ff0000
+#define OVL_RDMA_GREQ_LAYER_NUM			0xb
+#define OVL_RDMA_MEM_GMC_GOLDEN			0x0000ffff
+#define OVL_RDMA_FIFO_CTRL_GOLDEN		0x01200000
+#define OVL_RDMA_ULTRA_SRC_GOLDEN		0x00008040
 #define DISP_REG_OVL_ADDR_MT2701		0x0040
 #define DISP_REG_OVL_CLRFMT_EXT			0x02d0
 #define OVL_CON_CLRFMT_BIT_DEPTH_MASK(n)		(GENMASK(1, 0) << (4 * (n)))
@@ -145,6 +163,7 @@ struct mtk_disp_ovl_data {
 	unsigned int layer_nr;
 	bool fmt_rgb565_is_0;
 	bool smi_id_en;
+	bool golden_setting;
 	bool supports_afbc;
 	const u32 blend_modes;
 	const u32 *formats;
@@ -257,6 +276,29 @@ void mtk_ovl_clk_disable(struct device *dev)
 	clk_disable_unprepare(ovl->clk);
 }
 
+static void mtk_ovl_golden_setting(struct mtk_disp_ovl *ovl)
+{
+	unsigned int greq = 0;
+	unsigned int i;
+
+	for (i = 0; i < ovl->data->layer_nr; i++)
+		greq |= OVL_RDMA_GREQ_LAYER_NUM << (4 * i);
+
+	writel_relaxed(OVL_RDMA_GREQ_NUM_BASE | greq,
+		       ovl->regs + DISP_REG_OVL_RDMA_GREQ_NUM);
+	writel_relaxed(greq, ovl->regs + DISP_REG_OVL_RDMA_GREQ_URG_NUM);
+	writel_relaxed(OVL_RDMA_ULTRA_SRC_GOLDEN,
+		       ovl->regs + DISP_REG_OVL_RDMA_ULTRA_SRC);
+	writel_relaxed(0x0, ovl->regs + DISP_REG_OVL_FUNC_DCM0);
+	writel_relaxed(0x0, ovl->regs + DISP_REG_OVL_FUNC_DCM1);
+
+	for (i = 0; i < ovl->data->layer_nr; i++) {
+		writel_relaxed(OVL_RDMA_FIFO_CTRL_GOLDEN,
+			       ovl->regs + DISP_REG_OVL_RDMA_FIFO_CTRL(i));
+		writel_relaxed(0x0, ovl->regs + DISP_REG_OVL_RDMA_BUF_LOW(i));
+	}
+}
+
 void mtk_ovl_start(struct device *dev)
 {
 	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
@@ -268,6 +310,8 @@ void mtk_ovl_start(struct device *dev)
 		reg = reg | OVL_LAYER_SMI_ID_EN;
 		writel_relaxed(reg, ovl->regs + DISP_REG_OVL_DATAPATH_CON);
 	}
+	if (ovl->data->golden_setting)
+		mtk_ovl_golden_setting(ovl);
 	writel_relaxed(0x1, ovl->regs + DISP_REG_OVL_EN);
 }
 
@@ -375,15 +419,19 @@ void mtk_ovl_layer_on(struct device *dev, unsigned int idx,
 
 	mtk_ddp_write(cmdq_pkt, 0x1, &ovl->cmdq_reg, ovl->regs,
 		      DISP_REG_OVL_RDMA_CTRL(idx));
-	gmc_thrshd_l = GMC_THRESHOLD_LOW >>
-		      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
-	gmc_thrshd_h = GMC_THRESHOLD_HIGH >>
-		      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
-	if (ovl->data->gmc_bits == 10)
-		gmc_value = gmc_thrshd_h | gmc_thrshd_h << 16;
-	else
-		gmc_value = gmc_thrshd_l | gmc_thrshd_l << 8 |
-			    gmc_thrshd_h << 16 | gmc_thrshd_h << 24;
+	if (ovl->data->golden_setting) {
+		gmc_value = OVL_RDMA_MEM_GMC_GOLDEN;
+	} else {
+		gmc_thrshd_l = GMC_THRESHOLD_LOW >>
+			      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
+		gmc_thrshd_h = GMC_THRESHOLD_HIGH >>
+			      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
+		if (ovl->data->gmc_bits == 10)
+			gmc_value = gmc_thrshd_h | gmc_thrshd_h << 16;
+		else
+			gmc_value = gmc_thrshd_l | gmc_thrshd_l << 8 |
+				    gmc_thrshd_h << 16 | gmc_thrshd_h << 24;
+	}
 	mtk_ddp_write(cmdq_pkt, gmc_value,
 		      &ovl->cmdq_reg, ovl->regs, DISP_REG_OVL_RDMA_GMC(idx));
 	mtk_ddp_write_mask(cmdq_pkt, BIT(idx), &ovl->cmdq_reg, ovl->regs,
@@ -690,12 +738,24 @@ static const struct mtk_disp_ovl_data mt8173_ovl_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 };
 
+static const struct mtk_disp_ovl_data mt6797_ovl_driver_data = {
+	.addr = DISP_REG_OVL_ADDR_MT8173,
+	.gmc_bits = 8,
+	.layer_nr = 4,
+	.fmt_rgb565_is_0 = true,
+	.smi_id_en = true,
+	.golden_setting = true,
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+};
+
 static const struct mtk_disp_ovl_data mt6797_ovl_2l_driver_data = {
 	.addr = DISP_REG_OVL_ADDR_MT8173,
 	.gmc_bits = 8,
 	.layer_nr = 2,
 	.fmt_rgb565_is_0 = true,
 	.smi_id_en = true,
+	.golden_setting = true,
 	.formats = mt8173_formats,
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 };
@@ -766,6 +826,8 @@ static const struct of_device_id mtk_disp_ovl_driver_dt_match[] = {
 	  .data = &mt8167_ovl_driver_data},
 	{ .compatible = "mediatek,mt8173-disp-ovl",
 	  .data = &mt8173_ovl_driver_data},
+	{ .compatible = "mediatek,mt6797-disp-ovl",
+	  .data = &mt6797_ovl_driver_data},
 	{ .compatible = "mediatek,mt6797-disp-ovl-2l",
 	  .data = &mt6797_ovl_2l_driver_data},
 	{ .compatible = "mediatek,mt8183-disp-ovl",
