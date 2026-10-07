@@ -93,6 +93,22 @@
 		regulator-max-microvolt = <5000000>;
 		gpio = <&pio 94 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
+		vin-supply = <&usb_p1_sw7226>;
+	};
+
+	/*
+	 * SW7226 load switch in front of the right USB-C VBUS. The vendor
+	 * Type-C flow turns it on (sw7226_en, GPIO72 high) together with
+	 * DRVVBUS when a device attaches in USB source role
+	 * (usb_typec.c:146, "usb1 OTG mode" branch), and off again on
+	 * detach (usb_typec.c:101). Model it as the input supply of
+	 * usb_p1_vbus so both switches follow the host's VBUS enable.
+	 */
+	usb_p1_sw7226: regulator-usb-p1-sw7226 {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-p1-sw7226";
+		gpio = <&pio 72 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
 	};
 
 	/*
@@ -267,6 +283,27 @@
 };
 
 &pio {
+	/*
+	 * Static data-path routing for the right USB-C port (ON Semi
+	 * FUSB301A switch). The vendor Type-C idle/attach state drives
+	 * sw_en (GPIO70) high and sw_sel (GPIO71) low to route the USB1
+	 * data lanes; the USB (non-HDMI) attach path leaves them there
+	 * (usb_typec.c:99-100, fusb300_gpio_init()).
+	 */
+	usb11-sw-en-hog {
+		gpio-hog;
+		gpios = <70 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "fusb301a_sw_en";
+	};
+
+	usb11-sw-sel-hog {
+		gpio-hog;
+		gpios = <71 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "fusb301a_sw_sel";
+	};
+
 	uart0_gemini_pins: uart0-gemini-pins {
 		pins-rx-tx {
 			pinmux = <MT6797_GPIO97__FUNC_URXD0>,
