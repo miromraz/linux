@@ -41,12 +41,16 @@
 #define SLP_PROT_EN                     BIT(0)
 #define SLP_PROT_RDY                    BIT(16)
 
+#define SMI_LARB_CON_SET		0x14
 #define SMI_LARB_CMD_THRT_CON		0x24
 #define SMI_LARB_THRT_RD_NU_LMT_MSK	GENMASK(7, 4)
 #define SMI_LARB_THRT_RD_NU_LMT		(5 << 4)
 
 #define SMI_LARB_SW_FLAG		0x40
 #define SMI_LARB_SW_FLAG_1		0x1
+
+#define SMI_LARB_OSTDL_SOFT_EN		0x64
+#define SMI_LARB_WRR_PORTx(id)		(0x100 + (((id) & 0x1f) << 2))
 
 #define SMI_LARB_OSTDL_PORT		0x200
 #define SMI_LARB_OSTDL_PORTx(id)	(SMI_LARB_OSTDL_PORT + (((id) & 0x1f) << 2))
@@ -226,6 +230,55 @@ static int mtk_smi_larb_config_port_mt8167(struct device *dev)
 
 	writel(*larb->mmu, larb->base + MT8167_SMI_LARB_MMU_EN);
 	return 0;
+}
+
+#define MT6797_SMI_LARB_NR		7
+#define MT6797_SMI_LARB_INIT_NR		17
+
+/*
+ * Vendor bus-optimisation init for the display larbs: the outstanding
+ * request limits must be enabled (OSTDL_SOFT_EN) before the per-port
+ * limits take effect.
+ */
+static const struct mtk_smi_reg_pair
+mtk_smi_larb_mt6797_init[MT6797_SMI_LARB_NR][MT6797_SMI_LARB_INIT_NR] = {
+	[0] = {
+		{SMI_LARB_CON_SET, 0x7f0}, {SMI_LARB_CMD_THRT_CON, 0x370246},
+		{SMI_LARB_WRR_PORTx(0), 0xb}, {SMI_LARB_WRR_PORTx(1), 0xb},
+		{SMI_LARB_WRR_PORTx(2), 0xb}, {SMI_LARB_WRR_PORTx(4), 0x5},
+		{SMI_LARB_WRR_PORTx(6), 0x2},
+		{SMI_LARB_OSTDL_SOFT_EN, 0xffffffff},
+		{SMI_LARB_OSTDL_PORTx(0), 0x1f}, {SMI_LARB_OSTDL_PORTx(1), 0x1f},
+		{SMI_LARB_OSTDL_PORTx(2), 0x1f}, {SMI_LARB_OSTDL_PORTx(3), 0xa},
+		{SMI_LARB_OSTDL_PORTx(4), 0x1}, {SMI_LARB_OSTDL_PORTx(5), 0x1},
+		{SMI_LARB_OSTDL_PORTx(6), 0x1}, {SMI_LARB_OSTDL_PORTx(7), 0x1},
+	},
+	[5] = {
+		{SMI_LARB_CON_SET, 0x7f0}, {SMI_LARB_CMD_THRT_CON, 0x370246},
+		{SMI_LARB_WRR_PORTx(0), 0xb}, {SMI_LARB_WRR_PORTx(1), 0xb},
+		{SMI_LARB_WRR_PORTx(2), 0xb}, {SMI_LARB_WRR_PORTx(6), 0xb},
+		{SMI_LARB_OSTDL_SOFT_EN, 0xffffffff},
+		{SMI_LARB_OSTDL_PORTx(0), 0x1f}, {SMI_LARB_OSTDL_PORTx(1), 0x1f},
+		{SMI_LARB_OSTDL_PORTx(2), 0x1f}, {SMI_LARB_OSTDL_PORTx(3), 0x1},
+		{SMI_LARB_OSTDL_PORTx(4), 0x6}, {SMI_LARB_OSTDL_PORTx(5), 0x6},
+		{SMI_LARB_OSTDL_PORTx(6), 0x1f}, {SMI_LARB_OSTDL_PORTx(7), 0x7},
+		{SMI_LARB_OSTDL_PORTx(8), 0x8}, {SMI_LARB_OSTDL_PORTx(9), 0x1},
+	},
+};
+
+static int mtk_smi_larb_config_port_mt6797(struct device *dev)
+{
+	struct mtk_smi_larb *larb = dev_get_drvdata(dev);
+	const struct mtk_smi_reg_pair *init;
+	int i;
+
+	if (larb->larbid < MT6797_SMI_LARB_NR) {
+		init = mtk_smi_larb_mt6797_init[larb->larbid];
+		for (i = 0; i < MT6797_SMI_LARB_INIT_NR && init[i].offset; i++)
+			writel_relaxed(init[i].value, larb->base + init[i].offset);
+	}
+
+	return mtk_smi_larb_config_port_mt8167(dev);
 }
 
 static int mtk_smi_larb_config_port_mt8173(struct device *dev)
@@ -498,6 +551,10 @@ static const struct mtk_smi_larb_gen mtk_smi_larb_mt6779 = {
 		/* DUMMY | IPU0 | IPU1 | CCU | MDLA */
 };
 
+static const struct mtk_smi_larb_gen mtk_smi_larb_mt6797 = {
+	.config_port = mtk_smi_larb_config_port_mt6797,
+};
+
 static const struct mtk_smi_larb_gen mtk_smi_larb_mt6893 = {
 	.config_port                = mtk_smi_larb_config_port_gen2_general,
 	.flags_general	            = MTK_SMI_FLAG_THRT_UPDATE | MTK_SMI_FLAG_SW_FLAG,
@@ -550,7 +607,7 @@ static const struct of_device_id mtk_smi_larb_of_ids[] = {
 	{.compatible = "mediatek,mt2712-smi-larb", .data = &mtk_smi_larb_mt2712},
 	{.compatible = "mediatek,mt6779-smi-larb", .data = &mtk_smi_larb_mt6779},
 	{.compatible = "mediatek,mt6795-smi-larb", .data = &mtk_smi_larb_mt8173},
-	{.compatible = "mediatek,mt6797-smi-larb", .data = &mtk_smi_larb_mt8167},
+	{.compatible = "mediatek,mt6797-smi-larb", .data = &mtk_smi_larb_mt6797},
 	{.compatible = "mediatek,mt6893-smi-larb", .data = &mtk_smi_larb_mt6893},
 	{.compatible = "mediatek,mt8167-smi-larb", .data = &mtk_smi_larb_mt8167},
 	{.compatible = "mediatek,mt8173-smi-larb", .data = &mtk_smi_larb_mt8173},
@@ -747,6 +804,14 @@ static const struct mtk_smi_reg_pair mtk_smi_common_mt6795_init[SMI_COMMON_INIT_
 	{SMI_READ_FIFO_TH, 0x191f},
 };
 
+static const struct mtk_smi_reg_pair mtk_smi_common_mt6797_init[SMI_COMMON_INIT_REGS_NR] = {
+	{SMI_L1LEN, 0xb},
+	{SMI_M4U_TH, 0xf7e19085},
+	{SMI_FIFO_TH1, 0x43214e8},
+	{SMI_READ_FIFO_TH, 0x747f},
+	{SMI_DCM, 0x403},
+};
+
 static const struct mtk_smi_reg_pair mtk_smi_common_mt8195_init[SMI_COMMON_INIT_REGS_NR] = {
 	{SMI_L1LEN, 0xb},
 	{SMI_M4U_TH, 0xe100e10},
@@ -781,6 +846,7 @@ static const struct mtk_smi_common_plat mtk_smi_common_mt6797 = {
 	.type     = MTK_SMI_GEN2,
 	.bus_sel  = F_MMU1_LARB(1) | F_MMU1_LARB(2) | F_MMU1_LARB(3) |
 		    F_MMU1_LARB(4) | F_MMU1_LARB(5) | F_MMU1_LARB(6),
+	.init     = mtk_smi_common_mt6797_init,
 };
 
 static const struct mtk_smi_common_plat mtk_smi_common_mt6893 = {
