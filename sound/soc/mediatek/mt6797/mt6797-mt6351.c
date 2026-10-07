@@ -288,7 +288,7 @@ static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 		goto put_platform_node;
 	}
 	for_each_card_prelinks(card, i, dai_link) {
-		if (dai_link->codecs->name)
+		if (!dai_link->num_codecs || dai_link->codecs->name)
 			continue;
 		dai_link->codecs->of_node = codec_node;
 	}
