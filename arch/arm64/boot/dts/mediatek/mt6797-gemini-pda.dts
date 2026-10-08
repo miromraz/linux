@@ -552,7 +552,7 @@
 		compatible = "novatek,nt36772-ts";
 		reg = <0x01>;
 		interrupt-parent = <&pio>;
-		interrupts = <8 IRQ_TYPE_EDGE_RISING>;
+		interrupts = <8 IRQ_TYPE_EDGE_FALLING>;
 		reset-gpios = <&pio 68 GPIO_ACTIVE_LOW>;
 		touchscreen-swapped-x-y;
 		touchscreen-inverted-x;
