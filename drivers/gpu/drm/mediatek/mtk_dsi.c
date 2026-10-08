@@ -194,6 +194,14 @@ struct mtk_dsi_driver_data {
 	bool has_size_ctl;
 	bool cmdq_long_packet_ctl;
 	bool support_per_frame_lp;
+	/*
+	 * Do not shorten HFP/HBP by the D-PHY HS<->LP transition cycles.
+	 * The vendor MT6797 dispsys driver (ddp_dsi.c) programs the full
+	 * porch word counts with no such subtraction, and the NT36772 TDDI
+	 * touch controller, which scans during the display horizontal
+	 * blanking, needs the full blanking or its firmware stays wedged.
+	 */
+	bool no_porch_lp_comp;
 };
 
 struct mtk_dsi {
@@ -546,7 +554,9 @@ static void mtk_dsi_config_vdo_timing_per_line_lp(struct mtk_dsi *dsi)
 	horizontal_front_back_byte = horizontal_frontporch_byte + horizontal_backporch_byte;
 	data_phy_cycles_byte = data_phy_cycles * dsi->lanes + delta;
 
-	if (horizontal_front_back_byte > data_phy_cycles_byte) {
+	if (dsi->driver_data->no_porch_lp_comp) {
+		/* Keep the full porch word counts; see no_porch_lp_comp. */
+	} else if (horizontal_front_back_byte > data_phy_cycles_byte) {
 		horizontal_frontporch_byte -= data_phy_cycles_byte *
 					      horizontal_frontporch_byte /
 					      horizontal_front_back_byte;
@@ -1302,6 +1312,13 @@ static const struct mtk_dsi_driver_data mt8173_dsi_driver_data = {
 	.reg_shadow_dbg_off = 0x190
 };
 
+static const struct mtk_dsi_driver_data mt6797_dsi_driver_data = {
+	.reg_cmdq_off = 0x200,
+	.reg_vm_cmd_off = 0x130,
+	.reg_shadow_dbg_off = 0x190,
+	.no_porch_lp_comp = true,
+};
+
 static const struct mtk_dsi_driver_data mt2701_dsi_driver_data = {
 	.reg_cmdq_off = 0x180,
 	.reg_vm_cmd_off = 0x130,
@@ -1336,6 +1353,7 @@ static const struct mtk_dsi_driver_data mt8188_dsi_driver_data = {
 
 static const struct of_device_id mtk_dsi_of_match[] = {
 	{ .compatible = "mediatek,mt2701-dsi", .data = &mt2701_dsi_driver_data },
+	{ .compatible = "mediatek,mt6797-dsi", .data = &mt6797_dsi_driver_data },
 	{ .compatible = "mediatek,mt8173-dsi", .data = &mt8173_dsi_driver_data },
 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },
 	{ .compatible = "mediatek,mt8186-dsi", .data = &mt8186_dsi_driver_data },
