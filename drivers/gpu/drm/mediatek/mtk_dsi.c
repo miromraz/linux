@@ -801,7 +801,16 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	 */
 	mtk_dsi_stop(dsi);
 
-	mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+	/*
+	 * On shutdown mtk_dsi_host_transfer() has already left the engine in
+	 * command mode (it no longer restarts video mode once the bridge is
+	 * disabled). Waiting for VM_DONE then always times out, since no more
+	 * frames are produced, and forces a needless engine reset. Only wait
+	 * for the frame to finish when the engine is actually still in video
+	 * mode.
+	 */
+	if (readl(dsi->regs + DSI_MODE_CTRL) & MODE)
+		mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_lane0_ulp_mode_enter(dsi);
 	mtk_dsi_clk_ulp_mode_enter(dsi);
@@ -1229,7 +1238,14 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 		 recv_cnt, *((u8 *)(msg->tx_buf)));
 
 restore_dsi_mode:
-	if (dsi_mode & MODE) {
+	/*
+	 * Only restart video mode if the output is still enabled. When the
+	 * bridge has already been disabled (shutdown in progress) the panel's
+	 * off commands are sent here in command mode; restarting the
+	 * OVL->RDMA->DSI pipeline mid-teardown wedges the engine, so leave the
+	 * DSI stopped in command mode instead.
+	 */
+	if ((dsi_mode & MODE) && dsi->enabled) {
 		mtk_dsi_set_mode(dsi);
 		mtk_dsi_start(dsi);
 	}
