@@ -204,6 +204,15 @@ static void mtk_rdma_golden_setting(struct mtk_disp_rdma *rdma,
 	unsigned int issue, valid;
 	int left;
 
+	/*
+	 * Floor the frame rate used for the thresholds, as the vendor BSP
+	 * does (ddp_rdma_ex.c): any mode below 75 Hz is computed as 60 Hz.
+	 * The Gemini panel mode is ~57 Hz; using its real refresh gives
+	 * ultra/pre-ultra thresholds below the vendor values (less margin).
+	 */
+	if (vrefresh < 75)
+		vrefresh = 60;
+
 	/* FIFO entries drained per ms, with 20% blanking overhead */
 	consume = width * height / 8000 * vrefresh * bpp * 3 / 40;
 	pre_low = DIV_ROUND_UP(6 * consume, 1000);
