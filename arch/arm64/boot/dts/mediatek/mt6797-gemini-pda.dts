@@ -560,10 +560,6 @@
 	};
 };
 
-&watchdog {
-	interrupts = <GIC_SPI 137 IRQ_TYPE_LEVEL_LOW>;
-};
-
 /*
  * Panel backlight driven by the MT6797 display PWM. The vendor backlight
  * node (aeon6797_6m_n.dts led6, "mediatek,lcd-backlight") selects
