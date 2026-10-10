@@ -556,6 +556,7 @@
 		reset-gpios = <&pio 68 GPIO_ACTIVE_LOW>;
 		touchscreen-swapped-x-y;
 		touchscreen-inverted-x;
+		panel = <&panel>;
 	};
 };
 
@@ -1088,7 +1089,7 @@
 	 * PMIC VGP1 calls are commented out), so no digital supply is described
 	 * here.
 	 */
-	panel@0 {
+	panel: panel@0 {
 		compatible = "planet,gemini-pda-nt36672";
 		reg = <0>;
 		pinctrl-names = "default";
