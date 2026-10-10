@@ -953,6 +953,7 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_OVL0>;
 		iommus = <&m4u M4U_PORT_DISP_OVL0>;
+		resets = <&mmsys MT6797_MMSYS_SW0_RST_B_DISP_OVL0>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0xb000 0x1000>;
 	};
 
@@ -963,6 +964,7 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_OVL0_2L>;
 		iommus = <&m4u M4U_PORT_DISP_2L_OVL0_LARB5>;
+		resets = <&mmsys MT6797_MMSYS_SW0_RST_B_DISP_OVL0_2L>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0xd000 0x1000>;
 	};
 
@@ -973,6 +975,7 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_OVL1_2L>;
 		iommus = <&m4u M4U_PORT_DISP_2L_OVL1>;
+		resets = <&mmsys MT6797_MMSYS_SW0_RST_B_DISP_OVL1_2L>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0xe000 0x1000>;
 	};
 
@@ -983,6 +986,7 @@
 		power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
 		clocks = <&mmsys CLK_MM_DISP_RDMA0>;
 		iommus = <&m4u M4U_PORT_DISP_RDMA0>;
+		resets = <&mmsys MT6797_MMSYS_SW0_RST_B_DISP_RDMA0>;
 		mediatek,gce-client-reg = <&gce SUBSYS_1400XXXX 0xf000 0x1000>;
 	};
 
@@ -1061,6 +1065,7 @@
 		clock-names = "engine", "digital", "hs";
 		phys = <&mipi_tx0>;
 		phy-names = "dphy";
+		resets = <&mmsys MT6797_MMSYS_SW1_RST_B_DISP_DSI0>;
 
 		status = "disabled";
 
