@@ -1397,7 +1397,17 @@ static int smb_probe(struct platform_device *pdev)
 		return dev_err_probe(chip->dev, rc,
 				     "Failed to get battery info\n");
 
-	rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500 + 1;
+	if (chip->gen == SMB5) {
+		/* SMB5 encodes 3.6 V to 4.79 V in 10 mV steps, from zero */
+		rc = clamp(chip->batt_info->voltage_max_design_uv,
+			   3600000, 4790000);
+		if (rc != chip->batt_info->voltage_max_design_uv)
+			dev_warn(chip->dev, "vbat max %d uV clamped to %d uV\n",
+				 chip->batt_info->voltage_max_design_uv, rc);
+		rc = (rc - 3600000) / 10000;
+	} else {
+		rc = (chip->batt_info->voltage_max_design_uv - 3487500) / 7500 + 1;
+	}
 	rc = regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
 				FLOAT_VOLTAGE_SETTING_MASK, rc);
 	if (rc < 0)
