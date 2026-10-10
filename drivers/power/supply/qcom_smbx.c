@@ -893,7 +893,6 @@ static int smb_get_property(struct power_supply *psy,
 			     union power_supply_propval *val)
 {
 	struct smb_chip *chip = power_supply_get_drvdata(psy);
-	int ret;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_MANUFACTURER:
@@ -907,13 +906,8 @@ static int smb_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		return smb_get_current_now(chip, &val->intval);
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-		ret = smb_get_iio_chan(chip, chip->usb_in_v_chan,
-					 &val->intval);
-		if (!ret) {
-			if (chip->gen == SMB5)
-				val->intval *= 16;
-		}
-		return ret;
+		return smb_get_iio_chan(chip, chip->usb_in_v_chan,
+					&val->intval);
 	case POWER_SUPPLY_PROP_ONLINE:
 		return smb_get_prop_usb_online(chip, &val->intval);
 	case POWER_SUPPLY_PROP_STATUS:
