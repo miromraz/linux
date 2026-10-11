@@ -51,6 +51,8 @@ properties:
   mount-matrix:
     description: an optional 3x3 mounting rotation matrix
 
+  label: true
+
 required:
   - compatible
   - reg
