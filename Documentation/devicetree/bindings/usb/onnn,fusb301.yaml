@@ -12,6 +12,8 @@ description: |
   current, and CC orientation, and report events through an active-low
   interrupt. They do not implement USB Power Delivery or TCPCI.
 
+  The interrupt is optional; the INT pin may be left unconnected.
+
 maintainers:
   - Julien Etienne <julien.etienne@gmail.com>
 
@@ -45,7 +47,6 @@ properties:
 required:
   - compatible
   - reg
-  - interrupts
   - connector
 
 additionalProperties: false
