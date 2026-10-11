@@ -429,10 +429,17 @@
 	};
 
 	/*
-	 * Pull and drive values follow the vendor aeon6797_6m_n.dts mmc1 groups
-	 * (cmd/dat pull-up, clk pull-down; drive-strength is written as a raw
-	 * MT6797 register code as on all MT6797 pads). Card detect is GPIO67
-	 * (vendor EINT6) with an internal pull-up.
+	 * MSDC1 (microSD). cmd/dat get an internal pull-up and clk a
+	 * pull-down, as is usual for an SD bus (the vendor driver hard-codes
+	 * the same pulls). drive-strength is a current in milliamps: the
+	 * MSDC1 pads (GPIO129-134) are DRV_GRP4 (2..16 mA in 2 mA steps,
+	 * MT6797 Functional Spec v1.0 Table 2-7). The vendor aeon6797_6m_n.dts
+	 * mmc1 default register code is 6, i.e. 14 mA, which is not in the
+	 * pinctrl binding enum [2, 4, 8, 12, 16]; use the nearest valid value,
+	 * 12 mA (code 5). For the UHS state the vendor drops to 8 mA (SDR104
+	 * code 3), so state_uhs uses mmc1_pins_uhs below. The microSD slot is
+	 * untested (no card), so these are nominal values. Card detect is
+	 * GPIO67 (vendor EINT6), internal pull-up.
 	 */
 	mmc1_pins_default: mmc1-default-pins {
 		pins-cmd-dat {
@@ -441,13 +448,31 @@
 				 <MT6797_GPIO132__FUNC_MSDC1_DAT2>,
 				 <MT6797_GPIO133__FUNC_MSDC1_DAT3>,
 				 <MT6797_GPIO129__FUNC_MSDC1_CMD>;
-			drive-strength = <4>;
+			drive-strength = <12>;
 			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
 		};
 
 		pins-clk {
 			pinmux = <MT6797_GPIO134__FUNC_MSDC1_CLK>;
-			drive-strength = <4>;
+			drive-strength = <12>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	mmc1_pins_uhs: mmc1-uhs-pins {
+		pins-cmd-dat {
+			pinmux = <MT6797_GPIO130__FUNC_MSDC1_DAT0>,
+				 <MT6797_GPIO131__FUNC_MSDC1_DAT1>,
+				 <MT6797_GPIO132__FUNC_MSDC1_DAT2>,
+				 <MT6797_GPIO133__FUNC_MSDC1_DAT3>,
+				 <MT6797_GPIO129__FUNC_MSDC1_CMD>;
+			drive-strength = <8>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+
+		pins-clk {
+			pinmux = <MT6797_GPIO134__FUNC_MSDC1_CLK>;
+			drive-strength = <8>;
 			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
 		};
 	};
@@ -490,7 +515,7 @@
 &mmc1 {
 	pinctrl-names = "default", "state_uhs";
 	pinctrl-0 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
-	pinctrl-1 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
+	pinctrl-1 = <&mmc1_pins_uhs>, <&mmc1_cd_pins>;
 	bus-width = <4>;
 	max-frequency = <200000000>;
 	cap-sd-highspeed;
