@@ -391,8 +391,6 @@
 	status = "okay";
 };
 &i2c6 {
-	clock-frequency = <3400000>;
-	mediatek,use-push-pull;
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c6_pins_a>;
 	status = "okay";
