@@ -165,8 +165,14 @@ static int mtk_disp_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 					 0x0);
 	}
 
+	/*
+	 * The committed CON1 value only reaches the output on the next display
+	 * frame or when the PWM is enabled. With the display pipeline already
+	 * stopped a 0% duty cycle would never take effect, so clear EN instead,
+	 * which drives the output low right away.
+	 */
 	mtk_disp_pwm_update_bits(mdp, DISP_PWM_EN, mdp->data->enable_mask,
-				 mdp->data->enable_mask);
+				 high_width ? mdp->data->enable_mask : 0);
 	mdp->enabled = true;
 
 	return 0;
