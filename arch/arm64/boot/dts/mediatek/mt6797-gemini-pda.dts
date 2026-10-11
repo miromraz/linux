@@ -483,6 +483,7 @@
 	bmi160: imu@69 {
 		compatible = "bosch,bmi160";
 		reg = <0x69>;
+		label = "accel-base";
 		mount-matrix = "0", "-1", "0",
 			       "-1", "0", "0",
 			       "0", "0", "-1";
