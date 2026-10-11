@@ -4,6 +4,7 @@
 * Author: Tianping.Fang <tianping.fang@mediatek.com>
 */
 
+#include <linux/container_of.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/mt6397/core.h>
@@ -11,8 +12,10 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/reboot-mode.h>
 #include <linux/regmap.h>
 #include <linux/rtc.h>
+#include <linux/string.h>
 #include <linux/mfd/mt6397/rtc.h>
 #include <linux/mod_devicetable.h>
 
@@ -244,6 +247,59 @@ static const struct rtc_class_ops mtk_rtc_ops = {
 	.set_alarm  = mtk_rtc_set_alarm,
 };
 
+#if IS_REACHABLE(CONFIG_REBOOT_MODE)
+static int mtk_rtc_reboot_mode_write(struct reboot_mode_driver *reboot,
+				     unsigned int magic)
+{
+	struct mt6397_rtc *rtc =
+		container_of(reboot, struct mt6397_rtc, reboot_mode);
+	int ret;
+
+	/* Share the RTC lock so WRTGR cannot race a time/alarm commit. */
+	mutex_lock(&rtc->lock);
+	ret = regmap_update_bits(rtc->regmap, rtc->addr_base + RTC_PDN1,
+				 RTC_PDN1_RECOVERY_MASK | RTC_PDN1_FASTBOOT,
+				 magic);
+	if (!ret)
+		ret = mtk_rtc_write_trigger(rtc);
+	mutex_unlock(&rtc->lock);
+
+	return ret;
+}
+
+static int mtk_rtc_reboot_mode_register(struct mt6397_rtc *rtc,
+					struct device *dev)
+{
+	struct property *prop;
+
+	/* Some PMICs bind this driver by name with no RTC node. */
+	if (!dev->of_node)
+		return 0;
+
+	/*
+	 * Only hook into reboot mode when the boot loader's modes are
+	 * described in DT; otherwise leave the reboot path untouched.
+	 */
+	for_each_property_of_node(dev->of_node, prop) {
+		if (!str_has_prefix(prop->name, "mode-"))
+			continue;
+
+		rtc->reboot_mode.dev = dev;
+		rtc->reboot_mode.write = mtk_rtc_reboot_mode_write;
+
+		return devm_reboot_mode_register(dev, &rtc->reboot_mode);
+	}
+
+	return 0;
+}
+#else
+static int mtk_rtc_reboot_mode_register(struct mt6397_rtc *rtc,
+					struct device *dev)
+{
+	return 0;
+}
+#endif
+
 static int mtk_rtc_probe(struct platform_device *pdev)
 {
 	struct resource *res;
@@ -293,6 +349,11 @@ static int mtk_rtc_probe(struct platform_device *pdev)
 	rtc->rtc_dev->range_max = mktime64(2027, 12, 31, 23, 59, 59);
 	rtc->rtc_dev->start_secs = mktime64(1968, 1, 2, 0, 0, 0);
 	rtc->rtc_dev->set_start_time = true;
+
+	/* A reboot-mode failure must not take down the RTC. */
+	ret = mtk_rtc_reboot_mode_register(rtc, &pdev->dev);
+	if (ret)
+		dev_warn(&pdev->dev, "failed to register reboot mode: %d\n", ret);
 
 	return devm_rtc_register_device(rtc->rtc_dev);
 }
