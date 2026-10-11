@@ -40,6 +40,7 @@ properties:
           - enum:
               - mediatek,mt2701-i2c
               - mediatek,mt6797-i2c
+              - mediatek,mt6797-i2c-appm
               - mediatek,mt7623-i2c
           - const: mediatek,mt6577-i2c
       - items:
