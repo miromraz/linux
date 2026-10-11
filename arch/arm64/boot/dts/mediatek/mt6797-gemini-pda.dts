@@ -368,6 +368,17 @@
 		};
 	};
 
+	/*
+	 * eMMC pads. drive-strength is a current in milliamps. The MSDC0 pads
+	 * (GPIO114-125) are DRV_GRP4 (2..16 mA in 2 mA steps, code = mA/2 - 1,
+	 * MT6797 Functional Spec v1.0 Table 2-7), so the vendor
+	 * aeon6797_6m_n.dts mmc0 register code 1 is 4 mA. CMD, DSL and RSTB
+	 * share one DRV field, so setting it on the cmd/dat group covers all
+	 * three. Because VCCQ (vqmmc) is a fixed 1.8 V rail, the core selects
+	 * this "state_uhs" pin state at the first power-up, so the drive
+	 * applies at every speed, as on the vendor kernel. Pulls are left as
+	 * the bootloader set them (the vendor driver hard-codes them instead).
+	 */
 	mmc0_pins_default: mmc0-default-pins {
 		pins-cmd-dat {
 			pinmux = <MT6797_GPIO114__FUNC_MSDC0_DAT0>,
@@ -379,10 +390,12 @@
 				 <MT6797_GPIO120__FUNC_MSDC0_DAT6>,
 				 <MT6797_GPIO121__FUNC_MSDC0_DAT7>,
 				 <MT6797_GPIO122__FUNC_MSDC0_CMD>;
+			drive-strength = <4>;
 		};
 
 		pins-clk {
 			pinmux = <MT6797_GPIO123__FUNC_MSDC0_CLK>;
+			drive-strength = <4>;
 		};
 
 		pins-ds {
@@ -469,7 +482,9 @@
 	pinctrl-0 = <&mmc0_pins_default>;
 	pinctrl-1 = <&mmc0_pins_default>;
 	bus-width = <8>;
-	max-frequency = <25000000>;
+	max-frequency = <200000000>;
+	cap-mmc-highspeed;
+	mmc-hs200-1_8v;
 	vmmc-supply = <&mt6351_vemc_reg>;
 	vqmmc-supply = <&mt6351_vio18_reg>;
 	non-removable;
