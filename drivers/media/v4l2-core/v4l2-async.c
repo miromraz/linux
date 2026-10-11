@@ -15,6 +15,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -338,6 +339,65 @@ static int v4l2_async_create_ancillary_links(struct v4l2_async_notifier *n,
 #endif
 }
 
+/*
+ * A sub-device that sets V4L2_SUBDEV_FL_PM_WITH_SENSOR is to be powered with
+ * the sub-device it is bound to: make the device of the latter a runtime PM
+ * consumer of its device.
+ */
+static int v4l2_async_create_pm_link(struct v4l2_async_notifier *n,
+				     struct v4l2_subdev *sd)
+{
+	u32 flags = DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME;
+	struct device_link *link;
+	struct device *consumer;
+	bool active;
+
+	if (!(sd->flags & V4L2_SUBDEV_FL_PM_WITH_SENSOR))
+		return 0;
+
+	if (!n->sd || !n->sd->dev) {
+		dev_warn(notifier_dev(n),
+			 "no sub-device with a device to link %s to, not creating a PM link!\n",
+			 sd->name);
+		return 0;
+	}
+
+	consumer = n->sd->dev;
+
+	/*
+	 * The runtime PM core resumes the supplier when the consumer is
+	 * resumed, so a consumer that is active already has to be accounted
+	 * for here. Keep it active until the link exists. A consumer that is
+	 * resumed while the link is being created is not accounted for until
+	 * its next resume.
+	 */
+	active = pm_runtime_get_if_active(consumer) > 0;
+	if (active)
+		flags |= DL_FLAG_RPM_ACTIVE;
+
+	link = device_link_add(consumer, sd->dev, flags);
+
+	if (active)
+		pm_runtime_put(consumer);
+
+	if (!link) {
+		dev_err(notifier_dev(n),
+			"failed creating a PM link for %s\n", sd->name);
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
+static void v4l2_async_remove_pm_link(struct v4l2_async_notifier *n,
+				      struct v4l2_subdev *sd)
+{
+	if (!(sd->flags & V4L2_SUBDEV_FL_PM_WITH_SENSOR) || !n->sd)
+		return;
+
+	device_link_remove(n->sd->dev, sd->dev);
+}
+
 static int v4l2_async_match_notify(struct v4l2_async_notifier *notifier,
 				   struct v4l2_device *v4l2_dev,
 				   struct v4l2_subdev *sd,
@@ -353,13 +413,17 @@ static int v4l2_async_match_notify(struct v4l2_async_notifier *notifier,
 		registered = true;
 	}
 
+	ret = v4l2_async_create_pm_link(notifier, sd);
+	if (ret < 0)
+		goto err_unregister_subdev;
+
 	ret = v4l2_async_nf_call_bound(notifier, sd, asc);
 	if (ret < 0) {
 		if (asc->match.type == V4L2_ASYNC_MATCH_TYPE_FWNODE)
 			dev_dbg(notifier_dev(notifier),
 				"failed binding %pfw (%d)\n",
 				asc->match.fwnode, ret);
-		goto err_unregister_subdev;
+		goto err_remove_pm_link;
 	}
 
 	if (registered) {
@@ -393,6 +457,9 @@ static int v4l2_async_match_notify(struct v4l2_async_notifier *notifier,
 err_call_unbind:
 	v4l2_async_nf_call_unbind(notifier, sd, asc);
 	list_del(&asc->asc_subdev_entry);
+
+err_remove_pm_link:
+	v4l2_async_remove_pm_link(notifier, sd);
 
 err_unregister_subdev:
 	if (registered)
@@ -473,6 +540,7 @@ static void v4l2_async_unbind_subdev_one(struct v4l2_async_notifier *notifier,
 					 struct v4l2_async_connection *asc)
 {
 	list_move_tail(&asc->asc_entry, &notifier->waiting_list);
+	v4l2_async_remove_pm_link(notifier, asc->sd);
 	if (list_is_singular(&asc->asc_subdev_entry)) {
 		v4l2_async_nf_call_unbind(notifier, asc->sd, asc);
 		v4l2_device_unregister_subdev(asc->sd);
