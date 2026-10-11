@@ -61,6 +61,12 @@
 			enable-method = "psci";
 			reg = <0x000>;
 			capacity-dmips-mhz = <741>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster0_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu1: cpu@1 {
@@ -69,6 +75,12 @@
 			enable-method = "psci";
 			reg = <0x001>;
 			capacity-dmips-mhz = <741>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster0_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu2: cpu@2 {
@@ -77,6 +89,12 @@
 			enable-method = "psci";
 			reg = <0x002>;
 			capacity-dmips-mhz = <741>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster0_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu3: cpu@3 {
@@ -85,6 +103,12 @@
 			enable-method = "psci";
 			reg = <0x003>;
 			capacity-dmips-mhz = <741>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster0_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu4: cpu@100 {
@@ -93,6 +117,12 @@
 			enable-method = "psci";
 			reg = <0x100>;
 			capacity-dmips-mhz = <741>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster1_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu5: cpu@101 {
@@ -101,6 +131,12 @@
 			enable-method = "psci";
 			reg = <0x101>;
 			capacity-dmips-mhz = <741>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster1_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu6: cpu@102 {
@@ -109,6 +145,12 @@
 			enable-method = "psci";
 			reg = <0x102>;
 			capacity-dmips-mhz = <741>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster1_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu7: cpu@103 {
@@ -117,6 +159,12 @@
 			enable-method = "psci";
 			reg = <0x103>;
 			capacity-dmips-mhz = <741>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster1_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu8: cpu@200 {
@@ -141,6 +189,243 @@
 		#clock-cells = <0>;
 		clock-frequency = <26000000>;
 		clock-output-names = "clk26m";
+	};
+
+	/*
+	 * CPU OPPs come from the vendor per-bin tables (mt_cpufreq.c). The
+	 * speed bin is read from the efuse "speed_grade" cell (FUNC_CODE_1); the
+	 * driver uses it as the opp-supported-hw version, and opp-supported-hw
+	 * here groups the func codes that select each bin:
+	 *   FY  (func 0,3 and any unlisted) = 0x7f29
+	 *   SB  (func 1,4,6)                = 0x0052
+	 *   M   (func 2,7)                  = 0x0084
+	 *   L   (func 0xf)                  = 0x8000
+	 * The little cluster shares one FY/M/L frequency table (mask 0xffad),
+	 * with SB separate. Entries are capped at 1.09 V so Vproc stays below
+	 * the fixed 1.10 V SRAM LDO, and stop above the point where a /4 post
+	 * divider would be needed (no CKDIV model yet). A numeric suffix on an
+	 * OPP node name only keeps duplicate frequencies unique; the active
+	 * OPP is chosen by opp-supported-hw.
+	 */
+	cluster0_opp: opp-table-cluster0 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		/* FY / M / L bins (shared little-cluster table) */
+		opp-1118000000 {
+			opp-hz = /bits/ 64 <1118000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0xffad>;
+		};
+		opp-1092000000 {
+			opp-hz = /bits/ 64 <1092000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0xffad>;
+		};
+		opp-949000000 {
+			opp-hz = /bits/ 64 <949000000>;
+			opp-microvolt = <1020000>;
+			opp-supported-hw = <0xffad>;
+		};
+		opp-897000000 {
+			opp-hz = /bits/ 64 <897000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0xffad>;
+		};
+		opp-806000000 {
+			opp-hz = /bits/ 64 <806000000>;
+			opp-microvolt = <970000>;
+			opp-supported-hw = <0xffad>;
+		};
+		opp-715000000 {
+			opp-hz = /bits/ 64 <715000000>;
+			opp-microvolt = <940000>;
+			opp-supported-hw = <0xffad>;
+		};
+		opp-624000000 {
+			opp-hz = /bits/ 64 <624000000>;
+			opp-microvolt = <900000>;
+			opp-supported-hw = <0xffad>;
+		};
+		opp-559000000 {
+			opp-hz = /bits/ 64 <559000000>;
+			opp-microvolt = <880000>;
+			opp-supported-hw = <0xffad>;
+		};
+
+		/* SB bin */
+		opp-1118000000-1 {
+			opp-hz = /bits/ 64 <1118000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1014000000-1 {
+			opp-hz = /bits/ 64 <1014000000>;
+			opp-microvolt = <1040000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-897000000-1 {
+			opp-hz = /bits/ 64 <897000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-806000000-1 {
+			opp-hz = /bits/ 64 <806000000>;
+			opp-microvolt = <970000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-715000000-1 {
+			opp-hz = /bits/ 64 <715000000>;
+			opp-microvolt = <940000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-624000000-1 {
+			opp-hz = /bits/ 64 <624000000>;
+			opp-microvolt = <900000>;
+			opp-supported-hw = <0x0052>;
+		};
+	};
+
+	cluster1_opp: opp-table-cluster1 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		/* FY / M bins (shared big-cluster table) */
+		opp-1495000000 {
+			opp-hz = /bits/ 64 <1495000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1417000000 {
+			opp-hz = /bits/ 64 <1417000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1274000000 {
+			opp-hz = /bits/ 64 <1274000000>;
+			opp-microvolt = <1020000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1209000000 {
+			opp-hz = /bits/ 64 <1209000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1092000000 {
+			opp-hz = /bits/ 64 <1092000000>;
+			opp-microvolt = <970000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-949000000 {
+			opp-hz = /bits/ 64 <949000000>;
+			opp-microvolt = <940000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-832000000 {
+			opp-hz = /bits/ 64 <832000000>;
+			opp-microvolt = <900000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-741000000 {
+			opp-hz = /bits/ 64 <741000000>;
+			opp-microvolt = <880000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-650000000 {
+			opp-hz = /bits/ 64 <650000000>;
+			opp-microvolt = <850000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-559000000 {
+			opp-hz = /bits/ 64 <559000000>;
+			opp-microvolt = <830000>;
+			opp-supported-hw = <0x7fad>;
+		};
+
+		/* SB bin */
+		opp-1495000000-1 {
+			opp-hz = /bits/ 64 <1495000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1352000000-1 {
+			opp-hz = /bits/ 64 <1352000000>;
+			opp-microvolt = <1040000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1209000000-1 {
+			opp-hz = /bits/ 64 <1209000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1092000000-1 {
+			opp-hz = /bits/ 64 <1092000000>;
+			opp-microvolt = <970000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-962000000-1 {
+			opp-hz = /bits/ 64 <962000000>;
+			opp-microvolt = <940000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-832000000-1 {
+			opp-hz = /bits/ 64 <832000000>;
+			opp-microvolt = <900000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-650000000-1 {
+			opp-hz = /bits/ 64 <650000000>;
+			opp-microvolt = <850000>;
+			opp-supported-hw = <0x0052>;
+		};
+
+		/*
+		 * L bin. The CCI shares buck A, is not a DVFS consumer, and on
+		 * the L bin needs 1.09 V at its bootloader frequency (~630 MHz,
+		 * CCI_L idx4 637 MHz). Pin every L-bin cluster OPP at 1.09 V so
+		 * the L-cluster consumer holds the shared rail at 1.09 V while
+		 * cpufreq runs, instead of relying only on the board floor.
+		 */
+		opp-1274000000-2 {
+			opp-hz = /bits/ 64 <1274000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-1209000000-2 {
+			opp-hz = /bits/ 64 <1209000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-1092000000-2 {
+			opp-hz = /bits/ 64 <1092000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-936000000-2 {
+			opp-hz = /bits/ 64 <936000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-845000000-2 {
+			opp-hz = /bits/ 64 <845000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-754000000-2 {
+			opp-hz = /bits/ 64 <754000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-689000000-2 {
+			opp-hz = /bits/ 64 <689000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-611000000-2 {
+			opp-hz = /bits/ 64 <611000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
 	};
 
 	u3phy: t-phy@11290000 {
@@ -596,6 +881,12 @@
 
 		thermal_calibration: calib@180 {
 			reg = <0x180 0xc>;
+		};
+
+		/* FUNC_CODE_1, devinfo word 22[3:0], selects the CPU speed bin. */
+		cpu_speed_bin: speed-bin@71c {
+			reg = <0x71c 0x1>;
+			bits = <0 4>;
 		};
 	};
 
