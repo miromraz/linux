@@ -854,7 +854,6 @@ static int smb5_get_prop_health(struct smb_chip *chip, int *val)
 	if (rc < 0)
 		dev_err(chip->dev, "Couldn't determine overvoltage status!");
 	if (rc) {
-		dev_err(chip->dev, "battery over-voltage");
 		*val = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
 		return 0;
 	}
