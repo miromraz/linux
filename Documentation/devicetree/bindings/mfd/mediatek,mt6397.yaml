@@ -61,6 +61,9 @@ properties:
     description:
       MT6397 Real Time Clock.
 
+    allOf:
+      - $ref: /schemas/power/reset/reboot-mode.yaml#
+
     properties:
       compatible:
         oneOf:
@@ -76,6 +79,12 @@ properties:
               - const: mediatek,mt6358-rtc
 
       start-year: true
+
+    patternProperties:
+      # The boot loader reads the mode from spare bits in the RTC PDN1
+      # register, so each magic must fit the recovery and fast-boot bits.
+      "^mode-.*$":
+        maxItems: 1
 
     required:
       - compatible
