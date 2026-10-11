@@ -20,6 +20,7 @@
 #include <linux/of.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
@@ -391,6 +392,29 @@ static int smb_apsd_get_charger_type(struct smb_chip *chip, int *val)
 	return 0;
 }
 
+/*
+ * power_supply_for_each_psy() callback: 1 for a battery this charger supplies
+ * that reads 40 mV or more above the float voltage, else 0.
+ */
+static int smb5_batt_is_ov(struct power_supply *psy, void *data)
+{
+	struct smb_chip *chip = data;
+	union power_supply_propval vbat;
+	u32 fv;
+
+	if (psy->desc->type != POWER_SUPPLY_TYPE_BATTERY ||
+	    match_string((const char * const *)psy->supplied_from,
+			 psy->num_supplies, chip->chg_psy->desc->name) < 0)
+		return 0;
+
+	if (power_supply_get_property(psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &vbat) ||
+	    regmap_read(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG, &fv))
+		return 0;
+
+	/* SMB5 encodes 3.6 V to 4.79 V in 10 mV steps, from zero */
+	return vbat.intval >= 3600000 + (int)fv * 10000 + 40000;
+}
+
 /* Return 1 when in overvoltage state, else 0 or -errno */
 static int smbx_ov_status(struct smb_chip *chip)
 {
@@ -414,7 +438,21 @@ static int smbx_ov_status(struct smb_chip *chip)
 	if (rc)
 		return rc;
 
-	return !!(val & mask);
+	if (!(val & mask))
+		return 0;
+	if (chip->gen == SMB2)
+		return 1;
+
+	/*
+	 * SMB5 has been seen to raise BAT_OV with the battery below the float
+	 * voltage and to carry on charging. Like downstream, believe it only
+	 * when the fuel gauge agrees, and not at all without one. Properties
+	 * can be read before probe has stored the power supply.
+	 */
+	if (!chip->chg_psy)
+		return 0;
+
+	return power_supply_for_each_psy(chip, smb5_batt_is_ov);
 }
 
 static int smb_get_prop_status(struct smb_chip *chip, int *val)
