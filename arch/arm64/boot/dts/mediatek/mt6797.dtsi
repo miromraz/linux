@@ -498,7 +498,7 @@
 				};
 			};
 
-			rtc {
+			rtc: rtc {
 				compatible = "mediatek,mt6351-rtc";
 			};
 		};
