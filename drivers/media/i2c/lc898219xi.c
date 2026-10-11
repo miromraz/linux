@@ -22,7 +22,7 @@
 #include <media/v4l2-event.h>
 
 #define LC898219XI_NAME "lc898219xi"
-/* Actuator has 11 bit resolution */
+/* Actuator has 12 bit resolution */
 #define LC898219XI_MAX_FOCUS_POS (4096 - 1)
 #define LC898219XI_MIN_FOCUS_POS 0
 #define LC898219XI_FOCUS_STEPS 1
@@ -56,13 +56,11 @@ static int lc898219xi_set_dac(struct lc898219xi *lc898219xi, u16 val)
 	int ret;
 
 	/*
-	 * Value ranges from -2047 (max focus) to 2047 in hardware. +2048 does
-	 * not fit the 12-bit value below and would wrap to -2048, the opposite
-	 * end of travel.
+	/*
+	 * The control's 0..4095 maps one to one onto the 12-bit
+	 * two's-complement target position, 2047 down to -2048.
 	 */
-	s16 actuator_val = clamp(((s16)val - 2048) * -1, -2048, 2047);
-
-	/* The coil expects a two's-complement 12-bit signed value. */
+	s16 actuator_val = 2047 - val;
 	u16 actuator_val_s12 = actuator_val & LC898219XI_MAX_FOCUS_POS;
 
 	ret = cci_write(lc898219xi->regmap, LC898219XI_DAC_ADDR,
