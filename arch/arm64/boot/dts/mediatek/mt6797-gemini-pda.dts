@@ -1210,6 +1210,16 @@
 	};
 };
 
+&rtc {
+	/*
+	 * Forward "reboot recovery" to LK through the RTC PDN1 factory-reset /
+	 * recovery field. The fast-boot bit (0x2000, "reboot bootloader") is
+	 * not described because this device's LK does not read it (fastboot
+	 * support is compiled out), verified on hardware.
+	 */
+	mode-recovery = <0x10>;
+};
+
 &{/} {
 	/*
 	 * Two one-wire pulse controlled class-D loudspeaker amplifiers
