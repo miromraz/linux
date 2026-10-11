@@ -972,6 +972,14 @@ struct v4l2_subdev_internal_ops {
  * - Multiple streams per pad are supported
  */
 #define V4L2_SUBDEV_FL_STREAMS			(1U << 4)
+/*
+ * Set this flag if this subdev is ancillary to a sensor (a lens controller,
+ * for instance) and needs power only while that sensor is powered. When the
+ * two are bound, the V4L2 async framework makes the sensor's device a runtime
+ * PM consumer of this subdev's device. See
+ * Documentation/driver-api/media/camera-sensor.rst for the requirements.
+ */
+#define V4L2_SUBDEV_FL_PM_WITH_SENSOR		(1U << 5)
 
 struct regulator_bulk_data;
 
@@ -1003,7 +1011,9 @@ struct v4l2_subdev_platform_data {
  *   %V4L2_SUBDEV_FL_HAS_DEVNODE - Set this flag if this subdev needs a
  *   device node;
  *   %V4L2_SUBDEV_FL_HAS_EVENTS -  Set this flag if this subdev generates
- *   events.
+ *   events;
+ *   %V4L2_SUBDEV_FL_PM_WITH_SENSOR - Set this flag if this subdev is ancillary
+ *   to a sensor and is to be powered together with it.
  *
  * @v4l2_dev: pointer to struct &v4l2_device
  * @ops: pointer to struct &v4l2_subdev_ops
