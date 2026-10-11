@@ -10,6 +10,7 @@
 #include <linux/cpumask.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
+#include <linux/nvmem-consumer.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -57,6 +58,7 @@ struct mtk_cpu_dvfs_info {
 	const struct mtk_cpufreq_platform_data *soc_data;
 	int vtrack_max;
 	bool ccifreq_bound;
+	int opp_token;
 };
 
 static struct platform_device *cpufreq_pdev;
@@ -381,6 +383,40 @@ static struct device *of_get_cci(struct device *cpu_dev)
 	return &pdev->dev;
 }
 
+/*
+ * Some SoCs ship several speed bins that share one OPP table but need
+ * different voltages. When the CPU node carries a "speed-bin" nvmem cell,
+ * use it as the opp-supported-hw version so the OPP core keeps only the
+ * entries that match this part. The cell value is used directly as a bit
+ * index, so the DT encodes the per-bin grouping in opp-supported-hw.
+ */
+static int mtk_cpu_opp_set_supported_hw(struct mtk_cpu_dvfs_info *info)
+{
+	struct device *cpu_dev = info->cpu_dev;
+	struct dev_pm_opp_config config = {};
+	unsigned int supported_hw;
+	u8 bin;
+	int ret;
+
+	ret = nvmem_cell_read_u8(cpu_dev, "speed_grade", &bin);
+	if (ret == -ENOENT || ret == -EOPNOTSUPP)
+		return 0;	/* No speed binning (or nvmem) on this SoC. */
+	if (ret)
+		return ret;
+
+	supported_hw = BIT(bin);
+	config.supported_hw = &supported_hw;
+	config.supported_hw_count = 1;
+
+	ret = dev_pm_opp_set_config(cpu_dev, &config);
+	if (ret < 0)
+		return ret;
+
+	info->opp_token = ret;
+
+	return 0;
+}
+
 static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 {
 	struct device *cpu_dev;
@@ -417,7 +453,10 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 		goto out_free_mux_clock;
 	}
 
-	info->proc_reg = regulator_get_optional(cpu_dev, "proc");
+	/* "cpu"/"mem" are the current supply names; "proc"/"sram" the old ones. */
+	info->proc_reg = regulator_get_optional(cpu_dev, "cpu");
+	if (PTR_ERR(info->proc_reg) == -ENODEV)
+		info->proc_reg = regulator_get_optional(cpu_dev, "proc");
 	if (IS_ERR(info->proc_reg)) {
 		ret = PTR_ERR(info->proc_reg);
 		dev_err_probe(cpu_dev, ret,
@@ -432,7 +471,9 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 	}
 
 	/* Both presence and absence of sram regulator are valid cases. */
-	info->sram_reg = regulator_get_optional(cpu_dev, "sram");
+	info->sram_reg = regulator_get_optional(cpu_dev, "mem");
+	if (PTR_ERR(info->sram_reg) == -ENODEV)
+		info->sram_reg = regulator_get_optional(cpu_dev, "sram");
 	if (IS_ERR(info->sram_reg)) {
 		ret = PTR_ERR(info->sram_reg);
 		if (ret == -EPROBE_DEFER) {
@@ -458,10 +499,17 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 		goto out_disable_sram_reg;
 	}
 
+	ret = mtk_cpu_opp_set_supported_hw(info);
+	if (ret) {
+		dev_err_probe(cpu_dev, ret,
+			      "cpu%d: failed to set supported hw\n", cpu);
+		goto out_disable_sram_reg;
+	}
+
 	ret = dev_pm_opp_of_cpumask_add_table(&info->cpus);
 	if (ret) {
 		dev_err_probe(cpu_dev, ret, "cpu%d: no OPP table\n", cpu);
-		goto out_disable_sram_reg;
+		goto out_clear_opp_hw;
 	}
 
 	ret = clk_prepare_enable(info->cpu_clk);
@@ -533,6 +581,9 @@ out_disable_mux_clock:
 out_free_opp_table:
 	dev_pm_opp_of_cpumask_remove_table(&info->cpus);
 
+out_clear_opp_hw:
+	dev_pm_opp_clear_config(info->opp_token);
+
 out_disable_sram_reg:
 	if (info->sram_reg)
 		regulator_disable(info->sram_reg);
@@ -573,6 +624,7 @@ static void mtk_cpu_dvfs_info_release(struct mtk_cpu_dvfs_info *info)
 	clk_disable_unprepare(info->inter_clk);
 	clk_put(info->inter_clk);
 	dev_pm_opp_of_cpumask_remove_table(&info->cpus);
+	dev_pm_opp_clear_config(info->opp_token);
 	dev_pm_opp_unregister_notifier(info->cpu_dev, &info->opp_nb);
 	if (info->soc_data->ccifreq_supported)
 		put_device(info->cci_dev);
@@ -639,8 +691,21 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 				     "failed to get mtk cpufreq platform data\n");
 
 	for_each_present_cpu(cpu) {
+		struct device *cpu_dev;
+
 		info = mtk_cpu_dvfs_info_lookup(cpu);
 		if (info)
+			continue;
+
+		/*
+		 * Skip CPUs that have no OPP table, such as clusters not yet
+		 * supported for DVFS (the MT6797 Cortex-A72 cluster in stage 1).
+		 * Otherwise raising nr_cpus would make this driver fail probe
+		 * and silently drop DVFS for the clusters that do work.
+		 */
+		cpu_dev = get_cpu_device(cpu);
+		if (cpu_dev &&
+		    !of_property_present(cpu_dev->of_node, "operating-points-v2"))
 			continue;
 
 		info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
@@ -688,6 +753,15 @@ static const struct mtk_cpufreq_platform_data mt2701_platform_data = {
 	.proc_max_volt = 1150000,
 	.sram_min_volt = 0,
 	.sram_max_volt = 1150000,
+	.ccifreq_supported = false,
+};
+
+static const struct mtk_cpufreq_platform_data mt6797_platform_data = {
+	.min_volt_shift = 100000,
+	.max_volt_shift = 300000,
+	.proc_max_volt = 1200000,
+	.sram_min_volt = 1000000,
+	.sram_max_volt = 1200000,
 	.ccifreq_supported = false,
 };
 
@@ -747,6 +821,7 @@ static const struct mtk_cpufreq_platform_data mt8516_platform_data = {
 static const struct of_device_id mtk_cpufreq_machines[] __initconst __maybe_unused = {
 	{ .compatible = "mediatek,mt2701", .data = &mt2701_platform_data },
 	{ .compatible = "mediatek,mt2712", .data = &mt2701_platform_data },
+	{ .compatible = "mediatek,mt6797", .data = &mt6797_platform_data },
 	{ .compatible = "mediatek,mt7622", .data = &mt7622_platform_data },
 	{ .compatible = "mediatek,mt7623", .data = &mt7623_platform_data },
 	{ .compatible = "mediatek,mt7988a", .data = &mt7988_platform_data },
