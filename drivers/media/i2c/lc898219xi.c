@@ -19,7 +19,7 @@
 #include <media/v4l2-event.h>
 
 #define LC898219XI_NAME "lc898219xi"
-/* Actuator has 11 bit resolution */
+/* Actuator has 12 bit resolution */
 #define LC898219XI_MAX_FOCUS_POS (4096 - 1)
 #define LC898219XI_MIN_FOCUS_POS 0
 #define LC898219XI_FOCUS_STEPS 1
@@ -34,8 +34,13 @@ static const char *const lc898219xi_supply_names[] = {
 struct lc898219xi {
 	struct regulator_bulk_data supplies[ARRAY_SIZE(lc898219xi_supply_names)];
 	struct v4l2_ctrl_handler ctrls;
+	struct v4l2_ctrl *focus;
 	struct v4l2_subdev sd;
 	struct regmap *regmap;
+	/* Only used by probe, remove and the runtime PM callbacks. */
+	bool supplies_on;
+	/* Protected by the control handler lock. */
+	bool powered;
 };
 
 static inline struct lc898219xi *sd_to_lc898219xi(struct v4l2_subdev *subdev)
@@ -48,10 +53,11 @@ static int lc898219xi_set_dac(struct lc898219xi *lc898219xi, u16 val)
 	struct i2c_client *client = v4l2_get_subdevdata(&lc898219xi->sd);
 	int ret;
 
-	/* Value ranges from -2047 (max focus) to 2048 in hardware. */
-	s16 actuator_val = ((s16)val - 2048) * -1;
-
-	/* The coil expects a two's-complement 12-bit signed value. */
+	/*
+	 * The control's 0..4095 maps one to one onto the 12-bit
+	 * two's-complement target position, 2047 down to -2048.
+	 */
+	s16 actuator_val = 2047 - val;
 	u16 actuator_val_s12 = actuator_val & LC898219XI_MAX_FOCUS_POS;
 
 	ret = cci_write(lc898219xi->regmap, LC898219XI_DAC_ADDR,
@@ -102,7 +108,10 @@ static int lc898219xi_wake(struct i2c_client *client)
 static int lc898219xi_power_on(struct lc898219xi *lc898219xi)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&lc898219xi->sd);
-	int attempt, ret;
+	int ret;
+
+	if (lc898219xi->supplies_on)
+		return 0;
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(lc898219xi_supply_names),
 				    lc898219xi->supplies);
@@ -112,7 +121,16 @@ static int lc898219xi_power_on(struct lc898219xi *lc898219xi)
 		return ret;
 	}
 
+	lc898219xi->supplies_on = true;
+
 	usleep_range(8000, 10000);
+
+	return 0;
+}
+
+static int lc898219xi_wake_retry(struct i2c_client *client)
+{
+	int attempt, ret;
 
 	/*
 	 * Early in boot the camera rails are still ramping and the first wake
@@ -127,23 +145,51 @@ static int lc898219xi_power_on(struct lc898219xi *lc898219xi)
 		usleep_range(10000, 12000);
 	}
 
-	dev_err(&client->dev, "wake up failed: %d\n", ret);
-	regulator_bulk_disable(ARRAY_SIZE(lc898219xi_supply_names),
-			       lc898219xi->supplies);
 	return ret;
 }
 
 static int lc898219xi_power_off(struct lc898219xi *lc898219xi)
 {
-	regulator_bulk_disable(ARRAY_SIZE(lc898219xi_supply_names),
-			       lc898219xi->supplies);
+	int ret;
+
+	if (!lc898219xi->supplies_on)
+		return 0;
+
+	/* A failed disable leaves the supplies enabled; the next call retries. */
+	ret = regulator_bulk_disable(ARRAY_SIZE(lc898219xi_supply_names),
+				     lc898219xi->supplies);
+	if (ret)
+		return ret;
+
+	lc898219xi->supplies_on = false;
 	return 0;
+}
+
+/*
+ * Program the cached focus position into a lens controller that has just been
+ * powered and woken, and let s_ctrl reach it from now on.
+ */
+static int lc898219xi_apply_focus(struct lc898219xi *lc898219xi)
+{
+	int ret;
+
+	v4l2_ctrl_lock(lc898219xi->focus);
+	ret = lc898219xi_set_dac(lc898219xi, lc898219xi->focus->cur.val);
+	lc898219xi->powered = !ret;
+	v4l2_ctrl_unlock(lc898219xi->focus);
+
+	return ret;
 }
 
 static int __maybe_unused lc898219xi_runtime_suspend(struct device *dev)
 {
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct lc898219xi *lc898219xi = sd_to_lc898219xi(sd);
+
+	/* From here on s_ctrl only caches the focus position. */
+	v4l2_ctrl_lock(lc898219xi->focus);
+	lc898219xi->powered = false;
+	v4l2_ctrl_unlock(lc898219xi->focus);
 
 	lc898219xi_power_off(lc898219xi);
 	return 0;
@@ -161,13 +207,34 @@ static int __maybe_unused lc898219xi_runtime_resume(struct device *dev)
 		return ret;
 	}
 
-	return ret;
+	/*
+	 * The sensor is a runtime PM consumer of this device and works without
+	 * the lens, so do not fail its resume over a lens that does not wake.
+	 * Power the lens off again instead; the next resume retries.
+	 */
+	ret = lc898219xi_wake_retry(to_i2c_client(dev));
+	if (ret)
+		dev_err_ratelimited(dev, "wake up failed: %d\n", ret);
+	else
+		ret = lc898219xi_apply_focus(lc898219xi);
+	if (ret)
+		lc898219xi_power_off(lc898219xi);
+
+	return 0;
 }
 
 static int lc898219xi_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct lc898219xi *lc898219xi = container_of(ctrl->handler,
 						     struct lc898219xi, ctrls);
+
+	/*
+	 * The lens is powered together with the sensor (see
+	 * V4L2_SUBDEV_FL_PM_WITH_SENSOR). While it is off, the control
+	 * framework caches the value and it is written at the next power up.
+	 */
+	if (!lc898219xi->powered)
+		return 0;
 
 	if (ctrl->id == V4L2_CID_FOCUS_ABSOLUTE)
 		return lc898219xi_set_dac(lc898219xi, ctrl->val);
@@ -177,37 +244,6 @@ static int lc898219xi_set_ctrl(struct v4l2_ctrl *ctrl)
 
 static const struct v4l2_ctrl_ops lc898219xi_ctrl_ops = {
 	.s_ctrl = lc898219xi_set_ctrl,
-};
-
-static int lc898219xi_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
-{
-	struct lc898219xi *lc898219xi = sd_to_lc898219xi(sd);
-	int ret;
-
-	/* Power first: applying the controls talks to the coil over i2c. */
-	ret = pm_runtime_resume_and_get(sd->dev);
-	if (ret)
-		return ret;
-
-	ret = v4l2_ctrl_handler_setup(&lc898219xi->ctrls);
-	if (ret) {
-		pm_runtime_put_autosuspend(sd->dev);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int lc898219xi_close(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
-{
-	pm_runtime_put_autosuspend(sd->dev);
-
-	return 0;
-}
-
-static const struct v4l2_subdev_internal_ops lc898219xi_int_ops = {
-	.open = lc898219xi_open,
-	.close = lc898219xi_close,
 };
 
 static const struct v4l2_subdev_core_ops lc898219xi_core_ops = {
@@ -225,9 +261,10 @@ static int lc898219xi_init_controls(struct lc898219xi *lc898219xi)
 
 	v4l2_ctrl_handler_init(hdl, 1);
 
-	v4l2_ctrl_new_std(hdl, ops, V4L2_CID_FOCUS_ABSOLUTE,
-			  LC898219XI_MIN_FOCUS_POS, LC898219XI_MAX_FOCUS_POS,
-			  LC898219XI_FOCUS_STEPS, 0);
+	lc898219xi->focus = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_FOCUS_ABSOLUTE,
+					      LC898219XI_MIN_FOCUS_POS,
+					      LC898219XI_MAX_FOCUS_POS,
+					      LC898219XI_FOCUS_STEPS, 0);
 
 	if (hdl->error) {
 		int ret = hdl->error;
@@ -270,13 +307,20 @@ static int lc898219xi_probe(struct i2c_client *client)
 
 	ret = lc898219xi_power_on(lc898219xi);
 	if (ret)
+		return ret;
+
+	ret = lc898219xi_wake_retry(client);
+	if (ret) {
 		/*
 		 * Retry rather than fail for good: a coil that is not awake yet
 		 * would otherwise keep the sensor unregistered for the whole
 		 * uptime, since lens-focus makes the sensor wait for us.
 		 */
-		return dev_err_probe(dev, ret == -ETIMEDOUT ? -EPROBE_DEFER : ret,
-				     "power on failed\n");
+		if (ret == -ETIMEDOUT)
+			ret = -EPROBE_DEFER;
+		dev_err_probe(dev, ret, "wake up failed\n");
+		goto err_power_off;
+	}
 
 	ret = lc898219xi_init_controls(lc898219xi);
 	if (ret) {
@@ -284,9 +328,13 @@ static int lc898219xi_probe(struct i2c_client *client)
 		goto err_power_off;
 	}
 
+	ret = lc898219xi_apply_focus(lc898219xi);
+	if (ret)
+		goto err_free_handler;
+
 	/* Initialize subdev */
-	lc898219xi->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
-	lc898219xi->sd.internal_ops = &lc898219xi_int_ops;
+	lc898219xi->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
+				V4L2_SUBDEV_FL_PM_WITH_SENSOR;
 
 	ret = media_entity_pads_init(&lc898219xi->sd.entity, 0, NULL);
 	if (ret < 0) {
@@ -339,17 +387,19 @@ static void lc898219xi_remove(struct i2c_client *client)
 	struct device *dev = &client->dev;
 
 	v4l2_async_unregister_subdev(&lc898219xi->sd);
-	v4l2_ctrl_handler_free(&lc898219xi->ctrls);
 	media_entity_cleanup(&lc898219xi->sd.entity);
 
 	/*
-	 * Disable runtime PM. In case runtime PM is disabled in the kernel,
-	 * make sure to turn power off manually.
+	 * Disable runtime PM and turn the power off manually. This covers a
+	 * kernel without runtime PM and supplies that an earlier suspend
+	 * could not disable.
 	 */
 	pm_runtime_disable(dev);
-	if (!pm_runtime_status_suspended(dev))
-		lc898219xi_power_off(lc898219xi);
+	lc898219xi_runtime_suspend(dev);
 	pm_runtime_set_suspended(dev);
+
+	/* The runtime PM callbacks use the focus control, so free it only now. */
+	v4l2_ctrl_handler_free(&lc898219xi->ctrls);
 }
 
 static const struct of_device_id lc898219xi_of_table[] = {

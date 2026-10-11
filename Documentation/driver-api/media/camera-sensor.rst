@@ -120,6 +120,36 @@ The function returns a non-zero value if it succeeded getting the power count or
 runtime PM was disabled, in either of which cases the driver may proceed to
 access the device.
 
+Lens controllers
+~~~~~~~~~~~~~~~~
+
+Lens controllers, such as voice coil motor drivers, are separate devices with a
+sub-device of their own, ancillary to the sensor. Their drivers have
+traditionally powered the device on in the sub-device ``open()`` handler and
+off in ``close()``. The device then stays powered for as long as an application
+keeps the sub-device node open, whether or not the camera is in use, and
+long-running camera services generally do keep it open.
+
+A lens controller driver may instead set the ``V4L2_SUBDEV_FL_PM_WITH_SENSOR``
+sub-device flag. When the lens controller is bound to its sensor, the V4L2
+async framework then makes the sensor's device a runtime PM consumer of the
+lens controller's device: the lens controller is resumed before the sensor is,
+and may be suspended once the sensor has been. Such a driver shall enable
+runtime PM before registering its sub-device, shall not take runtime PM
+references in its ``open()`` and ``close()`` handlers, and shall restore the
+lens position in its ``runtime_resume`` callback. The sensor driver needs to
+use runtime PM as described above.
+
+A failure to runtime resume the lens controller fails the sensor's resume, so
+the lens controller's ``runtime_resume`` callback should not fail over a
+condition the sensor can work without. Controls set while the lens controller is
+suspended have to be cached by the driver and applied on resume, so a lens
+position set then takes effect when the sensor is next powered. If the sensor is
+being resumed while the link is created, the link takes effect from the sensor's
+next runtime resume. The flag cannot be used on a platform that makes the lens
+controller a runtime PM consumer of the sensor, as ipu-bridge does: the two
+links would form a dependency loop and binding the sub-device fails.
+
 Rotation, orientation and flipping
 ----------------------------------
 
