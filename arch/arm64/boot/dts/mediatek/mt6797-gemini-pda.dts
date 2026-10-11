@@ -1094,6 +1094,7 @@
 		avdd-supply = <&reg_lcd_bias_outp>;
 		avee-supply = <&reg_lcd_bias_outn>;
 		backlight = <&backlight>;
+		rotation = <270>;
 
 		port {
 			panel_in: endpoint {
