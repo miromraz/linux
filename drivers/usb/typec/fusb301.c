@@ -11,6 +11,7 @@
 #include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/workqueue.h>
 #include <linux/usb/role.h>
 #include <linux/usb/typec.h>
 
@@ -51,6 +52,14 @@
 #define FUSB301_TYPE_SINK	BIT(4)
 #define FUSB301_TYPE_SOURCE	BIT(3)
 
+/*
+ * Poll period used when the controller's interrupt line is not routed. A
+ * sink only needs to notice a charger within human reaction time, and VBUS
+ * itself is handled by the charger independently of the Type-C class, so a
+ * relaxed period keeps the wakeup rate low.
+ */
+#define FUSB301_POLL_INTERVAL_MS	500
+
 struct fusb301 {
 	struct device *dev;
 	struct regmap *regmap;
@@ -62,6 +71,7 @@ struct fusb301 {
 	struct regulator *vbus;
 	bool vbus_on;
 	int irq;
+	struct delayed_work poll_work;
 	enum typec_pwr_opmode pwr_opmode;
 	unsigned int partner_type;
 };
@@ -274,6 +284,25 @@ static irqreturn_t fusb301_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Boards that do not route the active-low interrupt poll the controller:
+ * fusb301_update_status() only touches the port state on an actual change,
+ * so it is safe to run it periodically.
+ */
+static void fusb301_poll_work(struct work_struct *work)
+{
+	struct fusb301 *fusb = container_of(work, struct fusb301, poll_work.work);
+	int ret;
+
+	ret = fusb301_update_status(fusb);
+	if (ret)
+		dev_warn_ratelimited(fusb->dev,
+				     "failed to update Type-C status: %d\n", ret);
+
+	queue_delayed_work(system_freezable_power_efficient_wq, &fusb->poll_work,
+			   msecs_to_jiffies(FUSB301_POLL_INTERVAL_MS));
+}
+
 static const struct regmap_config fusb301_regmap_config = {
 	.reg_bits = 8,
 	.val_bits = 8,
@@ -282,6 +311,7 @@ static const struct regmap_config fusb301_regmap_config = {
 
 static int fusb301_hw_init(struct fusb301 *fusb)
 {
+	unsigned int control;
 	int ret;
 
 	ret = regmap_write(fusb->regmap, FUSB301_REG_MODE,
@@ -289,10 +319,18 @@ static int fusb301_hw_init(struct fusb301 *fusb)
 	if (ret)
 		return ret;
 
+	/*
+	 * In polling mode (no interrupt line) keep the global interrupt mask
+	 * set so the INT pin is never asserted; otherwise an unrouted or
+	 * shared INT line would be left stuck low with nothing to clear it.
+	 */
+	control = fusb301_host_current(fusb->pwr_opmode);
+	if (fusb->irq <= 0)
+		control |= FUSB301_CONTROL_INT_MASK;
+
 	ret = regmap_update_bits(fusb->regmap, FUSB301_REG_CONTROL,
 				 FUSB301_CONTROL_HOST_CUR |
-				 FUSB301_CONTROL_INT_MASK,
-				 fusb301_host_current(fusb->pwr_opmode));
+				 FUSB301_CONTROL_INT_MASK, control);
 	if (ret)
 		return ret;
 
@@ -344,11 +382,6 @@ static int fusb301_probe(struct i2c_client *client)
 	}
 	fusb->pwr_opmode = ret;
 	fusb->irq = client->irq;
-	if (fusb->irq <= 0) {
-		ret = -EINVAL;
-		dev_err_probe(dev, ret, "missing active-low interrupt\n");
-		goto err_put_connector;
-	}
 
 	fusb->vbus = devm_of_regulator_get_optional(dev,
 						    to_of_node(fusb->connector),
@@ -395,10 +428,19 @@ static int fusb301_probe(struct i2c_client *client)
 
 	i2c_set_clientdata(client, fusb);
 
-	ret = request_threaded_irq(fusb->irq, NULL, fusb301_irq,
-				   IRQF_ONESHOT, dev_name(dev), fusb);
-	if (ret)
-		goto err_unregister_port;
+	if (fusb->irq > 0) {
+		ret = request_threaded_irq(fusb->irq, NULL, fusb301_irq,
+					   IRQF_ONESHOT, dev_name(dev), fusb);
+		if (ret)
+			goto err_unregister_port;
+	} else {
+		dev_info(dev, "no interrupt, polling every %u ms\n",
+			 FUSB301_POLL_INTERVAL_MS);
+		INIT_DELAYED_WORK(&fusb->poll_work, fusb301_poll_work);
+		queue_delayed_work(system_freezable_power_efficient_wq,
+				   &fusb->poll_work,
+				   msecs_to_jiffies(FUSB301_POLL_INTERVAL_MS));
+	}
 
 	fwnode_handle_put(fusb->connector);
 	return 0;
@@ -419,7 +461,10 @@ static void fusb301_remove(struct i2c_client *client)
 {
 	struct fusb301 *fusb = i2c_get_clientdata(client);
 
-	free_irq(fusb->irq, fusb);
+	if (fusb->irq > 0)
+		free_irq(fusb->irq, fusb);
+	else
+		cancel_delayed_work_sync(&fusb->poll_work);
 	fusb301_vbus_set(fusb, false);
 	fusb301_unregister_partner(fusb);
 	typec_unregister_port(fusb->port);
@@ -431,6 +476,15 @@ static void fusb301_shutdown(struct i2c_client *client)
 {
 	struct fusb301 *fusb = i2c_get_clientdata(client);
 
+	/*
+	 * Stop event processing before turning VBUS off, otherwise the poll
+	 * work could run once more, see a still-attached sink and re-enable
+	 * the VBUS supply (and keep issuing I2C transfers) after shutdown.
+	 */
+	if (fusb->irq > 0)
+		disable_irq(fusb->irq);
+	else
+		cancel_delayed_work_sync(&fusb->poll_work);
 	fusb301_vbus_set(fusb, false);
 }
 
