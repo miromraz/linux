@@ -373,6 +373,17 @@ config COMMON_CLK_MT6797_VENCSYS
 	help
 	  This driver supports MediaTek MT6797 vencsys clocks.
 
+config COMMON_CLK_MT6797_MCU
+	tristate "Clock driver for MediaTek MT6797 MCUMIXED"
+	depends on COMMON_CLK_MT6797
+	default COMMON_CLK_MT6797
+	help
+	  This driver supports the MediaTek MT6797 MCUMIXED block, which
+	  contains the per-cluster CPU PLLs (the ARMPLLs for the little and
+	  big Cortex-A53 clusters and the CCI PLL) and the muxes that select
+	  each cluster's clock source. These clocks are required for CPU
+	  frequency scaling of the Cortex-A53 clusters.
+
 config COMMON_CLK_MT7622
 	tristate "Clock driver for MediaTek MT7622"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
