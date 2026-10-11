@@ -415,6 +415,39 @@
 	status = "okay";
 };
 
+/* All eight Cortex-A53 cores are powered by the DA9214 buck A rail. */
+&cpu0 {
+	cpu-supply = <&da9214_bucka>;
+};
+
+&cpu1 {
+	cpu-supply = <&da9214_bucka>;
+};
+
+&cpu2 {
+	cpu-supply = <&da9214_bucka>;
+};
+
+&cpu3 {
+	cpu-supply = <&da9214_bucka>;
+};
+
+&cpu4 {
+	cpu-supply = <&da9214_bucka>;
+};
+
+&cpu5 {
+	cpu-supply = <&da9214_bucka>;
+};
+
+&cpu6 {
+	cpu-supply = <&da9214_bucka>;
+};
+
+&cpu7 {
+	cpu-supply = <&da9214_bucka>;
+};
+
 &i2c6 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c6_pins_a>;
@@ -425,16 +458,47 @@
 		reg = <0x68>;
 
 		regulators {
+			/*
+			 * Buck A ("VPROC1") is the shared Vproc rail for both
+			 * Cortex-A53 clusters and the CCI, with VBUCKA_A as the
+			 * active vsel register. The minimum is the voltage the
+			 * CCI needs at its bootloader frequency (~630 MHz -> the
+			 * 676 MHz / 1.04 V SB OPP), so the rail is not pulled
+			 * below what the CCI, which is not yet a DVFS consumer,
+			 * requires when the clusters scale down. The maximum
+			 * matches the 1.09 V cap of the CPU OPP tables, keeping
+			 * Vproc below the fixed 1.10 V SRAM LDO. The bootloader
+			 * leaves this rail at 1.00 V while the big cluster runs
+			 * 1274 MHz and the CCI 630 MHz, which is under-volted for
+			 * the SB bin; because both the minimum and maximum are
+			 * set, the regulator core raises the rail to the 1.04 V
+			 * floor when it registers, before any frequency change,
+			 * and never below. The 1.04 V floor is safe for the
+			 * FY/M/SB bins; an L-bin part needs 1.09 V for the CCI
+			 * and must be excluded by the efuse pre-flight until
+			 * stage 2 adds CCI devfreq and removes the floor. The
+			 * ramp delay is set so the regulator core waits at least
+			 * the vendor's 25 us settle (MIN_PMIC_SETTLE_TIME) across
+			 * the 50 mV floor-to-cap span (50000 uV / 25 us =
+			 * 2000 uV/us); regulator-settling-time-up-us is not used
+			 * because the core ignores it once a ramp delay is set.
+			 */
 			da9214_bucka: BUCKA {
 				regulator-name = "vproc-little";
+				regulator-min-microvolt = <1040000>;
+				regulator-max-microvolt = <1090000>;
+				regulator-ramp-delay = <2000>;
 				regulator-always-on;
 				regulator-boot-on;
 			};
 
+			/*
+			 * Buck B ("VPROC2") powers the Cortex-A72 cluster,
+			 * which is off at boot and not brought up in stage 1.
+			 * It must not be forced always-on.
+			 */
 			da9214_buckb: BUCKB {
 				regulator-name = "vproc-big";
-				regulator-always-on;
-				regulator-boot-on;
 			};
 		};
 	};
