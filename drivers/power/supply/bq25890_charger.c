@@ -785,41 +785,35 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 }
 
 /*
- * REG0B VBUS_STAT as reported by the BQ25896's own USB D+/D- detection.
- * Other chips in the family encode these bits differently.
+ * REG0B VBUS_STAT on the BQ25896. Unlike the BQ25890/BQ25895, which run USB
+ * D+/D- BC1.2 detection and report an eight-value type, the BQ25896 has no
+ * D+/D- connection: it samples the PSEL pin at VBUS insertion (high = USB
+ * host, low = adapter) and reports only these codes (datasheet SLUSC76,
+ * Table 17).
  */
 enum bq25896_vbus_status {
-	VBUS_STAT_NO_INPUT,
-	VBUS_STAT_USB_SDP,
-	VBUS_STAT_USB_CDP,
-	VBUS_STAT_USB_DCP,
-	VBUS_STAT_HV_DCP,
-	VBUS_STAT_UNKNOWN_ADAPTER,
-	VBUS_STAT_NONSTD_ADAPTER,
-	VBUS_STAT_OTG,
+	BQ25896_VBUS_NO_INPUT	= 0,
+	BQ25896_VBUS_USB_SDP	= 1,	/* PSEL high: USB host, IINLIM 500 mA */
+	BQ25896_VBUS_ADAPTER	= 2,	/* PSEL low: adapter, IINLIM 3.25 A */
+	BQ25896_VBUS_OTG	= 7,
 };
 
 /*
- * On boards without an external charger-type supplier the BQ25896 runs its own
- * D+/D- detection (AUTO_DPDM_EN) and reports the result in VBUS_STAT, but it
- * leaves the input current limit at the 500 mA power-on default. Program the
- * limit from the detected source, mirroring the vendor kernel's per-type values
- * (SDP 500 mA, CDP 650 mA, DCP up to the 3.25 A chip maximum, everything else
- * the safe 500 mA default).
+ * The BQ25896 sets REG00 IINLIM itself from the PSEL pin at every VBUS
+ * insertion (datasheet 9.2.3.3): PSEL high -> 500 mA, PSEL low -> 3.25 A.
+ * Re-apply that limit from the reported VBUS_STAT. With linux,skip-reset the
+ * driver inherits the bootloader's IINLIM, so this resyncs a stale value; on a
+ * normal plug event it just rewrites what the chip already programmed.
  */
 static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
 {
 	int iinlim_ua;
 
 	switch (bq->state.vbus_status) {
-	case VBUS_STAT_USB_CDP:
-		iinlim_ua = 650000;
-		break;
-	case VBUS_STAT_USB_DCP:
-	case VBUS_STAT_HV_DCP:
+	case BQ25896_VBUS_ADAPTER:
 		iinlim_ua = 3250000;
 		break;
-	case VBUS_STAT_USB_SDP:
+	case BQ25896_VBUS_USB_SDP:
 	default:
 		iinlim_ua = 500000;
 		break;
