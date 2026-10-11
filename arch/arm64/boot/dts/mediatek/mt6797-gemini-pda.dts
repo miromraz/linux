@@ -530,6 +530,32 @@
 		interrupts = <11 IRQ_TYPE_EDGE_FALLING>;
 		proximity-near-level = <50>;
 	};
+
+	/*
+	 * ON Semi FUSB301 autonomous Type-C controller for the left USB-C
+	 * port (the vendor board file names this I2C1 part FUSB301; both
+	 * variants report the same device ID). The vendor firmware programs it
+	 * Source-only (MODES = 0x01, fusb301/usb_typec.c InitializeFUSB301()),
+	 * so a wall charger that presents Rp never detects a sink. Describe it
+	 * as a sink: the controller then presents Rd so a Type-C source can
+	 * detect a sink and enable VBUS, which the BQ25896 on I2C0 charges
+	 * from. Its interrupt line is not routed on this port, so the driver
+	 * polls. The port is sink-only here; DRP using the BQ25896 boost
+	 * (usb-otg-vbus) as vbus-supply is left for later.
+	 */
+	typec@25 {
+		compatible = "onnn,fusb301";
+		reg = <0x25>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C left";
+			power-role = "sink";
+			data-role = "device";
+			typec-power-opmode = "default";
+			pd-disable;
+		};
+	};
 };
 
 &i2c4 {
@@ -779,8 +805,9 @@
 
 	/*
 	 * ON Semi FUSB301A autonomous Type-C controller for the right USB-C
-	 * port. Its active-low interrupt is wired to GPIO64/EINT3; the FUSB301A
-	 * on I2C1 has no usable interrupt line and is therefore not described.
+	 * port. Its active-low interrupt is wired to GPIO64/EINT3; the FUSB301
+	 * on I2C1 (left port) has no usable interrupt line and is driven by
+	 * polling, see &i2c1.
 	 */
 	fusb301: typec@25 {
 		compatible = "onnn,fusb301a", "onnn,fusb301";
