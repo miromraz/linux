@@ -772,8 +772,7 @@
 	};
 
 	i2c6: i2c@1100e000 {
-		compatible = "mediatek,mt6797-i2c",
-			     "mediatek,mt6577-i2c";
+		compatible = "mediatek,mt6797-i2c-appm";
 		reg = <0 0x1100e000 0 0x1000>,
 		      <0 0x11000500 0 0x80>;
 		interrupts = <GIC_SPI 88 IRQ_TYPE_LEVEL_LOW>;
