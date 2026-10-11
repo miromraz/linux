@@ -503,6 +503,14 @@
 		};
 	};
 
+	mcumixed: clock-controller@1001a000 {
+		compatible = "mediatek,mt6797-mcumixed";
+		reg = <0 0x1001a000 0 0x1000>;
+		clocks = <&clk26m>;
+		clock-names = "clk26m";
+		#clock-cells = <1>;
+	};
+
 	afe: audio-controller@11220000 {
 		compatible = "mediatek,mt6797-audio";
 		reg = <0 0x11220000 0 0x1000>;
