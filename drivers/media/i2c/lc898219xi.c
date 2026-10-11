@@ -5,6 +5,7 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
+#include <linux/minmax.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -48,8 +49,12 @@ static int lc898219xi_set_dac(struct lc898219xi *lc898219xi, u16 val)
 	struct i2c_client *client = v4l2_get_subdevdata(&lc898219xi->sd);
 	int ret;
 
-	/* Value ranges from -2047 (max focus) to 2048 in hardware. */
-	s16 actuator_val = ((s16)val - 2048) * -1;
+	/*
+	 * Value ranges from -2047 (max focus) to 2047 in hardware. +2048 does
+	 * not fit the 12-bit value below and would wrap to -2048, the opposite
+	 * end of travel.
+	 */
+	s16 actuator_val = clamp(((s16)val - 2048) * -1, -2048, 2047);
 
 	/* The coil expects a two's-complement 12-bit signed value. */
 	u16 actuator_val_s12 = actuator_val & LC898219XI_MAX_FOCUS_POS;
