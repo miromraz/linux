@@ -458,6 +458,23 @@ enum bq25896_vbus_status {
 	BQ25896_VBUS_OTG	= 7,
 };
 
+/*
+ * Map the BQ25896 PSEL-based VBUS_STAT to the power-supply USB type it reports.
+ * PSEL low (adapter) is a dedicated charging port, which is DCP in the
+ * power_supply vocabulary; the BQ25896 cannot tell a CDP from an SDP.
+ */
+static int bq25896_usb_type(u8 vbus_status)
+{
+	switch (vbus_status) {
+	case BQ25896_VBUS_USB_SDP:
+		return POWER_SUPPLY_USB_TYPE_SDP;
+	case BQ25896_VBUS_ADAPTER:
+		return POWER_SUPPLY_USB_TYPE_DCP;
+	default:
+		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
+	}
+}
+
 static bool bq25890_is_adc_property(enum power_supply_property psp)
 {
 	switch (psp) {
@@ -554,6 +571,19 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 
 	case POWER_SUPPLY_PROP_ONLINE:
 		val->intval = state.online && !state.hiz;
+		break;
+
+	case POWER_SUPPLY_PROP_USB_TYPE:
+		/*
+		 * Only the PSEL-based BQ25896 is decoded here. The BQ25890 and
+		 * BQ25895 report an eight-value BC1.2 type whose VBUS_STAT
+		 * encoding differs, and the BQ25892 takes the type from an
+		 * external supplier; those are left UNKNOWN for now.
+		 */
+		if (bq->chip_version == BQ25896)
+			val->intval = bq25896_usb_type(state.vbus_status);
+		else
+			val->intval = POWER_SUPPLY_USB_TYPE_UNKNOWN;
 		break;
 
 	case POWER_SUPPLY_PROP_HEALTH:
@@ -1068,6 +1098,7 @@ static const enum power_supply_property bq25890_power_supply_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
 	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_USB_TYPE,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
@@ -1087,6 +1118,9 @@ static char *bq25890_charger_supplied_to[] = {
 
 static const struct power_supply_desc bq25890_power_supply_desc = {
 	.type = POWER_SUPPLY_TYPE_USB,
+	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
 	.properties = bq25890_power_supply_props,
 	.num_properties = ARRAY_SIZE(bq25890_power_supply_props),
 	.get_property = bq25890_power_supply_get_property,
