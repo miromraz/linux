@@ -544,9 +544,10 @@
 	 * GPIO85/EINT8, reset (active-low RESX) on GPIO68. As a TDDI controller
 	 * it shares the panel's always-on rails, which are not switchable from
 	 * this node, so no supply is described (the dummy regulators cover it).
-	 * The vendor panel is mounted rotated, so express its orientation with
-	 * the standard touchscreen transform properties.
-	 * The orientation transform is not yet verified on hardware.
+	 * The controller's raw frame is 180 degrees rotated from the panel's
+	 * scan-out, so invert both axes to report in the panel's native
+	 * portrait frame. The display's mounted rotation is described on the
+	 * panel node, not here.
 	 */
 	touchscreen@1 {
 		compatible = "novatek,nt36772-ts";
@@ -554,8 +555,8 @@
 		interrupt-parent = <&pio>;
 		interrupts = <8 IRQ_TYPE_EDGE_FALLING>;
 		reset-gpios = <&pio 68 GPIO_ACTIVE_LOW>;
-		touchscreen-swapped-x-y;
 		touchscreen-inverted-x;
+		touchscreen-inverted-y;
 		panel = <&panel>;
 	};
 };
