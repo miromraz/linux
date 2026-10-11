@@ -840,9 +840,12 @@
 	 * does not reprogram them. The 1.3 A boost current limit matches the
 	 * value the vendor firmware writes.
 	 *
-	 * The vendor kernel never resets the charger. A register reset makes
-	 * the BQ25896 re-run D+/D- detection on the left USB-C data lines,
-	 * which knocks an already enumerated MTU3 gadget off the host.
+	 * The vendor kernel never resets the charger, so use linux,skip-reset to
+	 * keep the bootloader's setup. The BQ25896 has no D+/D- connection; a
+	 * register reset (REG_RST) instead reloads every register to its default
+	 * - IINLIM back to 500 mA, EN_HIZ, the I2C watchdog and CONV_RATE - and
+	 * restarts the converter, which can glitch VBUS and disturb an already
+	 * enumerated MTU3 gadget.
 	 */
 	charger: charger@6b {
 		compatible = "ti,bq25896", "ti,bq25890";
