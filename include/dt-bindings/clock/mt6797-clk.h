@@ -294,4 +294,12 @@
 #define	CLK_VENC_3				4
 #define	CLK_VENC_NR				5
 
+/* MCU_SYS (MCUMIXED: per-cluster ARMPLLs and their clock muxes) */
+#define CLK_MCU_ARMPLL_LL			1
+#define CLK_MCU_ARMPLL_L			2
+#define CLK_MCU_CCIPLL				3
+#define CLK_MCU_ARMPLLDIV_LL			4
+#define CLK_MCU_ARMPLLDIV_L			5
+#define CLK_MCU_ARMPLLDIV_CCI			6
+
 #endif /* _DT_BINDINGS_CLK_MT6797_H */
