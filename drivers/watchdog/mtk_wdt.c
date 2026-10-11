@@ -84,6 +84,7 @@ struct mtk_wdt_data {
 	int toprgu_sw_rst_num;
 	bool has_swsysrst_en;
 	bool use_auto_restart;
+	bool no_pretimeout;
 	unsigned int restart_priority;
 };
 
@@ -101,6 +102,7 @@ static const struct mtk_wdt_data mt6795_data = {
 
 static const struct mtk_wdt_data mt6797_data = {
 	.use_auto_restart = true,
+	.no_pretimeout = true,
 	.restart_priority = 255,
 };
 
@@ -447,7 +449,18 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 		return PTR_ERR(mtk_wdt->wdt_base);
 
 	irq = platform_get_irq_optional(pdev, 0);
-	if (irq > 0) {
+	if (irq == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+
+	/*
+	 * The bark interrupt is only useful in dual (pretimeout) mode, where
+	 * the TOPRGU raises it at timeout / 2 and resets the SoC at timeout.
+	 * On some SoCs (e.g. MT6797) the bark is taken by the secure firmware
+	 * as an FIQ that halts every CPU instead of reaching the non-secure
+	 * GIC, so dual mode must not be used there even when an interrupt is
+	 * described - fall back to single mode with a plain reset.
+	 */
+	if (irq > 0 && !(wdt_data && wdt_data->no_pretimeout)) {
 		err = devm_request_irq(&pdev->dev, irq, mtk_wdt_isr, 0, "wdt_bark",
 				       &mtk_wdt->wdt_dev);
 		if (err)
@@ -456,9 +469,6 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 		mtk_wdt->wdt_dev.info = &mtk_wdt_pt_info;
 		mtk_wdt->wdt_dev.pretimeout = WDT_MAX_TIMEOUT / 2;
 	} else {
-		if (irq == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-
 		mtk_wdt->wdt_dev.info = &mtk_wdt_info;
 	}
 
