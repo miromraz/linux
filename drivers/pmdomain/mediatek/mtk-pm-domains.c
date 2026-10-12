@@ -901,9 +901,33 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	 * late_init time.
 	 */
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF)) {
-		if (scpsys_domain_is_on(pd))
-			dev_warn(scpsys->dev,
-				 "%pOF: A default off power domain has been ON\n", node);
+		if (scpsys_domain_is_on(pd)) {
+			/*
+			 * A default-off domain the bootloader or a warm reset
+			 * left powered. With MTK_SCPD_OFF_AT_BOOT, shut it down
+			 * now (well before the regulator late-cleanup) so its
+			 * unclaimed supplies can be cut safely; otherwise just
+			 * warn and leave it as genpd's unused pass found it.
+			 *
+			 * scpsys_power_off() disables the domain's clocks and
+			 * supply and dereferences pd->data, so the cap is only
+			 * valid for a non-HWV domain that has no clocks and no
+			 * domain-supply (nothing to unbalance). Guard against
+			 * misuse rather than crash or underflow.
+			 */
+			if (MTK_SCPD_CAPS(pd, MTK_SCPD_OFF_AT_BOOT) &&
+			    !WARN_ON(!pd->data || pd->num_clks ||
+				     pd->num_subsys_clks || pd->supply)) {
+				ret = scpsys_power_off(&pd->genpd);
+				if (ret)
+					dev_err(scpsys->dev,
+						"%pOF: failed to power off at boot: %d\n",
+						node, ret);
+			} else {
+				dev_warn(scpsys->dev,
+					 "%pOF: A default off power domain has been ON\n", node);
+			}
+		}
 	} else {
 		ret = pd->genpd.power_on(&pd->genpd);
 		if (ret < 0) {
