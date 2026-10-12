@@ -79,6 +79,19 @@ config MTK_SVS
 	  chip process corner, temperatures and other factors. Then DVFS
 	  driver could apply SVS bank voltage to PMIC/Buck.
 
+config MTK_MT6797_CPU_CL2
+	tristate "MediaTek MT6797 Cortex-A72 cluster power-on"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on HAVE_ARM_SMCCC
+	depends on REGULATOR && RESET_CONTROLLER
+	help
+	  Say yes here to power up the MediaTek MT6797 Cortex-A72 ("big")
+	  cluster before PSCI CPU_ON. The stock firmware does not perform the
+	  cluster power-up, so a pre-CPU_ON sequence (SPM, external-buck
+	  isolation, buck B, the iDVFS SRAM LDO and MP2 DCM) is run from a
+	  CPU-hotplug prepare callback. Without this the Cortex-A72 cores
+	  cannot be brought online.
+
 config MTK_SOCINFO
 	tristate "MediaTek SoC Information"
 	default y
