@@ -933,18 +933,44 @@
 };
 
 /*
- * Samsung's firmware cannot resume the Cortex-A76 Gold cores (CPU6/7) from the
- * deepest PSCI idle state, big-rail-power-down (big_cpu_sleep_1,
- * arm,psci-suspend-param 0x40000004): under load the core fails to exit the
- * power collapse, wedges so hard it does not even take a pseudo-NMI, and
- * triggers an rcu_preempt stall followed by a watchdog reset. The shallower
- * big-power-down (big_cpu_sleep_0) resumes reliably. Drop the rail-power-down
- * state from the Gold cores' idle set; the Silver cores are unaffected.
+ * Samsung's firmware only accepts a cluster power-off request (PSCI OSI) when
+ * every CPU in the cluster is in its deepest state, rail power-down
+ * (arm,psci-suspend-param 0x40000004); the vendor kernel never asks for it
+ * otherwise. With the two CPU states from sc7180.dtsi the genpd governor may
+ * power a CPU domain off in the shallower power-down (0x40000003) instead: the
+ * firmware then refuses the cluster request and the last CPU retries it
+ * thousands of times a second. Give every CPU power domain only its rail
+ * power-down state, so that a powered-off CPU is always at the level the
+ * firmware expects. The intermediate power-down state is not used.
  */
+&cpu_pd0 {
+	domain-idle-states = <&little_cpu_sleep_1>;
+};
+
+&cpu_pd1 {
+	domain-idle-states = <&little_cpu_sleep_1>;
+};
+
+&cpu_pd2 {
+	domain-idle-states = <&little_cpu_sleep_1>;
+};
+
+&cpu_pd3 {
+	domain-idle-states = <&little_cpu_sleep_1>;
+};
+
+&cpu_pd4 {
+	domain-idle-states = <&little_cpu_sleep_1>;
+};
+
+&cpu_pd5 {
+	domain-idle-states = <&little_cpu_sleep_1>;
+};
+
 &cpu_pd6 {
-	domain-idle-states = <&big_cpu_sleep_0>;
+	domain-idle-states = <&big_cpu_sleep_1>;
 };
 
 &cpu_pd7 {
-	domain-idle-states = <&big_cpu_sleep_0>;
+	domain-idle-states = <&big_cpu_sleep_1>;
 };
