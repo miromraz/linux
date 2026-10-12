@@ -8,9 +8,10 @@
 
 /*
  * TOPRGU (watchdog) software reset lines, indexed by WDT_SWSYSRST bit.
- * Only the connectivity MCU line is described; the SoC reserves lines 0..11
- * for other subsystems, so the controller exposes 13 lines.
+ * Only the lines mainline uses are named; the SoC reserves the others for
+ * subsystems not described here, so the controller exposes 13 lines.
  */
+#define MT6797_TOPRGU_PWRAP_SPI_CTL_RST	11
 #define MT6797_TOPRGU_CONMCU_SW_RST	12
 
 #define MT6797_TOPRGU_SW_RST_NUM	13
