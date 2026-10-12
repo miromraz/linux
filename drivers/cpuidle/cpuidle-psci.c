@@ -352,7 +352,7 @@ static int psci_idle_init_cpu(struct device *dev, int cpu)
 	struct cpuidle_driver *drv;
 	struct device_node *cpu_node;
 	const char *enable_method;
-	int ret = 0;
+	int i, ret = 0;
 
 	cpu_node = of_cpu_device_node_get(cpu);
 	if (!cpu_node)
@@ -399,6 +399,17 @@ static int psci_idle_init_cpu(struct device *dev, int cpu)
 	ret = dt_init_idle_driver(drv, psci_idle_state_match, 1);
 	if (ret <= 0)
 		return ret ? : -ENODEV;
+
+	/*
+	 * TEST ONLY (MT6797 Gemini PDA bring-up): keep every DT idle state
+	 * disabled by default (state 0 is WFI), so the device boots WFI-only
+	 * and each state is enabled per CPU at runtime via sysfs
+	 * (echo 0 > .../cpuN/cpuidle/stateM/disable). A hang then is a runtime
+	 * hang: the watchdog reset reboots into all-states-off, so there is no
+	 * boot loop. Not for upstream; not in fix19/cpuidle.
+	 */
+	for (i = 1; i < drv->state_count; i++)
+		drv->states[i].flags |= CPUIDLE_FLAG_OFF;
 
 	/*
 	 * Initialize PSCI idle states.
