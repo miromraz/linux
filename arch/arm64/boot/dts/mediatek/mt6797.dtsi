@@ -62,6 +62,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x000>;
+			cpu-idle-states = <&cluster_sleep_0>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -76,6 +77,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x001>;
+			cpu-idle-states = <&cluster_sleep_0>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -90,6 +92,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x002>;
+			cpu-idle-states = <&cluster_sleep_0>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -104,6 +107,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x003>;
+			cpu-idle-states = <&cluster_sleep_0>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -118,6 +122,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x100>;
+			cpu-idle-states = <&cluster_sleep_0>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -132,6 +137,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x101>;
+			cpu-idle-states = <&cluster_sleep_0>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -146,6 +152,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x102>;
+			cpu-idle-states = <&cluster_sleep_0>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -160,6 +167,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x103>;
+			cpu-idle-states = <&cluster_sleep_0>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -183,6 +191,19 @@
 			enable-method = "psci";
 			reg = <0x201>;
 			capacity-dmips-mhz = <1024>;
+		};
+
+		idle-states {
+			entry-method = "psci";
+
+			cluster_sleep_0: cluster-sleep-0 {
+				compatible = "arm,idle-state";
+				local-timer-stop;
+				entry-latency-us = <800>;
+				exit-latency-us = <1000>;
+				min-residency-us = <2000>;
+				arm,psci-suspend-param = <0x1010000>;
+			};
 		};
 	};
 
