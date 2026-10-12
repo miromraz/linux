@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/mediatek,mt6797-armpll-b.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6797 Cortex-A72 cluster ARMPLL
+
+maintainers:
+  - Miroslav Mraz <miroslav.mraz@techmania.cz>
+
+description:
+  The Cortex-A72 ("big") cluster ARMPLL on the MediaTek MT6797 is part of the
+  iDVFS block and, unlike the Cortex-A53 cluster PLLs in the MCUMIXED block, is
+  not exposed through a register map. It is controlled through secure-firmware
+  SMC calls. This node has no register window; it is a pure SMC-backed clock
+  provider so the CPU frequency driver can scale the Cortex-A72 cluster.
+  Cell 0 selects the ARMPLL itself, cell 1 the CPU clock mux (clk26m / ARMPLL).
+
+properties:
+  compatible:
+    const: mediatek,mt6797-armpll-b
+
+  clocks:
+    items:
+      - description: 26 MHz crystal oscillator (clk26m), the intermediate clock
+
+  clock-names:
+    items:
+      - const: clk26m
+
+  '#clock-cells':
+    const: 1
+
+required:
+  - compatible
+  - clocks
+  - clock-names
+  - '#clock-cells'
+
+additionalProperties: false
+
+examples:
+  - |
+    clock-controller {
+        compatible = "mediatek,mt6797-armpll-b";
+        clocks = <&clk26m>;
+        clock-names = "clk26m";
+        #clock-cells = <1>;
+    };
