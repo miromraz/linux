@@ -16402,6 +16402,7 @@ L:	linux-pm@vger.kernel.org
 L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
 S:	Maintained
 F:	Documentation/devicetree/bindings/power/supply/mediatek,mt6351-fuel-gauge.yaml
+F:	drivers/power/supply/mt6351_fuel_gauge.c
 
 MEDIATEK MT6351 REGULATOR DRIVER
 M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
