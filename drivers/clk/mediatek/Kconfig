@@ -411,6 +411,16 @@ config COMMON_CLK_MT6797_MCU
 	  each cluster's clock source. These clocks are required for CPU
 	  frequency scaling of the Cortex-A53 clusters.
 
+config COMMON_CLK_MT6797_ARMPLL_B
+	tristate "Clock driver for MediaTek MT6797 Cortex-A72 ARMPLL"
+	depends on COMMON_CLK_MT6797
+	depends on HAVE_ARM_SMCCC
+	help
+	  This driver exposes the MediaTek MT6797 Cortex-A72 ("big") cluster
+	  ARMPLL, which is inside the iDVFS block and controlled through
+	  secure-firmware SMC calls rather than a register map, as a clock so
+	  the generic MediaTek cpufreq driver can scale the Cortex-A72 cluster.
+
 config COMMON_CLK_MT7622
 	tristate "Clock driver for MediaTek MT7622"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
