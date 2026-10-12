@@ -256,6 +256,9 @@ static const struct mfd_cell mt6351_devs[] = {
 	}, {
 		.name = "mt6351-efuse",
 		.of_compatible = "mediatek,mt6351-efuse",
+	}, {
+		.name = "mt6351-fuel-gauge",
+		.of_compatible = "mediatek,mt6351-fuel-gauge",
 	},
 };
 
