@@ -40,7 +40,12 @@
  */
 #define MT6797_ARMPLL_B_FMIN_MHZ	250U
 #define MT6797_ARMPLL_B_FMAX_MHZ	3000U
-#define MT6797_ARMPLL_B_DEFAULT_HZ	1495000000UL
+/*
+ * The rate the firmware power-on leaves the PLL at (vendor logs report the
+ * cluster comes up at ~845 MHz, which is also an OPP), reported until cpufreq
+ * programs the first setpoint.
+ */
+#define MT6797_ARMPLL_B_DEFAULT_HZ	845000000UL
 
 /* Provider cells. */
 #define CLK_ARMPLL_B		0
