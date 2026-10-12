@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6797-a72-power.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6797 Cortex-A72 cluster power-on sequencer
+
+maintainers:
+  - Miroslav Mraz <miroslav.mraz@techmania.cz>
+
+description:
+  The MediaTek MT6797 Cortex-A72 ("big") cluster must be powered up before
+  PSCI CPU_ON of cpu@200/201. The stock firmware does not do this, so a
+  pre-CPU_ON sequence (SPM power request and external-buck isolation, the
+  DA9214 buck B supply, the iDVFS SRAM LDO through a secure SIP call, and the
+  MP2 synchronous DCM) is run from the kernel when the first Cortex-A72 core is
+  brought online. The register window described here is the MCUCFG2 / iDVFS
+  block (MP2 DCM and the iDVFS PLL control word).
+
+properties:
+  compatible:
+    const: mediatek,mt6797-a72-power
+
+  reg:
+    maxItems: 1
+    description: MCUCFG2 / iDVFS register window.
+
+  mediatek,spm:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Phandle to the SPM (System Power Manager) syscon.
+
+  resets:
+    maxItems: 1
+    description: The TOPRGU PWRAP-SPI-CTL software reset line.
+
+  reset-names:
+    items:
+      - const: pwrap
+
+  vproc-supply:
+    description: The Cortex-A72 cluster supply (DA9214 buck B / vproc-big).
+
+required:
+  - compatible
+  - reg
+  - mediatek,spm
+  - resets
+  - reset-names
+  - vproc-supply
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/reset/mediatek,mt6797-wdt.h>
+
+    power-sequencer@10222000 {
+        compatible = "mediatek,mt6797-a72-power";
+        reg = <0x10222000 0x1000>;
+        mediatek,spm = <&spm>;
+        resets = <&watchdog MT6797_TOPRGU_PWRAP_SPI_CTL_RST>;
+        reset-names = "pwrap";
+        vproc-supply = <&da9214_buckb>;
+    };
