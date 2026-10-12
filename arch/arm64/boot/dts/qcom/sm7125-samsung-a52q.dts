@@ -248,6 +248,8 @@
 			vio-supply = <&vreg_cam0_avdd18>;
 			reset-gpios = <&tlmm 32 GPIO_ACTIVE_LOW>;
 			boot0-gpios = <&tlmm 43 GPIO_ACTIVE_HIGH>;
+			nvmem-cells = <&ois_cal_mark>, <&ois_xygg>;
+			nvmem-cell-names = "cal-mark", "xygg";
 			samsung,image-sensor = <&cam_main>;
 		};
 	};
@@ -916,6 +918,20 @@
 		pagesize = <32>;
 		read-only;
 		vcc-supply = <&vreg_cam_l3>;
+
+		nvmem-layout {
+			compatible = "fixed-layout";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			ois_xygg: xygg@180 {
+				reg = <0x180 0x8>;
+			};
+
+			ois_cal_mark: cal-mark@1a0 {
+				reg = <0x1a0 0x1>;
+			};
+		};
 	};
 
 	eeprom@51 {
