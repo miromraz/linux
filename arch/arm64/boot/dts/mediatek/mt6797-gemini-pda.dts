@@ -121,9 +121,18 @@
 	 */
 	battery: battery {
 		compatible = "simple-battery";
+		device-chemistry = "lithium-ion";
 		charge-full-design-microamp-hours = <4268000>;
 		voltage-min-design-microvolt = <3400000>;
 		voltage-max-design-microvolt = <4416000>;
+		/* Matches the BQ25896 ti,battery-regulation-voltage. */
+		constant-charge-voltage-max-microvolt = <4416000>;
+		/*
+		 * Seed value for the fuel gauge; refined at runtime from load
+		 * steps. Vendor 25 C pack resistance r_profile_t2[] is
+		 * ~90-190 mOhm (mt_battery_meter_table.h).
+		 */
+		factory-internal-resistance-micro-ohms = <110000>;
 		ocv-capacity-celsius = <25>;
 		ocv-capacity-table-0 =
 			<4357000 100>, <4301000 95>, <4248000 91>, <4196000 86>,
@@ -1347,6 +1356,21 @@
 		mediatek,key-mode = <0>;
 		mediatek,pwm-deb-setting = <0x500 0x500 1 0x1f0 0x800 0x800 0x20>;
 		mediatek,three-key-thr = <0 80 220 400>;
+	};
+
+	fuel-gauge {
+		compatible = "mediatek,mt6351-fuel-gauge";
+		/*
+		 * Power-path design: the battery voltage is the AUXADC ISENSE
+		 * channel (battery side of the BQ25896), which is also the
+		 * channel the vendor OCV profile was built against.
+		 */
+		io-channels = <&pmic_adc MT6351_AUXADC_ISENSE>;
+		io-channel-names = "vbat";
+		monitored-battery = <&battery>;
+		power-supplies = <&charger>;
+		/* R_FG 10 mOhm / CAR_TUNE 1.15 (battery_meter_hal.c). */
+		shunt-resistor-micro-ohms = <8696>;
 	};
 };
 
