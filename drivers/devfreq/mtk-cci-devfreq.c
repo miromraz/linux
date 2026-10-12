@@ -134,9 +134,6 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 	if (!drv)
 		return -EINVAL;
 
-	if (drv->pre_freq == *freq)
-		return 0;
-
 	mutex_lock(&drv->reg_lock);
 
 	inter_voltage = drv->inter_voltage;
@@ -152,6 +149,22 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 
 	voltage = dev_pm_opp_get_voltage(opp);
 	dev_pm_opp_put(opp);
+
+	/*
+	 * devfreq_recommended_opp() rounded the requested frequency up to a
+	 * real OPP in opp_rate. The incoming *freq may not be an OPP at all
+	 * (the passive governor interpolates a frequency when no required-opps
+	 * link the parent cpufreq OPPs to the CCI ones), so report the rounded
+	 * rate back: the devfreq core records it as previous_freq and looks it
+	 * up in the frequency table in devfreq_update_status(). Leaving *freq
+	 * at a non-OPP value makes that lookup fail on every polling interval.
+	 */
+	*freq = opp_rate;
+
+	if (drv->pre_freq == *freq) {
+		ret = 0;
+		goto out_unlock;
+	}
 
 	pre_voltage = regulator_get_voltage(drv->proc_reg);
 	if (pre_voltage < 0) {
