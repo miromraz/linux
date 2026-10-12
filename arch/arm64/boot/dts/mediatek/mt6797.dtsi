@@ -13,6 +13,7 @@
 #include <dt-bindings/power/mt6797-power.h>
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/reset/mt6797-resets.h>
+#include <dt-bindings/reset/mediatek,mt6797-wdt.h>
 
 / {
 	compatible = "mediatek,mt6797";
@@ -368,6 +369,12 @@
 				#power-domain-cells = <0>;
 			};
 
+			power-domain@MT6797_POWER_DOMAIN_CONN {
+				reg = <MT6797_POWER_DOMAIN_CONN>;
+				mediatek,infracfg = <&infrasys>;
+				#power-domain-cells = <0>;
+			};
+
 			mfg_async: power-domain@MT6797_POWER_DOMAIN_MFG_ASYNC {
 				reg = <MT6797_POWER_DOMAIN_MFG_ASYNC>;
 				clocks = <&topckgen CLK_TOP_MUX_MFG_52M>,
@@ -449,6 +456,57 @@
 	watchdog: watchdog@10007000 {
 		compatible = "mediatek,mt6797-wdt", "mediatek,mt6589-wdt";
 		reg = <0 0x10007000 0 0x100>;
+		#reset-cells = <1>;
+	};
+
+	/*
+	 * Connectivity (Wi-Fi/BT combo, CONSYS). The CONSYS MCU control
+	 * block, the BTIF STP transport (serial@1100c000) and its AP-DMA
+	 * channels, and the Wi-Fi AHB HIF are described here; boards that fit
+	 * the combo add the supplies, the firmware carveout and status = "okay".
+	 */
+	consys: consys@18070000 {
+		compatible = "mediatek,mt6797-consys";
+		reg = <0 0x18070000 0 0x200>;
+		reg-names = "conn-mcu";
+		interrupts = <GIC_SPI 284 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 285 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "bgf", "wdt";
+		resets = <&watchdog MT6797_TOPRGU_CONMCU_SW_RST>;
+		reset-names = "con-mcu";
+		status = "disabled";
+	};
+
+	btif: serial@1100c000 {
+		compatible = "mediatek,mt6797-btif", "mediatek,mtk-btif";
+		reg = <0 0x1100c000 0 0x1000>;
+		interrupts = <GIC_SPI 130 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&infrasys CLK_INFRA_BTIF>;
+		clock-names = "main";
+		reg-shift = <2>;
+		reg-io-width = <4>;
+		status = "disabled";
+	};
+
+	btif_dma: dma-controller@11000a00 {
+		compatible = "mediatek,mt6797-uart-dma", "mediatek,mt6577-uart-dma";
+		reg = <0 0x11000a00 0 0x80>,
+		      <0 0x11000a80 0 0x80>;
+		interrupts = <GIC_SPI 116 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_SPI 117 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&infrasys CLK_INFRA_AP_DMA>;
+		clock-names = "apdma";
+		#dma-cells = <1>;
+		status = "disabled";
+	};
+
+	wifi: wifi@180f0000 {
+		compatible = "mediatek,mt6797-wlan";
+		reg = <0 0x180f0000 0 0x1100>;
+		interrupts = <GIC_SPI 283 IRQ_TYPE_LEVEL_LOW>;
+		clocks = <&infrasys CLK_INFRA_AP_DMA>;
+		clock-names = "wifi-dma";
+		status = "disabled";
 	};
 
 	apmixedsys: apmixed@1000c000 {
