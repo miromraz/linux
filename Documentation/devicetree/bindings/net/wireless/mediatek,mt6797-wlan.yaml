@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/wireless/mediatek,mt6797-wlan.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6797 Wi-Fi AHB host interface
+
+maintainers:
+  - Miroslav Mraz <miroslav.mraz@techmania.cz>
+
+description: |
+  The AHB SDIO-like host interface of the MT6797 CONSYS Wi-Fi function. The
+  CONSYS node powers and initialises the island; this node describes the Wi-Fi
+  HIF register window, its interrupt and the AP-DMA clock the HIF DMA path uses.
+
+properties:
+  compatible:
+    const: mediatek,mt6797-wlan
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+    description: AP-DMA clock used by the HIF DMA path.
+
+  clock-names:
+    const: wifi-dma
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - clock-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mt6797-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    wifi@180f0000 {
+        compatible = "mediatek,mt6797-wlan";
+        reg = <0x180f0000 0x1100>;
+        interrupts = <GIC_SPI 283 IRQ_TYPE_LEVEL_LOW>;
+        clocks = <&infrasys CLK_INFRA_AP_DMA>;
+        clock-names = "wifi-dma";
+    };
