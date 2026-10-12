@@ -17,6 +17,15 @@
 #define MTK_SCPD_MODEM_PWRSEQ		BIT(10)
 #define MTK_SCPD_SKIP_RESET_B		BIT(11)
 #define MTK_SCPD_INFRA_PWR_CTL		BIT(12)
+/*
+ * Power the domain OFF at probe if the bootloader/warm reset left it ON.
+ * Only valid for a non-HWV domain that has no clocks and no domain-supply:
+ * the boot power-off reuses scpsys_power_off(), which would otherwise
+ * unbalance clocks/supply it never enabled (and deref a HWV domain's NULL
+ * data). A re-probe deferral powers the domain off again, so the consumer
+ * must tolerate finding it off.
+ */
+#define MTK_SCPD_OFF_AT_BOOT		BIT(13)
 #define MTK_SCPD_CAPS(_scpd, _x)	((_scpd)->data ?		\
 					 (_scpd)->data->caps & (_x) :	\
 					 (_scpd)->hwv_data->caps & (_x))
