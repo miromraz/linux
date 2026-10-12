@@ -12,13 +12,14 @@ maintainers:
 
 description: |
   MediaTek Cache Coherent Interconnect (CCI) is a hardware engine used by
-  MT8183 and MT8186 SoCs to scale the frequency and adjust the voltage in
-  hardware. It can also optimize the voltage to reduce the power consumption.
+  MT6797, MT8183 and MT8186 SoCs to scale the frequency and adjust the voltage
+  in hardware. It can also optimize the voltage to reduce the power consumption.
 
 properties:
   compatible:
     oneOf:
       - enum:
+          - mediatek,mt6797-cci
           - mediatek,mt8183-cci
           - mediatek,mt8186-cci
       - items:
@@ -43,6 +44,15 @@ properties:
   operating-points-v2: true
   opp-table:
     type: object
+
+  nvmem-cells:
+    maxItems: 1
+    description:
+      Phandle to the speed-binning efuse cell used to select the supported
+      OPPs through opp-supported-hw (MT6797).
+
+  nvmem-cell-names:
+    const: speed_grade
 
   proc-supply:
     description:
