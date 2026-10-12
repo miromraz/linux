@@ -230,6 +230,27 @@
 			};
 		};
 	};
+
+	/* Main-camera OIS (Samsung STM32G MCU) on a bit-banged bus (gpio86 SDA, gpio87 SCL) */
+	i2c-ois {
+		compatible = "i2c-gpio";
+		sda-gpios = <&tlmm 86 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&tlmm 87 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		i2c-gpio,timeout-ms = <1000>;	/* MCU stretches SCL during flash access */
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ois@62 {
+			compatible = "samsung,ois-mcu";
+			reg = <0x62>;
+			vdd-supply = <&vreg_cam_l7>;
+			vio-supply = <&vreg_cam0_avdd18>;
+			reset-gpios = <&tlmm 32 GPIO_ACTIVE_LOW>;
+			boot0-gpios = <&tlmm 43 GPIO_ACTIVE_HIGH>;
+			samsung,image-sensor = <&cam_main>;
+		};
+	};
 };
 
 &q6afedai {
