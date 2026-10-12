@@ -506,6 +506,39 @@
 };
 
 /*
+ * The two Cortex-A72 cores are powered by the DA9214 buck B rail and clocked
+ * by the SMC-backed Cortex-A72 ARMPLL (cell 1 is the CPU clock mux, with
+ * clk26m as the intermediate). They are off at boot; the a72_power sequencer
+ * powers the cluster up when the first core is brought online.
+ */
+&cpu8 {
+	clocks = <&armpll_b 1>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster2_opp>;
+	cpu-supply = <&da9214_buckb>;
+	nvmem-cells = <&cpu_speed_bin>;
+	nvmem-cell-names = "speed_grade";
+};
+
+&cpu9 {
+	clocks = <&armpll_b 1>, <&clk26m>;
+	clock-names = "cpu", "intermediate";
+	operating-points-v2 = <&cluster2_opp>;
+	cpu-supply = <&da9214_buckb>;
+	nvmem-cells = <&cpu_speed_bin>;
+	nvmem-cell-names = "speed_grade";
+};
+
+&armpll_b {
+	status = "okay";
+};
+
+&a72_power {
+	vproc-supply = <&da9214_buckb>;
+	status = "okay";
+};
+
+/*
  * The CCI shares the DA9214 buck A rail with the Cortex-A53 clusters. As a
  * devfreq consumer it holds that rail at the voltage its own frequency needs,
  * so for the FY/M/SB bins the board no longer has to pin buck A at a fixed
@@ -565,12 +598,20 @@
 			};
 
 			/*
-			 * Buck B ("VPROC2") powers the Cortex-A72 cluster,
-			 * which is off at boot and not brought up in stage 1.
-			 * It must not be forced always-on.
+			 * Buck B ("VPROC2") powers the Cortex-A72 cluster. It
+			 * is off at boot and enabled by the a72_power sequencer
+			 * when the first Cortex-A72 core comes online, so it is
+			 * not always-on. The minimum is the bootloader value
+			 * (1.00 V, the floor the cluster boots at); the maximum
+			 * is the 1.09 V cap on the Cortex-A72 OPPs, kept below
+			 * the fixed 1.10 V B SRAM LDO so Vsram stays >= Vproc.
+			 * The ramp delay matches the DA9214 buck A rail.
 			 */
 			da9214_buckb: BUCKB {
 				regulator-name = "vproc-big";
+				regulator-min-microvolt = <1000000>;
+				regulator-max-microvolt = <1090000>;
+				regulator-ramp-delay = <2000>;
 			};
 		};
 	};
