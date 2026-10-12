@@ -177,12 +177,19 @@
 			#cooling-cells = <2>;
 		};
 
+		/*
+		 * The Cortex-A72 ("big") cluster. DVFS (clocks, operating points
+		 * and the buck B / cpu-supply) is wired up by the board, together
+		 * with the power-on sequencer, since the cluster is off at boot and
+		 * only boards that describe its supply can bring it up.
+		 */
 		cpu8: cpu@200 {
 			device_type = "cpu";
 			compatible = "arm,cortex-a72";
 			enable-method = "psci";
 			reg = <0x200>;
 			capacity-dmips-mhz = <1024>;
+			#cooling-cells = <2>;
 		};
 
 		cpu9: cpu@201 {
@@ -191,6 +198,7 @@
 			enable-method = "psci";
 			reg = <0x201>;
 			capacity-dmips-mhz = <1024>;
+			#cooling-cells = <2>;
 		};
 	};
 
@@ -234,13 +242,15 @@
 				map0 {
 					trip = <&cpu_passive>;
 					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 
 				map1 {
 					trip = <&cpu_hot>;
 					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -689,6 +699,123 @@
 		regulator-always-on;
 	};
 
+	/*
+	 * Cortex-A72 ("big") cluster ARMPLL. It is inside the iDVFS block and
+	 * driven through secure-firmware SMC calls, not a register map, so the
+	 * node has no reg. Disabled here and enabled by boards that bring the
+	 * cluster up (the SMC backend is only safe to call once it is powered).
+	 */
+	armpll_b: clock-controller-armpll-b {
+		compatible = "mediatek,mt6797-armpll-b";
+		clocks = <&clk26m>;
+		clock-names = "clk26m";
+		#clock-cells = <1>;
+		status = "disabled";
+	};
+
+	/*
+	 * Cortex-A72 cluster OPPs from the vendor per-bin iDVFS tables
+	 * (mt_cpufreq.c, legacy VPROC2 columns for this unit's 0119 date code:
+	 * B_FY0119 and B_SB0119). Entries are capped at 1.09 V, as for the
+	 * Cortex-A53 clusters, so Vproc stays below the fixed 1.10 V B SRAM LDO
+	 * the power-on sequencer programs (there is no Vsram tracking on the B
+	 * cluster yet). opp-supported-hw groups the efuse func codes per bin
+	 * (FY/M shared = 0x7fad, SB = 0x0052), matching the Cortex-A53 tables.
+	 */
+	cluster2_opp: opp-table-cluster2 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		/* FY / M bins (shared) */
+		opp-1781000000 {
+			opp-hz = /bits/ 64 <1781000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1677000000 {
+			opp-hz = /bits/ 64 <1677000000>;
+			opp-microvolt = <1050000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1495000000 {
+			opp-hz = /bits/ 64 <1495000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1378000000 {
+			opp-hz = /bits/ 64 <1378000000>;
+			opp-microvolt = <980000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1248000000 {
+			opp-hz = /bits/ 64 <1248000000>;
+			opp-microvolt = <950000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1131000000 {
+			opp-hz = /bits/ 64 <1131000000>;
+			opp-microvolt = <930000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1001000000 {
+			opp-hz = /bits/ 64 <1001000000>;
+			opp-microvolt = <900000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-845000000 {
+			opp-hz = /bits/ 64 <845000000>;
+			opp-microvolt = <880000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-676000000 {
+			opp-hz = /bits/ 64 <676000000>;
+			opp-microvolt = <850000>;
+			opp-supported-hw = <0x7fad>;
+		};
+
+		/* SB bin */
+		opp-1885000000-1 {
+			opp-hz = /bits/ 64 <1885000000>;
+			opp-microvolt = <1080000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1677000000-1 {
+			opp-hz = /bits/ 64 <1677000000>;
+			opp-microvolt = <1040000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1495000000-1 {
+			opp-hz = /bits/ 64 <1495000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1378000000-1 {
+			opp-hz = /bits/ 64 <1378000000>;
+			opp-microvolt = <980000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1131000000-1 {
+			opp-hz = /bits/ 64 <1131000000>;
+			opp-microvolt = <930000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1001000000-1 {
+			opp-hz = /bits/ 64 <1001000000>;
+			opp-microvolt = <900000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-845000000-1 {
+			opp-hz = /bits/ 64 <845000000>;
+			opp-microvolt = <880000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-676000000-1 {
+			opp-hz = /bits/ 64 <676000000>;
+			opp-microvolt = <850000>;
+			opp-supported-hw = <0x0052>;
+		};
+	};
+
 	u3phy: t-phy@11290000 {
 		compatible = "mediatek,mt6797-tphy", "mediatek,generic-tphy-v1";
 		reg = <0 0x11290000 0 0x800>;
@@ -895,7 +1022,7 @@
 		};
 	};
 
-	syscon@10006000 {
+	spm: syscon@10006000 {
 		compatible = "mediatek,mt6797-scpsys", "syscon", "simple-mfd";
 		reg = <0 0x10006000 0 0x1000>;
 
@@ -1157,6 +1284,20 @@
 		clocks = <&clk26m>;
 		clock-names = "clk26m";
 		#clock-cells = <1>;
+	};
+
+	/*
+	 * Cortex-A72 cluster power-on sequencer. reg is the MCUCFG2 / iDVFS
+	 * window (MP2 DCM and the iDVFS PLL control word). Disabled here and
+	 * enabled, with vproc-supply, by boards that bring the cluster up.
+	 */
+	a72_power: power-sequencer@10222000 {
+		compatible = "mediatek,mt6797-a72-power";
+		reg = <0 0x10222000 0 0x1000>;
+		mediatek,spm = <&spm>;
+		resets = <&watchdog MT6797_TOPRGU_PWRAP_SPI_CTL_RST>;
+		reset-names = "pwrap";
+		status = "disabled";
 	};
 
 	afe: audio-controller@11220000 {
