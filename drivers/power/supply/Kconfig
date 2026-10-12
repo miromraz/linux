@@ -258,6 +258,20 @@ config BATTERY_INGENIC
 	  This driver can also be built as a module. If so, the module will be
 	  called ingenic-battery.
 
+config BATTERY_MT6351
+	tristate "MediaTek MT6351 PMIC fuel gauge"
+	depends on MFD_MT6397
+	depends on IIO
+	select ADC_BATTERY_HELPER
+	help
+	  Say Y here to enable the fuel gauge of the MediaTek MT6351 PMIC.
+	  It reads the battery current from the PMIC hardware fuel-gauge ADC
+	  (FGADC) and the battery voltage from the PMIC AUXADC, and reports the
+	  battery state of charge, voltage, current and charge status.
+
+	  This driver can also be built as a module. If so, the module will
+	  be called mt6351_fuel_gauge.
+
 config BATTERY_INTEL_DC_TI
 	tristate "Intel Bay / Cherry Trail Dollar Cove TI battery driver"
 	depends on INTEL_SOC_PMIC_CHTDC_TI && INTEL_DC_TI_ADC && IIO && ACPI
