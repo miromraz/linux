@@ -7,6 +7,7 @@
 #include <linux/devfreq.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
+#include <linux/nvmem-consumer.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
@@ -34,7 +35,40 @@ struct mtk_ccifreq_drv {
 	struct notifier_block opp_nb;
 	const struct mtk_ccifreq_platform_data *soc_data;
 	int vtrack_max;
+	int opp_token;
 };
+
+/*
+ * Select the per-speed-bin OPP set, mirroring mediatek-cpufreq: the efuse
+ * "speed_grade" cell gives the bin, and each OPP lists the bins it applies to
+ * through opp-supported-hw. SoCs without the cell (or without CONFIG_NVMEM)
+ * have no binning and use every OPP.
+ */
+static int mtk_ccifreq_opp_set_supported_hw(struct mtk_ccifreq_drv *drv)
+{
+	struct dev_pm_opp_config config = {};
+	unsigned int supported_hw;
+	u8 bin;
+	int ret;
+
+	ret = nvmem_cell_read_u8(drv->dev, "speed_grade", &bin);
+	if (ret == -ENOENT || ret == -EOPNOTSUPP)
+		return 0;
+	if (ret)
+		return ret;
+
+	supported_hw = BIT(bin);
+	config.supported_hw = &supported_hw;
+	config.supported_hw_count = 1;
+
+	ret = dev_pm_opp_set_config(drv->dev, &config);
+	if (ret < 0)
+		return ret;
+
+	drv->opp_token = ret;
+
+	return 0;
+}
 
 static int mtk_ccifreq_set_voltage(struct mtk_ccifreq_drv *drv, int new_voltage)
 {
@@ -118,6 +152,26 @@ static int mtk_ccifreq_set_voltage(struct mtk_ccifreq_drv *drv, int new_voltage)
 			return -EINVAL;
 		}
 	} while (voltage != new_voltage || vsram != new_vsram);
+
+	/*
+	 * A Vproc floor on the proc regulator can hold the real Vproc above the
+	 * requested value; the loop tracks the requested Vproc, so re-read both
+	 * rails and raise Vsram if it ended up below the real Vproc plus the
+	 * minimum shift. This only ever raises Vsram (a no-op where Vproc is not
+	 * floored).
+	 */
+	pre_voltage = regulator_get_voltage(drv->proc_reg);
+	pre_vsram = regulator_get_voltage(drv->sram_reg);
+	if (pre_voltage > 0 && pre_vsram > 0) {
+		vsram = clamp(pre_voltage + soc_data->min_volt_shift,
+			      soc_data->sram_min_volt, soc_data->sram_max_volt);
+		if (vsram > pre_vsram) {
+			ret = regulator_set_voltage(drv->sram_reg, vsram,
+						    soc_data->sram_max_volt);
+			if (ret)
+				return ret;
+		}
+	}
 
 	return 0;
 }
@@ -332,10 +386,16 @@ static int mtk_ccifreq_probe(struct platform_device *pdev)
 	if (ret)
 		goto out_free_resources;
 
+	ret = mtk_ccifreq_opp_set_supported_hw(drv);
+	if (ret) {
+		dev_err(dev, "failed to set supported hw: %d\n", ret);
+		goto out_disable_cci_clk;
+	}
+
 	ret = dev_pm_opp_of_add_table(dev);
 	if (ret) {
 		dev_err(dev, "failed to add opp table: %d\n", ret);
-		goto out_disable_cci_clk;
+		goto out_clear_opp_config;
 	}
 
 	rate = clk_get_rate(drv->inter_clk);
@@ -393,6 +453,9 @@ static int mtk_ccifreq_probe(struct platform_device *pdev)
 out_remove_opp_table:
 	dev_pm_opp_of_remove_table(dev);
 
+out_clear_opp_config:
+	dev_pm_opp_clear_config(drv->opp_token);
+
 out_disable_cci_clk:
 	clk_disable_unprepare(drv->cci_clk);
 
@@ -415,11 +478,20 @@ static void mtk_ccifreq_remove(struct platform_device *pdev)
 
 	dev_pm_opp_unregister_notifier(dev, &drv->opp_nb);
 	dev_pm_opp_of_remove_table(dev);
+	dev_pm_opp_clear_config(drv->opp_token);
 	clk_disable_unprepare(drv->cci_clk);
 	regulator_disable(drv->proc_reg);
 	if (drv->sram_reg)
 		regulator_disable(drv->sram_reg);
 }
+
+static const struct mtk_ccifreq_platform_data mt6797_platform_data = {
+	.min_volt_shift = 100000,
+	.max_volt_shift = 300000,
+	.proc_max_volt = 1200000,
+	.sram_min_volt = 1000000,
+	.sram_max_volt = 1200000,
+};
 
 static const struct mtk_ccifreq_platform_data mt8183_platform_data = {
 	.min_volt_shift = 100000,
@@ -436,6 +508,7 @@ static const struct mtk_ccifreq_platform_data mt8186_platform_data = {
 };
 
 static const struct of_device_id mtk_ccifreq_machines[] = {
+	{ .compatible = "mediatek,mt6797-cci", .data = &mt6797_platform_data },
 	{ .compatible = "mediatek,mt8183-cci", .data = &mt8183_platform_data },
 	{ .compatible = "mediatek,mt8186-cci", .data = &mt8186_platform_data },
 	{ },
