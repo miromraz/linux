@@ -156,6 +156,7 @@ properties:
               - ns16550a
       - items:
           - enum:
+              - mediatek,mt6797-btif
               - mediatek,mt7622-btif
               - mediatek,mt7623-btif
           - const: mediatek,mtk-btif
