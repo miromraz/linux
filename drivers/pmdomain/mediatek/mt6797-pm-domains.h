@@ -26,10 +26,12 @@
 #define MT6797_SPM_MFG_CORE1_PWR_CON	0x0344
 #define MT6797_SPM_MFG_CORE2_PWR_CON	0x0348
 #define MT6797_SPM_MFG_CORE3_PWR_CON	0x034c
+#define MT6797_SPM_CONN_PWR_CON		0x032c
 
 /* INFRA_TOPAXI_PROTECTEN bits, per vendor clk-mt6797-pg.c */
 #define MT6797_TOP_AXI_PROT_EN_MM	(BIT(1) | BIT(2))	/* DIS_PROT_MASK */
 #define MT6797_TOP_AXI_PROT_EN_MFG	BIT(21)			/* MFG_PROT_MASK */
+#define MT6797_TOP_AXI_PROT_EN_CONN	(BIT(17) | BIT(18))	/* CONN_PROT_MASK */
 
 static enum scpsys_bus_prot_block scpsys_bus_prot_blocks_mt6797[] = {
 	BUS_PROT_BLOCK_INFRA
@@ -165,6 +167,23 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.pwr_sta2nd_offs = MT6797_PWR_STATUS_2ND,
 		.sram_pdn_bits = GENMASK(8, 8),
 		.sram_pdn_ack_bits = GENMASK(12, 12),
+	},
+	[MT6797_POWER_DOMAIN_CONN] = {
+		.name = "conn",
+		.sta_mask = BIT(1),
+		.ctl_offs = MT6797_SPM_CONN_PWR_CON,
+		.pwr_sta_offs = MT6797_PWR_STATUS,
+		.pwr_sta2nd_offs = MT6797_PWR_STATUS_2ND,
+		/* The connectivity island has no separately gated SRAM. */
+		.bp_cfg = {
+			BUS_PROT_INFRA_UPDATE_TOPAXI(MT6797_TOP_AXI_PROT_EN_CONN),
+		},
+		/*
+		 * No in-tree driver claims CONN yet, and a warm reset can leave
+		 * the connectivity island powered. Shut it down at boot so the
+		 * VCN rails can be cut without wedging a still-powered island.
+		 */
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF | MTK_SCPD_OFF_AT_BOOT,
 	},
 };
 
