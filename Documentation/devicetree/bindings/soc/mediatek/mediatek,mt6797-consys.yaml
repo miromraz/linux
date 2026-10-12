@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/mediatek/mediatek,mt6797-consys.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6797 connectivity subsystem (CONSYS)
+
+maintainers:
+  - Miroslav Mraz <miroslav.mraz@techmania.cz>
+
+description: |
+  The MT6797 integrates a Wi-Fi/Bluetooth combo (MT6631 RF) as the CONSYS
+  subsystem. This node describes the CONSYS MCU control block, the VCN analog
+  power rails, the connectivity MCU reset line on the TOPRGU watchdog, the CONN
+  power domain and the no-map firmware memory shared with Wi-Fi. The BTIF
+  transport is a separate IP (see mediatek,mt6797-btif).
+
+properties:
+  compatible:
+    const: mediatek,mt6797-consys
+
+  reg:
+    maxItems: 1
+    description: CONSYS MCU control block (chip ID and MCU ACR registers).
+
+  reg-names:
+    const: conn-mcu
+
+  interrupts:
+    items:
+      - description: BGF (connectivity) external interrupt.
+      - description: Connectivity watchdog external interrupt.
+
+  interrupt-names:
+    items:
+      - const: bgf
+      - const: wdt
+
+  vcn18-supply:
+    description: Common 1.8 V connectivity supply.
+
+  vcn28-supply:
+    description: Common 2.8 V connectivity supply.
+
+  vcn33-bt-supply:
+    description: |
+      Bluetooth 3.3 V PA supply. On MT6351 this is the same physical rail as
+      vcn33-wifi (one LDO), consumed independently by the BT and Wi-Fi paths.
+
+  vcn33-wifi-supply:
+    description: Wi-Fi 3.3 V supply (see vcn33-bt-supply).
+
+  resets:
+    maxItems: 1
+
+  reset-names:
+    const: con-mcu
+
+  memory-region:
+    maxItems: 1
+    description: No-map firmware memory reservation shared with Wi-Fi.
+
+  power-domains:
+    maxItems: 1
+    description: CONN power domain.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-names
+  - vcn18-supply
+  - vcn28-supply
+  - memory-region
+  - resets
+  - reset-names
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/power/mt6797-power.h>
+    #include <dt-bindings/reset/mediatek,mt6797-wdt.h>
+
+    consys@18070000 {
+        compatible = "mediatek,mt6797-consys";
+        reg = <0x18070000 0x200>;
+        reg-names = "conn-mcu";
+        interrupts = <GIC_SPI 284 IRQ_TYPE_LEVEL_LOW>,
+                     <GIC_SPI 285 IRQ_TYPE_LEVEL_LOW>;
+        interrupt-names = "bgf", "wdt";
+        vcn18-supply = <&mt6351_vcn18_reg>;
+        vcn28-supply = <&mt6351_vcn28_reg>;
+        vcn33-bt-supply = <&mt6351_vcn33_reg>;
+        vcn33-wifi-supply = <&mt6351_vcn33_reg>;
+        resets = <&watchdog MT6797_TOPRGU_CONMCU_SW_RST>;
+        reset-names = "con-mcu";
+        memory-region = <&consys_reserved>;
+        power-domains = <&scpsys MT6797_POWER_DOMAIN_CONN>;
+    };
