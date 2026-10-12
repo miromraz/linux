@@ -16396,6 +16396,13 @@ L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
 S:	Maintained
 F:	drivers/nvmem/mt6351-efuse.c
 
+MEDIATEK MT6351 FUEL GAUGE DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-pm@vger.kernel.org
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	Documentation/devicetree/bindings/power/supply/mediatek,mt6351-fuel-gauge.yaml
+
 MEDIATEK MT6351 REGULATOR DRIVER
 M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
 L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
