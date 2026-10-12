@@ -62,6 +62,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x000>;
+			mem-supply = <&cpu_sram>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -76,6 +77,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x001>;
+			mem-supply = <&cpu_sram>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -90,6 +92,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x002>;
+			mem-supply = <&cpu_sram>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -104,6 +107,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x003>;
+			mem-supply = <&cpu_sram>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -118,6 +122,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x100>;
+			mem-supply = <&cpu_sram>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -132,6 +137,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x101>;
+			mem-supply = <&cpu_sram>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -146,6 +152,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x102>;
+			mem-supply = <&cpu_sram>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -160,6 +167,7 @@
 			compatible = "arm,cortex-a53";
 			enable-method = "psci";
 			reg = <0x103>;
+			mem-supply = <&cpu_sram>;
 			capacity-dmips-mhz = <741>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
@@ -258,7 +266,22 @@
 		compatible = "operating-points-v2";
 		opp-shared;
 
-		/* FY / M / L bins (shared little-cluster table) */
+		/*
+		 * FY / M / L bins (shared little-cluster table). The entries
+		 * above 1.09 V need the CPU SRAM LDO (mem-supply) for Vsram
+		 * tracking; they are capped at 1.15 V here, below the vendor
+		 * top (1.20 V), pending hardware validation of the tracking.
+		 */
+		opp-1287000000 {
+			opp-hz = /bits/ 64 <1287000000>;
+			opp-microvolt = <1150000>;
+			opp-supported-hw = <0xffad>;
+		};
+		opp-1222000000 {
+			opp-hz = /bits/ 64 <1222000000>;
+			opp-microvolt = <1130000>;
+			opp-supported-hw = <0xffad>;
+		};
 		opp-1118000000 {
 			opp-hz = /bits/ 64 <1118000000>;
 			opp-microvolt = <1090000>;
@@ -301,6 +324,26 @@
 		};
 
 		/* SB bin */
+		opp-1391000000-1 {
+			opp-hz = /bits/ 64 <1391000000>;
+			opp-microvolt = <1150000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1339000000-1 {
+			opp-hz = /bits/ 64 <1339000000>;
+			opp-microvolt = <1140000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1274000000-1 {
+			opp-hz = /bits/ 64 <1274000000>;
+			opp-microvolt = <1130000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1222000000-1 {
+			opp-hz = /bits/ 64 <1222000000>;
+			opp-microvolt = <1100000>;
+			opp-supported-hw = <0x0052>;
+		};
 		opp-1118000000-1 {
 			opp-hz = /bits/ 64 <1118000000>;
 			opp-microvolt = <1070000>;
@@ -337,7 +380,21 @@
 		compatible = "operating-points-v2";
 		opp-shared;
 
-		/* FY / M bins (shared big-cluster table) */
+		/*
+		 * FY / M bins (shared big-cluster table). As for the little
+		 * cluster, the entries above 1.09 V need the CPU SRAM LDO and
+		 * are capped at 1.15 V pending hardware validation.
+		 */
+		opp-1703000000 {
+			opp-hz = /bits/ 64 <1703000000>;
+			opp-microvolt = <1150000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1625000000 {
+			opp-hz = /bits/ 64 <1625000000>;
+			opp-microvolt = <1130000>;
+			opp-supported-hw = <0x7fad>;
+		};
 		opp-1495000000 {
 			opp-hz = /bits/ 64 <1495000000>;
 			opp-microvolt = <1090000>;
@@ -390,6 +447,26 @@
 		};
 
 		/* SB bin */
+		opp-1820000000-1 {
+			opp-hz = /bits/ 64 <1820000000>;
+			opp-microvolt = <1150000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1755000000-1 {
+			opp-hz = /bits/ 64 <1755000000>;
+			opp-microvolt = <1140000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1703000000-1 {
+			opp-hz = /bits/ 64 <1703000000>;
+			opp-microvolt = <1130000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1625000000-1 {
+			opp-hz = /bits/ 64 <1625000000>;
+			opp-microvolt = <1100000>;
+			opp-supported-hw = <0x0052>;
+		};
 		opp-1495000000-1 {
 			opp-hz = /bits/ 64 <1495000000>;
 			opp-microvolt = <1070000>;
@@ -473,6 +550,143 @@
 			opp-microvolt = <1090000>;
 			opp-supported-hw = <0x8000>;
 		};
+	};
+
+	/*
+	 * The "intermediate" clock the CCI parks on while its PLL relocks is
+	 * the 26 MHz oscillator (the only alternate parent the CCI ARMPLLDIV
+	 * mux exposes). The vendor instead parks on mainpll (mt_cpufreq.c
+	 * adjust_armpll_dds, TOP_CKMUXSEL_MAINPLL), but that path needs the
+	 * TOPCKGEN alternate-clock select (CLK_MISC_CFG_0[5:4]) which the
+	 * MCUMIXED clock driver does not model, so clk26m is used as for the
+	 * Cortex-A53 clusters. The node is disabled here and enabled by the
+	 * board that provides proc-supply.
+	 */
+	cci: cci {
+		compatible = "mediatek,mt6797-cci";
+		clocks = <&mcumixed CLK_MCU_ARMPLLDIV_CCI>,
+			 <&clk26m>;
+		clock-names = "cci", "intermediate";
+		operating-points-v2 = <&cci_opp>;
+		sram-supply = <&cpu_sram>;
+		nvmem-cells = <&cpu_speed_bin>;
+		nvmem-cell-names = "speed_grade";
+		status = "disabled";
+	};
+
+	/*
+	 * CCI OPPs from the vendor per-bin tables (mt_cpufreq.c, CCI_FY/CCI_M
+	 * and CCI_SB columns). The CCI shares the DA9214 buck A rail with the
+	 * two Cortex-A53 clusters; making it a devfreq consumer lets it hold
+	 * that rail at the voltage its own frequency needs, instead of the
+	 * board pinning a fixed floor. Entries are capped at 1.09 V (Vproc
+	 * stays below the fixed 1.10 V SRAM LDO, as for the clusters) and stop
+	 * near 500 MHz, below which the CCI PLL would need a /4 post divider the
+	 * MCUMIXED clock driver does not model. opp-supported-hw groups the
+	 * efuse func codes per bin, as in the cluster tables (FY/M, SB and the
+	 * L bin from the vendor CCI_FY/CCI_M, CCI_SB and CCI_L columns).
+	 */
+	cci_opp: opp-table-cci {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		/* FY / M bins (shared CCI table) */
+		opp-754000000 {
+			opp-hz = /bits/ 64 <754000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-715000000 {
+			opp-hz = /bits/ 64 <715000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-637000000 {
+			opp-hz = /bits/ 64 <637000000>;
+			opp-microvolt = <1020000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-611000000 {
+			opp-hz = /bits/ 64 <611000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-533000000 {
+			opp-hz = /bits/ 64 <533000000>;
+			opp-microvolt = <970000>;
+			opp-supported-hw = <0x7fad>;
+		};
+
+		/* SB bin */
+		opp-754000000-1 {
+			opp-hz = /bits/ 64 <754000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-676000000-1 {
+			opp-hz = /bits/ 64 <676000000>;
+			opp-microvolt = <1040000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-611000000-1 {
+			opp-hz = /bits/ 64 <611000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-533000000-1 {
+			opp-hz = /bits/ 64 <533000000>;
+			opp-microvolt = <970000>;
+			opp-supported-hw = <0x0052>;
+		};
+
+		/* L bin (CCI_L on the VPROC1_L column) */
+		opp-637000000-2 {
+			opp-hz = /bits/ 64 <637000000>;
+			opp-microvolt = <1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-611000000-2 {
+			opp-hz = /bits/ 64 <611000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-546000000-2 {
+			opp-hz = /bits/ 64 <546000000>;
+			opp-microvolt = <1020000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-520000000-2 {
+			opp-hz = /bits/ 64 <520000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x8000>;
+		};
+	};
+
+	/*
+	 * On-SoC CPU SRAM LDO bank in the always-on infracfg block. It is the
+	 * Vsram rail of the Cortex-A53 clusters and the CCI; the CPU and CCI
+	 * frequency drivers track it against the DA9214 Vproc rail. The range
+	 * is the vendor MIN/MAX_VSRAM_VOLT (1.00-1.20 V); it is always on
+	 * because it powers live CPU caches.
+	 */
+	cpu_sram: regulator-cpu-sram {
+		compatible = "mediatek,mt6797-cpu-sram";
+		mediatek,infracfg = <&infrasys>;
+		regulator-name = "vsram-cpu";
+		/*
+		 * The minimum is the board Vproc floor (DA9214 buck A, 1.04 V)
+		 * plus the vendor NORMAL_DIFF_VRSAM_VPROC of 100 mV, rounded up
+		 * to the 25 mV grid: 1.15 V. The Vsram tracking in the CPU and
+		 * CCI drivers computes Vsram from the requested Vproc, which the
+		 * buck A floor can silently raise; enforcing the floor+100 mV
+		 * minimum here, at the regulator core, keeps Vsram >= Vproc on
+		 * the real rails at the lowest OPPs (where requested Vproc is
+		 * below the floor). The LK value is 1.10 V, so the core raises
+		 * it to 1.15 V at registration (an upward, safe move).
+		 */
+		regulator-min-microvolt = <1150000>;
+		regulator-max-microvolt = <1200000>;
+		regulator-always-on;
 	};
 
 	u3phy: t-phy@11290000 {
