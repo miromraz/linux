@@ -158,6 +158,27 @@ static int mtk_cpufreq_voltage_tracking(struct mtk_cpu_dvfs_info *info,
 		}
 	} while (vproc != new_vproc || vsram != new_vsram);
 
+	/*
+	 * A Vproc floor on the proc regulator (regulator-min on a shared rail)
+	 * can hold the real Vproc above the requested value; the loop tracks the
+	 * requested Vproc, so the resulting Vsram can end up below the real
+	 * Vproc plus the minimum shift. Re-read both rails and raise Vsram if
+	 * so. This only ever raises Vsram, so it is a no-op where Vproc is not
+	 * floored (real == requested).
+	 */
+	pre_vproc = regulator_get_voltage(proc_reg);
+	pre_vsram = regulator_get_voltage(sram_reg);
+	if (pre_vproc > 0 && pre_vsram > 0) {
+		vsram = clamp(pre_vproc + soc_data->min_volt_shift,
+			      soc_data->sram_min_volt, soc_data->sram_max_volt);
+		if (vsram > pre_vsram) {
+			ret = regulator_set_voltage(sram_reg, vsram,
+						    soc_data->sram_max_volt);
+			if (ret)
+				return ret;
+		}
+	}
+
 	return 0;
 }
 
