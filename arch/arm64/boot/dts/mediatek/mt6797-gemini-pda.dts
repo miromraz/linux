@@ -199,10 +199,67 @@
 			reg = <0 0x46000000 0 0x400000>;
 			no-map;
 		};
+
+		/*
+		 * No-map firmware carveout for the CONSYS Wi-Fi EMI window.
+		 * 0xbfa00000 is free System RAM and matches the vendor-proven
+		 * CONSYS EMI base; the connectivity driver copies the WLAN
+		 * firmware here and programs the EMI remap.
+		 */
+		consys_reserved: consys@bfa00000 {
+			reg = <0 0xbfa00000 0 0x200000>;
+			no-map;
+		};
 	};
 };
 
+/*
+ * MT6797 connectivity (Wi-Fi/BT combo). The SoC blocks live in mt6797.dtsi;
+ * the board adds the MT6351 VCN supplies, the firmware carveout and enables
+ * them. power-domains = <&scpsys MT6797_POWER_DOMAIN_CONN> is intentionally
+ * not set: the out-of-tree module drives the CONN island via SPM, and genpd
+ * would otherwise power it on at attach before the module's rail sequence. The
+ * CONN domain is instead shut down at boot (MTK_SCPD_OFF_AT_BOOT) so an
+ * unclaimed island is safe; a future runtime-PM driver adds power-domains here.
+ */
+&consys {
+	vcn18-supply = <&mt6351_vcn18_reg>;
+	vcn28-supply = <&mt6351_vcn28_reg>;
+	vcn33-bt-supply = <&mt6351_vcn33_reg>;
+	vcn33-wifi-supply = <&mt6351_vcn33_reg>;
+	memory-region = <&consys_reserved>;
+	status = "okay";
+};
+
+/*
+ * The BTIF (serial@1100c000) and its AP-DMA channels stay disabled: the
+ * out-of-tree connectivity module drives BTIF raw and only needs its interrupt
+ * and clock, which it reads from the disabled node, so 8250_of / mtk-uart-apdma
+ * must not claim them.
+ */
+&wifi {
+	status = "okay";
+};
+
 &mt6351regulator {
+	mt6351_vcn18_reg: ldo-vcn18 {
+		regulator-name = "vcn18";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+	};
+
+	mt6351_vcn28_reg: ldo-vcn28 {
+		regulator-name = "vcn28";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+	};
+
+	mt6351_vcn33_reg: ldo-vcn33 {
+		regulator-name = "vcn33";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
 	mt6351_vemc_reg: ldo-vemc {
 		regulator-name = "vemc_3v3";
 		regulator-min-microvolt = <3000000>;
