@@ -411,6 +411,17 @@
 	cpu-supply = <&da9214_bucka>;
 };
 
+/*
+ * The CCI shares the DA9214 buck A rail with the Cortex-A53 clusters. As a
+ * devfreq consumer it holds that rail at the voltage its own frequency needs,
+ * so for the FY/M/SB bins the board no longer has to pin buck A at a fixed
+ * floor to keep the CCI from being under-volted when the clusters scale down.
+ */
+&cci {
+	proc-supply = <&da9214_bucka>;
+	status = "okay";
+};
+
 &i2c6 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c6_pins_a>;
@@ -428,28 +439,32 @@
 			 * CCI needs at its bootloader frequency (~630 MHz -> the
 			 * 676 MHz / 1.04 V SB OPP), so the rail is not pulled
 			 * below what the CCI, which is not yet a DVFS consumer,
-			 * requires when the clusters scale down. The maximum
-			 * matches the 1.09 V cap of the CPU OPP tables, keeping
-			 * Vproc below the fixed 1.10 V SRAM LDO. The bootloader
-			 * leaves this rail at 1.00 V while the big cluster runs
-			 * 1274 MHz and the CCI 630 MHz, which is under-volted for
-			 * the SB bin; because both the minimum and maximum are
-			 * set, the regulator core raises the rail to the 1.04 V
-			 * floor when it registers, before any frequency change,
-			 * and never below. The 1.04 V floor is safe for the
-			 * FY/M/SB bins; an L-bin part needs 1.09 V for the CCI
-			 * and must be excluded by the efuse pre-flight until
-			 * stage 2 adds CCI devfreq and removes the floor. The
+			 * requires when the clusters scale down. The maximum is
+			 * the vendor Vproc ceiling (MAX_VPROC_VOLT, 1.20 V): with
+			 * the on-SoC CPU SRAM LDO now wired as the Vsram supply,
+			 * the CPU and CCI drivers keep Vsram >= Vproc, so Vproc is
+			 * no longer capped at the fixed 1.10 V SRAM LDO and the
+			 * OPPs above 1.09 V become reachable. The bootloader leaves
+			 * this rail at 1.00 V while the big cluster runs 1274 MHz
+			 * and the CCI 630 MHz, which is under-volted for the SB
+			 * bin; because both the minimum and maximum are set, the
+			 * regulator core raises the rail to the 1.04 V floor when
+			 * it registers, before any frequency change, and never
+			 * below. The 1.04 V floor is safe for the FY/M/SB bins; an
+			 * L-bin part needs 1.09 V for the CCI, which on that bin is
+			 * held by the pinned 1.09 V L-bin cluster OPPs rather than
+			 * by CCI devfreq. The
 			 * ramp delay is set so the regulator core waits at least
 			 * the vendor's 25 us settle (MIN_PMIC_SETTLE_TIME) across
-			 * the 50 mV floor-to-cap span (50000 uV / 25 us =
-			 * 2000 uV/us); regulator-settling-time-up-us is not used
+			 * a 50 mV step (50000 uV / 25 us = 2000 uV/us); that is a
+			 * floor, the core scales the wait with the step size;
+			 * regulator-settling-time-up-us is not used
 			 * because the core ignores it once a ramp delay is set.
 			 */
 			da9214_bucka: BUCKA {
 				regulator-name = "vproc-little";
 				regulator-min-microvolt = <1040000>;
-				regulator-max-microvolt = <1090000>;
+				regulator-max-microvolt = <1200000>;
 				regulator-ramp-delay = <2000>;
 				regulator-always-on;
 				regulator-boot-on;
