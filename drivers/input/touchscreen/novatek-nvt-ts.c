@@ -321,8 +321,10 @@ static const struct nvt_ts_i2c_chip_data nvt_nt36672a_ts_data = {
 /*
  * NT36772 (Planet Gemini PDA). It uses the same 6-byte touch record and the
  * parameter block at 0x78 as the NT36672A, served at the FW I2C address 0x01.
+ * Its parameter block reports chip id 0x08, as the NT36672A does.
  */
 static const struct nvt_ts_i2c_chip_data nvt_nt36772_ts_data = {
+	.chip_id = 0x08,
 };
 
 static const struct of_device_id nvt_ts_of_match[] = {
