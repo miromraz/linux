@@ -215,9 +215,12 @@ static struct snd_soc_card mt6797_mt6351_card = {
 static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = &mt6797_mt6351_card;
+	struct device_node *np = pdev->dev.of_node;
 	struct device_node *platform_node, *codec_node, *accdet_node;
 	struct snd_soc_dai_link *dai_link;
 	struct mt6797_mt6351_priv *priv;
+	struct snd_soc_aux_dev *aux;
+	int ret, i, num_aux;
 
 	card->dev = &pdev->dev;
 
@@ -226,11 +229,41 @@ static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	snd_soc_card_set_drvdata(card, priv);
 
+	/* Optional board amplifiers, e.g. a loudspeaker amp on LINEOUT L */
+	num_aux = of_count_phandle_with_args(np, "aux-devs", NULL);
+	if (num_aux == -ENOENT)
+		num_aux = 0;
+	else if (num_aux < 0)
+		return num_aux;
+
+	/* One extra slot for ACCDET */
+	aux = devm_kcalloc(&pdev->dev, num_aux + 1, sizeof(*aux), GFP_KERNEL);
+	if (!aux)
+		return -ENOMEM;
+
+	for (i = 0; i < num_aux; i++) {
+		aux[i].dlc.of_node = of_parse_phandle(np, "aux-devs", i);
+		if (!aux[i].dlc.of_node)
+			return -EINVAL;
+	}
+
 	/*
 	 * Headset jack detection is optional.  Register ACCDET as a card
 	 * aux_dev so the card core manages its lifetime and the jack.
 	 */
+	accdet_node = of_parse_phandle(np, "mediatek,accdet", 0);
 	if (accdet_node) {
+		aux[num_aux].dlc.of_node = accdet_node;
+		aux[num_aux].init = mt6797_mt6351_accdet_init;
+		num_aux++;
+	}
+	card->aux_dev = aux;
+	card->num_aux_devs = num_aux;
+
+	if (of_property_present(np, "audio-routing")) {
+		ret = snd_soc_of_parse_audio_routing(card, "audio-routing");
+		if (ret)
+			goto put_accdet_node;
 	}
 
 	platform_node = of_parse_phandle(pdev->dev.of_node,
