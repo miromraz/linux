@@ -194,6 +194,14 @@ struct mtk_dsi_driver_data {
 	bool has_size_ctl;
 	bool cmdq_long_packet_ctl;
 	bool support_per_frame_lp;
+	/*
+	 * Do not shorten HFP/HBP by the D-PHY HS<->LP transition cycles.
+	 * The vendor MT6797 dispsys driver (ddp_dsi.c) programs the full
+	 * porch word counts with no such subtraction, and the NT36772 TDDI
+	 * touch controller, which scans during the display horizontal
+	 * blanking, needs the full blanking or its firmware stays wedged.
+	 */
+	bool no_porch_lp_comp;
 };
 
 struct mtk_dsi {
@@ -221,6 +229,7 @@ struct mtk_dsi {
 	int refcount;
 	bool enabled;
 	bool lanes_ready;
+	bool init_failed;
 	u32 irq_data;
 	wait_queue_head_t irq_wait_queue;
 	const struct mtk_dsi_driver_data *driver_data;
@@ -302,8 +311,18 @@ static void mtk_dsi_disable(struct mtk_dsi *dsi)
 
 static void mtk_dsi_reset_engine(struct mtk_dsi *dsi)
 {
+	u32 inten = readl(dsi->regs + DSI_INTEN);
+
+	/*
+	 * Mask the DSI interrupts across the engine reset and restore them
+	 * afterwards, so a pending or late IRQ cannot fire while the block is
+	 * held in reset. Matches the vendor MT6797 driver (DSI_Reset() in
+	 * drivers/misc/mediatek/video/mt6797/dispsys/ddp_dsi.c).
+	 */
+	writel(0, dsi->regs + DSI_INTEN);
 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, DSI_RESET);
 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, 0);
+	writel(inten, dsi->regs + DSI_INTEN);
 }
 
 static void mtk_dsi_reset_dphy(struct mtk_dsi *dsi)
@@ -535,7 +554,9 @@ static void mtk_dsi_config_vdo_timing_per_line_lp(struct mtk_dsi *dsi)
 	horizontal_front_back_byte = horizontal_frontporch_byte + horizontal_backporch_byte;
 	data_phy_cycles_byte = data_phy_cycles * dsi->lanes + delta;
 
-	if (horizontal_front_back_byte > data_phy_cycles_byte) {
+	if (dsi->driver_data->no_porch_lp_comp) {
+		/* Keep the full porch word counts; see no_porch_lp_comp. */
+	} else if (horizontal_front_back_byte > data_phy_cycles_byte) {
 		horizontal_frontporch_byte -= data_phy_cycles_byte *
 					      horizontal_frontporch_byte /
 					      horizontal_front_back_byte;
@@ -647,10 +668,18 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 	status = readl(dsi->regs + DSI_INTSTA) & flag;
 
 	if (status) {
+		unsigned int loops = 0;
+
+		/*
+		 * Acknowledge the read and wait for the engine to clear BUSY.
+		 * Bound the wait: if the pipeline is stalled the engine can
+		 * stay BUSY forever, and this runs in hard-IRQ context, so an
+		 * unbounded loop would hang the CPU.
+		 */
 		do {
 			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
 			tmp = readl(dsi->regs + DSI_INTSTA);
-		} while (tmp & DSI_BUSY);
+		} while ((tmp & DSI_BUSY) && ++loops < 2000);
 
 		mtk_dsi_mask(dsi, DSI_INTSTA, status, 0);
 		mtk_dsi_irq_data_set(dsi, status);
@@ -697,6 +726,8 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	if (++dsi->refcount != 1)
 		return 0;
 
+	dsi->init_failed = false;
+
 	ret = mipi_dsi_pixel_format_to_bpp(dsi->format);
 	if (ret < 0) {
 		dev_err(dev, "Unknown MIPI DSI format %d\n", dsi->format);
@@ -733,6 +764,14 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		writel(FORCE_COMMIT | BYPASS_SHADOW,
 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
 
+	/*
+	 * The bootloader may hand over the engine still started in video
+	 * mode. Nothing feeds it pixels at this point, so the first panel
+	 * command would wait for a VM_DONE that never comes; start from
+	 * command mode instead, as after a power cycle.
+	 */
+	mtk_dsi_stop(dsi);
+	mtk_dsi_set_cmd_mode(dsi);
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_phy_timconfig(dsi);
 
@@ -770,7 +809,16 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	 */
 	mtk_dsi_stop(dsi);
 
-	mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+	/*
+	 * On shutdown mtk_dsi_host_transfer() has already left the engine in
+	 * command mode (it no longer restarts video mode once the bridge is
+	 * disabled). Waiting for VM_DONE then always times out, since no more
+	 * frames are produced, and forces a needless engine reset. Only wait
+	 * for the frame to finish when the engine is actually still in video
+	 * mode.
+	 */
+	if (readl(dsi->regs + DSI_MODE_CTRL) & MODE)
+		mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_lane0_ulp_mode_enter(dsi);
 	mtk_dsi_clk_ulp_mode_enter(dsi);
@@ -778,6 +826,12 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	writel(0, dsi->regs + DSI_TXRX_CTRL);
 
 	mtk_dsi_disable(dsi);
+
+	/*
+	 * Mask all DSI interrupts before gating the clocks, so a pending or
+	 * late IRQ cannot hit the now-unclocked block and hang the SoC.
+	 */
+	writel(0, dsi->regs + DSI_INTEN);
 
 	clk_disable_unprepare(dsi->engine_clk);
 	clk_disable_unprepare(dsi->digital_clk);
@@ -791,6 +845,18 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 {
 	if (dsi->enabled)
 		return;
+
+	/*
+	 * A panel init transfer (drm_panel .prepare) in the pre-enable path
+	 * sets init_failed when a command times out. The DRM atomic enable
+	 * callbacks are void, so the panel/bridge error cannot be returned;
+	 * bail out here instead of starting video mode on a dead link, which
+	 * would otherwise time out the DSI engine and hard-hang the SoC.
+	 */
+	if (dsi->init_failed) {
+		DRM_ERROR("panel init failed, not starting DSI video mode\n");
+		return;
+	}
 
 	mtk_dsi_set_mode(dsi);
 	mtk_dsi_start(dsi);
@@ -1110,10 +1176,12 @@ static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
 	mtk_dsi_cmdq(dsi, msg);
 	mtk_dsi_start(dsi);
 
-	if (!mtk_dsi_wait_for_irq_done(dsi, flag, 2000))
+	if (!mtk_dsi_wait_for_irq_done(dsi, flag, 2000)) {
+		dsi->init_failed = true;
 		return -ETIME;
-	else
-		return 0;
+	}
+
+	return 0;
 }
 
 static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
@@ -1178,7 +1246,14 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 		 recv_cnt, *((u8 *)(msg->tx_buf)));
 
 restore_dsi_mode:
-	if (dsi_mode & MODE) {
+	/*
+	 * Only restart video mode if the output is still enabled. When the
+	 * bridge has already been disabled (shutdown in progress) the panel's
+	 * off commands are sent here in command mode; restarting the
+	 * OVL->RDMA->DSI pipeline mid-teardown wedges the engine, so leave the
+	 * DSI stopped in command mode instead.
+	 */
+	if ((dsi_mode & MODE) && dsi->enabled) {
 		mtk_dsi_set_mode(dsi);
 		mtk_dsi_start(dsi);
 	}
@@ -1240,16 +1315,14 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dsi);
 
+	ret = devm_request_irq(&pdev->dev, irq_num, mtk_dsi_irq,
+			       IRQF_TRIGGER_NONE, dev_name(&pdev->dev), dsi);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to request DSI irq\n");
+
 	ret = mipi_dsi_host_register(&dsi->host);
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to register DSI host\n");
-
-	ret = devm_request_irq(&pdev->dev, irq_num, mtk_dsi_irq,
-			       IRQF_TRIGGER_NONE, dev_name(&pdev->dev), dsi);
-	if (ret) {
-		mipi_dsi_host_unregister(&dsi->host);
-		return dev_err_probe(&pdev->dev, ret, "Failed to request DSI irq\n");
-	}
 
 	dsi->bridge.of_node = dev->of_node;
 	dsi->bridge.type = DRM_MODE_CONNECTOR_DSI;
@@ -1269,6 +1342,13 @@ static const struct mtk_dsi_driver_data mt8173_dsi_driver_data = {
 	.reg_cmdq_off = 0x200,
 	.reg_vm_cmd_off = 0x130,
 	.reg_shadow_dbg_off = 0x190
+};
+
+static const struct mtk_dsi_driver_data mt6797_dsi_driver_data = {
+	.reg_cmdq_off = 0x200,
+	.reg_vm_cmd_off = 0x130,
+	.reg_shadow_dbg_off = 0x190,
+	.no_porch_lp_comp = true,
 };
 
 static const struct mtk_dsi_driver_data mt2701_dsi_driver_data = {
@@ -1305,6 +1385,7 @@ static const struct mtk_dsi_driver_data mt8188_dsi_driver_data = {
 
 static const struct of_device_id mtk_dsi_of_match[] = {
 	{ .compatible = "mediatek,mt2701-dsi", .data = &mt2701_dsi_driver_data },
+	{ .compatible = "mediatek,mt6797-dsi", .data = &mt6797_dsi_driver_data },
 	{ .compatible = "mediatek,mt8173-dsi", .data = &mt8173_dsi_driver_data },
 	{ .compatible = "mediatek,mt8183-dsi", .data = &mt8183_dsi_driver_data },
 	{ .compatible = "mediatek,mt8186-dsi", .data = &mt8186_dsi_driver_data },
