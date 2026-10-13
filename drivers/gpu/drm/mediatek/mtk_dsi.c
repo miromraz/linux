@@ -302,8 +302,18 @@ static void mtk_dsi_disable(struct mtk_dsi *dsi)
 
 static void mtk_dsi_reset_engine(struct mtk_dsi *dsi)
 {
+	u32 inten = readl(dsi->regs + DSI_INTEN);
+
+	/*
+	 * Mask the DSI interrupts across the engine reset and restore them
+	 * afterwards, so a pending or late IRQ cannot fire while the block is
+	 * held in reset. Matches the vendor MT6797 driver (DSI_Reset() in
+	 * drivers/misc/mediatek/video/mt6797/dispsys/ddp_dsi.c).
+	 */
+	writel(0, dsi->regs + DSI_INTEN);
 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, DSI_RESET);
 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, 0);
+	writel(inten, dsi->regs + DSI_INTEN);
 }
 
 static void mtk_dsi_reset_dphy(struct mtk_dsi *dsi)
@@ -778,6 +788,12 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	writel(0, dsi->regs + DSI_TXRX_CTRL);
 
 	mtk_dsi_disable(dsi);
+
+	/*
+	 * Mask all DSI interrupts before gating the clocks, so a pending or
+	 * late IRQ cannot hit the now-unclocked block and hang the SoC.
+	 */
+	writel(0, dsi->regs + DSI_INTEN);
 
 	clk_disable_unprepare(dsi->engine_clk);
 	clk_disable_unprepare(dsi->digital_clk);
