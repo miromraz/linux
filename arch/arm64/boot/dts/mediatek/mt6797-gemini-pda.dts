@@ -1,0 +1,1193 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (c) 2026 Julien Etienne
+ */
+
+/dts-v1/;
+
+#include "mt6797.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/iio/adc/mediatek,mt6351-auxadc.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "Planet Computers Gemini PDA";
+	chassis-type = "handset";
+	compatible = "planet,gemini-pda", "mediatek,mt6797";
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		stdout-path = "serial0:921600n8";
+	};
+
+	/*
+	 * GPU operating points for this board's MT6797 speed bin. The
+	 * frequency/voltage pairs are the vendor 3.18 mt_gpufreq non-M-bin
+	 * grid (238-700 MHz); M-bin parts use a disjoint grid topping out at
+	 * 600 MHz, so this table is not valid for every MT6797 and lives in
+	 * the board DTS rather than the shared SoC dtsi.
+	 */
+	gpu_opp_table: opp-table-gpu {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-238000000 {
+			opp-hz = /bits/ 64 <238000000>;
+			opp-microvolt = <862500>;
+		};
+		opp-365000000 {
+			opp-hz = /bits/ 64 <365000000>;
+			opp-microvolt = <912500>;
+		};
+		opp-442500000 {
+			opp-hz = /bits/ 64 <442500000>;
+			opp-microvolt = <975000>;
+		};
+		opp-520000000 {
+			opp-hz = /bits/ 64 <520000000>;
+			opp-microvolt = <1006250>;
+		};
+		opp-610000000 {
+			opp-hz = /bits/ 64 <610000000>;
+			opp-microvolt = <1081250>;
+		};
+		opp-700000000 {
+			opp-hz = /bits/ 64 <700000000>;
+			opp-microvolt = <1131250>;
+		};
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0 0x40000000 1 0>;
+	};
+
+	/*
+	 * Vibrator driven by the MT6351 VIBR LDO. The vendor vibrator node
+	 * selects VOSEL 5 (vib_vol = <5>), which the MT6351 VIBR voltage table
+	 * maps to 2.8 V.
+	 */
+	vibrator {
+		compatible = "regulator-haptic";
+		haptic-supply = <&mt6351_vibr_reg>;
+		min-microvolt = <2800000>;
+		max-microvolt = <2800000>;
+	};
+
+	/*
+	 * VBUS switch for the right USB-C port (USB11 MUSB host). The vendor
+	 * Type-C flow drives USB1 DRVVBUS (GPIO94) high to source 5 V when a
+	 * device attaches in source role (drivers/misc/mediatek/usb_c/.../
+	 * usb_typec.c; aeon_gpio.dtsi labels GPIO94 "usb1_drvvbus"). Active
+	 * high, left off at boot.
+	 */
+	usb_p1_vbus: regulator-usb-p1-vbus {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-p1-vbus";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&pio 94 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		vin-supply = <&usb_p1_sw7226>;
+	};
+
+	/*
+	 * SW7226 load switch in front of the right USB-C VBUS. The vendor
+	 * Type-C flow turns it on (sw7226_en, GPIO72 high) together with
+	 * DRVVBUS when a device attaches in USB source role
+	 * (usb_typec.c:146, "usb1 OTG mode" branch), and off again on
+	 * detach (usb_typec.c:101). Model it as the input supply of
+	 * usb_p1_vbus so both switches follow the host's VBUS enable.
+	 */
+	usb_p1_sw7226: regulator-usb-p1-sw7226 {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-p1-sw7226";
+		gpio = <&pio 72 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	/*
+	 * Single-cell Li-Ion pack. The design capacity is the vendor
+	 * fuel-gauge Q_MAX at 25 C (mt_battery_meter.h: Q_MAX_POS_25 =
+	 * 4268 mAh). The open-circuit-voltage table is taken from the vendor
+	 * 25 C profile battery_profile_t2[] in mt_battery_meter_table.h, which
+	 * lists depth-of-discharge against resting voltage in mV; the capacity
+	 * column here is 100 - depth-of-discharge.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <4268000>;
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4416000>;
+		ocv-capacity-celsius = <25>;
+		ocv-capacity-table-0 =
+			<4357000 100>, <4301000 95>, <4248000 91>, <4196000 86>,
+			<4132000 80>, <4082000 75>, <4023000 70>, <3970000 65>,
+			<3941000 60>, <3888000 56>, <3849000 50>, <3826000 45>,
+			<3807000 40>, <3789000 35>, <3776000 30>, <3760000 25>,
+			<3739000 19>, <3715000 15>, <3688000 10>, <3681000 5>,
+			<3483000 1>, <3400000 0>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/*
+		 * Fixed firmware reservations carried over from the vendor
+		 * mt6797.dtsi. By base address the owners are: 0x40000000 the
+		 * preloader-preserved first DRAM page; 0x44400000 ram_console;
+		 * 0x44410000 pstore/ramoops; 0x444f0000 minirdump; 0x44600000
+		 * ARM Trusted Firmware; 0x44610000 ATF ramdump; 0x44640000
+		 * i-cache dump; 0x44800000 preloader; 0x46000000 LK. Linux must
+		 * not map any of them (no-map); the retained MT6797 LK adds its
+		 * further runtime mblock reservations after this DT is loaded.
+		 */
+		memory@40000000 {
+			reg = <0 0x40000000 0 0x1000>;
+			no-map;
+		};
+
+		memory@44400000 {
+			reg = <0 0x44400000 0 0x10000>;
+			no-map;
+		};
+
+		ramoops@44410000 {
+			compatible = "ramoops";
+			reg = <0 0x44410000 0 0xe0000>;
+			record-size = <0x1000>;
+			console-size = <0x10000>;
+			ftrace-size = <0x1000>;
+			pmsg-size = <0x20000>;
+			mem-type = <0>;
+			no-map;
+		};
+
+		memory@444f0000 {
+			reg = <0 0x444f0000 0 0x10000>;
+			no-map;
+		};
+
+		memory@44600000 {
+			reg = <0 0x44600000 0 0x10000>;
+			no-map;
+		};
+
+		memory@44610000 {
+			reg = <0 0x44610000 0 0x30000>;
+			no-map;
+		};
+
+		memory@44640000 {
+			reg = <0 0x44640000 0 0x30000>;
+			no-map;
+		};
+
+		memory@44800000 {
+			reg = <0 0x44800000 0 0x100000>;
+			no-map;
+		};
+
+		memory@46000000 {
+			reg = <0 0x46000000 0 0x400000>;
+			no-map;
+		};
+	};
+};
+
+&mt6351regulator {
+	mt6351_vemc_reg: ldo-vemc {
+		regulator-name = "vemc_3v3";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+	};
+
+	mt6351_vio18_reg: ldo-vio18 {
+		regulator-name = "vio18";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
+	mt6351_vmch_reg: ldo-vmch {
+		regulator-name = "vmch_3v3";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	mt6351_vmc_reg: ldo-vmc {
+		regulator-name = "vmc";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <3300000>;
+	};
+
+	mt6351_vibr_reg: ldo-vibr {
+		regulator-name = "vibr";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+	};
+
+	/*
+	 * USB rails for the left-port MTU3 T-PHY (u2port0). The MT6351 VUSB33
+	 * (3.3 V) and VA10 (PHY analog) outputs must be live before the T-PHY
+	 * registers at 0x11290800 are written; U-Boot's working fastboot gadget
+	 * powers both. VUSB33 is enabled on demand by the mtu3 driver through
+	 * its vusb33-supply; VA10 has no mainline T-PHY consumer, so keep it on.
+	 */
+	mt6351_vusb33_reg: ldo-vusb33 {
+		regulator-name = "vusb33";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+	};
+
+	mt6351_va10_reg: ldo-va10 {
+		regulator-name = "va10";
+		regulator-min-microvolt = <950000>;
+		regulator-max-microvolt = <950000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+};
+
+&pmic {
+	/*
+	 * MT6351 ISINK current-sink LEDs. Vendor aeon6797_6m_n.dts led@0/led@1
+	 * drive the red/green indicators from ISINK0/ISINK1 (led_mode = 3).
+	 */
+	leds {
+		compatible = "mediatek,mt6351-led";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		led@0 {
+			reg = <0>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+		};
+
+		led@1 {
+			reg = <1>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_INDICATOR;
+		};
+	};
+};
+
+&pio {
+	/*
+	 * Static data-path routing for the right USB-C port (ON Semi
+	 * FUSB301A switch). The vendor Type-C idle/attach state drives
+	 * sw_en (GPIO70) high and sw_sel (GPIO71) low to route the USB1
+	 * data lanes; the USB (non-HDMI) attach path leaves them there
+	 * (usb_typec.c:99-100, fusb300_gpio_init()).
+	 */
+	usb11-sw-en-hog {
+		gpio-hog;
+		gpios = <70 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "fusb301a_sw_en";
+	};
+
+	usb11-sw-sel-hog {
+		gpio-hog;
+		gpios = <71 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "fusb301a_sw_sel";
+	};
+
+	uart0_gemini_pins: uart0-gemini-pins {
+		pins-rx-tx {
+			pinmux = <MT6797_GPIO97__FUNC_URXD0>,
+				 <MT6797_GPIO98__FUNC_UTXD0>;
+		};
+	};
+
+	mmc0_pins_default: mmc0-default-pins {
+		pins-cmd-dat {
+			pinmux = <MT6797_GPIO114__FUNC_MSDC0_DAT0>,
+				 <MT6797_GPIO115__FUNC_MSDC0_DAT1>,
+				 <MT6797_GPIO116__FUNC_MSDC0_DAT2>,
+				 <MT6797_GPIO117__FUNC_MSDC0_DAT3>,
+				 <MT6797_GPIO118__FUNC_MSDC0_DAT4>,
+				 <MT6797_GPIO119__FUNC_MSDC0_DAT5>,
+				 <MT6797_GPIO120__FUNC_MSDC0_DAT6>,
+				 <MT6797_GPIO121__FUNC_MSDC0_DAT7>,
+				 <MT6797_GPIO122__FUNC_MSDC0_CMD>;
+		};
+
+		pins-clk {
+			pinmux = <MT6797_GPIO123__FUNC_MSDC0_CLK>;
+		};
+
+		pins-ds {
+			pinmux = <MT6797_GPIO124__FUNC_MSDC0_DSL>;
+		};
+
+		pins-rst {
+			pinmux = <MT6797_GPIO125__FUNC_MSDC0_RSTB>;
+		};
+	};
+
+	/*
+	 * Pull and drive values follow the vendor aeon6797_6m_n.dts mmc1 groups
+	 * (cmd/dat pull-up, clk pull-down; drive-strength is written as a raw
+	 * MT6797 register code as on all MT6797 pads). Card detect is GPIO67
+	 * (vendor EINT6) with an internal pull-up.
+	 */
+	mmc1_pins_default: mmc1-default-pins {
+		pins-cmd-dat {
+			pinmux = <MT6797_GPIO130__FUNC_MSDC1_DAT0>,
+				 <MT6797_GPIO131__FUNC_MSDC1_DAT1>,
+				 <MT6797_GPIO132__FUNC_MSDC1_DAT2>,
+				 <MT6797_GPIO133__FUNC_MSDC1_DAT3>,
+				 <MT6797_GPIO129__FUNC_MSDC1_CMD>;
+			drive-strength = <4>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+
+		pins-clk {
+			pinmux = <MT6797_GPIO134__FUNC_MSDC1_CLK>;
+			drive-strength = <4>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	mmc1_cd_pins: mmc1-cd-pins {
+		pins-cd {
+			pinmux = <MT6797_GPIO67__FUNC_GPIO67>;
+			input-enable;
+			bias-pull-up;
+		};
+	};
+
+	hall_pins: hall-pins {
+		pins-hall {
+			pinmux = <MT6797_GPIO66__FUNC_GPIO66>;
+		};
+	};
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_gemini_pins>;
+	status = "okay";
+};
+
+&mmc0 {
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc0_pins_default>;
+	pinctrl-1 = <&mmc0_pins_default>;
+	bus-width = <8>;
+	max-frequency = <25000000>;
+	vmmc-supply = <&mt6351_vemc_reg>;
+	vqmmc-supply = <&mt6351_vio18_reg>;
+	non-removable;
+	no-sd;
+	no-sdio;
+	status = "okay";
+};
+
+&mmc1 {
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
+	pinctrl-1 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
+	bus-width = <4>;
+	max-frequency = <200000000>;
+	cap-sd-highspeed;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-sdr104;
+	cd-gpios = <&pio 67 GPIO_ACTIVE_HIGH>;
+	vmmc-supply = <&mt6351_vmch_reg>;
+	vqmmc-supply = <&mt6351_vmc_reg>;
+	no-mmc;
+	no-sdio;
+	status = "okay";
+};
+
+&i2c6 {
+	clock-frequency = <3400000>;
+	mediatek,use-push-pull;
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c6_pins_a>;
+	status = "okay";
+
+	da9214: regulator@68 {
+		compatible = "dlg,da9214";
+		reg = <0x68>;
+
+		regulators {
+			da9214_bucka: BUCKA {
+				regulator-name = "vproc-little";
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			da9214_buckb: BUCKB {
+				regulator-name = "vproc-big";
+				regulator-always-on;
+				regulator-boot-on;
+			};
+		};
+	};
+};
+
+&i2c7 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c7_pins_a>;
+	status = "okay";
+
+	/* External GPU buck: Richtek RT5735 at I2C address 0x1c. */
+	rt5735_vgpu: regulator@1c {
+		compatible = "richtek,rt5735";
+		reg = <0x1c>;
+		regulator-name = "vgpu";
+		regulator-min-microvolt = <862500>;
+		regulator-max-microvolt = <1131250>;
+		regulator-ramp-delay = <32000>;
+	};
+};
+
+&pio {
+	lcd_bias_pins: lcd-bias-pins {
+		pins-enp-enn {
+			pinmux = <MT6797_GPIO60__FUNC_GPIO60>,
+				 <MT6797_GPIO251__FUNC_GPIO251>;
+		};
+	};
+};
+
+&i2c1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c1_pins_a>;
+	status = "okay";
+
+	/*
+	 * Bosch BMI160 accelerometer/gyroscope. The vendor rewrites its logical
+	 * 0x68 client to 0x69 in probe, which is the I2C1 address used on the
+	 * board. The
+	 * mount-matrix is the vendor coordinate direction 7 (aeon6797_6m_n.dts
+	 * cust_accel@1/cust_gyro@1) expanded through the MediaTek hwmsen
+	 * conversion table (sign {-1,-1,-1}, axis map {1,0,2}).
+	 */
+	bmi160: imu@69 {
+		compatible = "bosch,bmi160";
+		reg = <0x69>;
+		label = "accel-base";
+		mount-matrix = "0", "-1", "0",
+			       "-1", "0", "0",
+			       "0", "0", "-1";
+	};
+
+	/*
+	 * LCD bias for the internal panel. The vendor driver treats it as an
+	 * "lp3101" at I2C1 0x3e, which is register-compatible with the TI
+	 * TPS65132 dual output regulator. ENP (GPIO60) gates the positive OUTP
+	 * rail and ENN (GPIO251) the negative OUTN rail, both active-high per
+	 * aeon_gpio.dtsi:143-170. The vendor LCM writes VPOS/VNEG = 0x0f, i.e.
+	 * +/-5.5 V (lp3101.c:105-125).
+	 */
+	lcd_bias: regulator@3e {
+		compatible = "ti,tps65132";
+		reg = <0x3e>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&lcd_bias_pins>;
+
+		reg_lcd_bias_outp: outp {
+			regulator-name = "lcd-bias-outp";
+			regulator-min-microvolt = <5500000>;
+			regulator-max-microvolt = <5500000>;
+			enable-gpios = <&pio 60 GPIO_ACTIVE_HIGH>;
+		};
+
+		reg_lcd_bias_outn: outn {
+			regulator-name = "lcd-bias-outn";
+			regulator-min-microvolt = <5500000>;
+			regulator-max-microvolt = <5500000>;
+			enable-gpios = <&pio 251 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	/*
+	 * Sensortek STK3x1x ambient-light/proximity sensor. Vendor
+	 * aeon6797_6m_n.dts cust_alsps@0 uses I2C1 0x48 with EINT on
+	 * GPIO88 (= EINT11, alspspincfg) and ps_threshold_high = 50.
+	 */
+	light-sensor@48 {
+		compatible = "sensortek,stk3310";
+		reg = <0x48>;
+		interrupt-parent = <&pio>;
+		interrupts = <11 IRQ_TYPE_EDGE_FALLING>;
+		proximity-near-level = <50>;
+	};
+};
+
+&i2c4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c4_pins_a>;
+	status = "okay";
+
+	/*
+	 * Novatek NT36772 TDDI touchscreen. The vendor aeon6797_6m_n.dts uses
+	 * I2C4 with the 0x62 bootloader address for firmware commands and the
+	 * 0x01 FW address for touch and parameter reads; the mainline driver
+	 * only needs the FW address, so the node sits at 0x01. Interrupt on
+	 * GPIO85/EINT8, reset (active-low RESX) on GPIO68. As a TDDI controller
+	 * it shares the panel's always-on rails, which are not switchable from
+	 * this node, so no supply is described (the dummy regulators cover it).
+	 * The controller's raw frame is 180 degrees rotated from the panel's
+	 * scan-out, so invert both axes to report in the panel's native
+	 * portrait frame. The display's mounted rotation is described on the
+	 * panel node, not here.
+	 */
+	touchscreen@1 {
+		compatible = "novatek,nt36772-ts";
+		reg = <0x01>;
+		interrupt-parent = <&pio>;
+		interrupts = <8 IRQ_TYPE_EDGE_FALLING>;
+		reset-gpios = <&pio 68 GPIO_ACTIVE_LOW>;
+		touchscreen-inverted-x;
+		touchscreen-inverted-y;
+		panel = <&panel>;
+	};
+};
+
+/*
+ * Panel backlight driven by the MT6797 display PWM. The vendor backlight
+ * node (aeon6797_6m_n.dts led6, "mediatek,lcd-backlight") selects
+ * led_mode = <5>, i.e. the display PWM source.
+ */
+&disp_pwm {
+	status = "okay";
+};
+
+&{/} {
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&disp_pwm 0 500000>;
+		brightness-levels = <0 16 32 48 64 80 96 112 128
+				     144 160 176 192 208 224 240 255>;
+		default-brightness-level = <10>;
+	};
+};
+
+&pio {
+	keyboard_soc_pins: keyboard-soc-pins {
+		pins-reset {
+			pinmux = <MT6797_GPIO58__FUNC_GPIO58>;
+			output-high;
+		};
+
+		pins-irq {
+			pinmux = <MT6797_GPIO87__FUNC_EINT10>;
+		};
+	};
+};
+
+&i2c5 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c5_pins_a>;
+	status = "okay";
+
+	aw9523: gpio-expander@5b {
+		compatible = "awinic,aw9523-pinctrl";
+		reg = <0x5b>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&keyboard_soc_pins>;
+		interrupt-parent = <&pio>;
+		interrupts = <10 IRQ_TYPE_LEVEL_LOW>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		gpio-ranges = <&aw9523 0 0 16>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		reset-gpios = <&pio 58 GPIO_ACTIVE_HIGH>;
+
+		keyboard_matrix_row_pins: keyboard-matrix-row-pins {
+			pins = "gpio0", "gpio1", "gpio2", "gpio3",
+			       "gpio4", "gpio5", "gpio6", "gpio7";
+			function = "gpio";
+			bias-pull-up;
+			drive-open-drain;
+			input-enable;
+		};
+
+		keyboard_matrix_col_pins: keyboard-matrix-col-pins {
+			pins = "gpio8", "gpio9", "gpio10", "gpio11",
+			       "gpio12", "gpio13", "gpio14";
+			function = "gpio";
+			input-disable;
+			output-low;
+		};
+	};
+};
+
+&{/} {
+	keyboard-matrix {
+		compatible = "gpio-matrix-keypad";
+		pinctrl-names = "default";
+		gpio-activelow;
+		drive-inactive-cols;
+		pinctrl-0 = <&keyboard_matrix_row_pins
+				     &keyboard_matrix_col_pins>;
+		row-gpios = <&aw9523 0 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 1 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 2 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 3 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 4 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 5 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 6 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 7 GPIO_ACTIVE_HIGH>;
+		col-gpios = <&aw9523 8 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 9 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 10 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 11 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 12 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 13 GPIO_ACTIVE_HIGH>,
+			    <&aw9523 14 GPIO_ACTIVE_HIGH>;
+		linux,keymap = <
+			MATRIX_KEY(0, 0, KEY_1)
+			MATRIX_KEY(1, 0, KEY_U)
+			MATRIX_KEY(2, 0, KEY_S)
+			MATRIX_KEY(3, 0, KEY_Z)
+			MATRIX_KEY(4, 0, KEY_COMMA)
+			MATRIX_KEY(5, 0, KEY_APOSTROPHE)
+			MATRIX_KEY(6, 0, KEY_8)
+			MATRIX_KEY(7, 0, KEY_J)
+			MATRIX_KEY(0, 1, KEY_2)
+			MATRIX_KEY(1, 1, KEY_W)
+			MATRIX_KEY(2, 1, KEY_D)
+			MATRIX_KEY(3, 1, KEY_C)
+			MATRIX_KEY(4, 1, KEY_LEFTALT)
+			MATRIX_KEY(5, 1, KEY_LEFT)
+			MATRIX_KEY(6, 1, KEY_9)
+			MATRIX_KEY(7, 1, KEY_K)
+			MATRIX_KEY(0, 2, KEY_3)
+			MATRIX_KEY(1, 2, KEY_Y)
+			MATRIX_KEY(2, 2, KEY_TAB)
+			MATRIX_KEY(3, 2, KEY_N)
+			MATRIX_KEY(4, 2, KEY_M)
+			MATRIX_KEY(5, 2, KEY_DOWN)
+			MATRIX_KEY(6, 2, KEY_BACKSPACE)
+			MATRIX_KEY(7, 2, KEY_I)
+			MATRIX_KEY(0, 3, KEY_4)
+			MATRIX_KEY(1, 3, KEY_T)
+			MATRIX_KEY(2, 3, KEY_F)
+			MATRIX_KEY(3, 3, KEY_X)
+			MATRIX_KEY(4, 3, KEY_LEFTMETA)
+			MATRIX_KEY(5, 3, KEY_RIGHTSHIFT)
+			MATRIX_KEY(6, 3, KEY_P)
+			MATRIX_KEY(0, 4, KEY_5)
+			MATRIX_KEY(1, 4, KEY_E)
+			MATRIX_KEY(2, 4, KEY_G)
+			MATRIX_KEY(3, 4, KEY_V)
+			MATRIX_KEY(4, 4, KEY_SPACE)
+			MATRIX_KEY(5, 4, KEY_UP)
+			MATRIX_KEY(6, 4, KEY_O)
+			MATRIX_KEY(0, 5, KEY_6)
+			MATRIX_KEY(1, 5, KEY_Q)
+			MATRIX_KEY(2, 5, KEY_A)
+			MATRIX_KEY(3, 5, KEY_B)
+			MATRIX_KEY(4, 5, KEY_DOT)
+			MATRIX_KEY(5, 5, KEY_RIGHT)
+			MATRIX_KEY(6, 5, KEY_ENTER)
+			MATRIX_KEY(0, 6, KEY_7)
+			MATRIX_KEY(1, 6, KEY_R)
+			MATRIX_KEY(2, 6, KEY_H)
+			MATRIX_KEY(3, 6, KEY_LEFTSHIFT)
+			MATRIX_KEY(4, 6, KEY_LEFTCTRL)
+			MATRIX_KEY(5, 6, KEY_L)
+			MATRIX_KEY(6, 6, KEY_0)>;
+		/*
+		 * The row lines are AW9523 inputs whose change-of-state
+		 * interrupt is multiplexed onto the expander INT pin
+		 * (SoC GPIO87 / EINT10). matrix_keypad takes the per-row
+		 * interrupts from the AW9523 nested irqchip, so the scan is
+		 * driven by key presses instead of being polled.
+		 */
+	};
+};
+
+/*
+ * The left USB-C connector is wired to the MTU3 dual-role controller. Run it as
+ * a USB2 (high-speed) peripheral/gadget via the u2port0 T-PHY. Enabling these
+ * nodes previously hung the kernel before /init with no console; the hang was
+ * never root-caused (a bare MMIO access to an unclocked or unpowered SSUSB/
+ * T-PHY block, or the assigned-clock reparent, are the leading suspects). One
+ * concrete gap is that the mtu3 vusb33-supply was undescribed, so the MT6351
+ * VUSB33/VA10 PHY rails stayed off where U-Boot's working fastboot gadget turns
+ * them on; wire them up here (VA10 always-on, VUSB33 via vusb33-supply below).
+ */
+&u3phy {
+	status = "okay";
+};
+
+&u2port0 {
+	clocks = <&clk26m>, <&apmixedsys CLK_APMIXED_SSUSB_REF>;
+	clock-names = "ref", "da_ref";
+	status = "okay";
+};
+
+/*
+ * The MT6797 USBMAC/VUSB10 power-up that the T-PHY applies for the MTU3 gadget
+ * lives in the U3 PHYA and shared CHIP banks, so u3port0 must be powered on even
+ * though the gadget runs at high speed only. Keep the dtsi phys list (u2 + u3);
+ * maximum-speed below caps enumeration at high speed.
+ */
+&u3port0 {
+	status = "okay";
+};
+
+&ssusb {
+	assigned-clocks = <&topckgen CLK_TOP_MUX_SSUSB_TOP_SYS>;
+	assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL3_D2>;
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	vusb33-supply = <&mt6351_vusb33_reg>;
+	status = "okay";
+};
+
+/*
+ * The right USB-C connector is wired to the USB11 MUSB controller, which the
+ * vendor runs as a full-speed host only (CONFIG_MTK_USBFSH, "Host-only MUSB
+ * hardware"). Enable the controller and its USB2 T-PHY; the SoC description
+ * already fixes dr_mode = "host". Select the proven 26 MHz PHY reference as
+ * on the left-port u2port0.
+ */
+&usb11_tphy {
+	status = "okay";
+};
+
+&usb11_u2 {
+	clocks = <&clk26m>;
+	status = "okay";
+};
+
+&usb11 {
+	status = "okay";
+};
+
+&i2c0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_pins_a>;
+	status = "okay";
+
+	/*
+	 * ON Semi FUSB301A autonomous Type-C controller for the right USB-C
+	 * port. Its active-low interrupt is wired to GPIO64/EINT3; the FUSB301A
+	 * on I2C1 has no usable interrupt line and is therefore not described.
+	 */
+	fusb301: typec@25 {
+		compatible = "onnn,fusb301a", "onnn,fusb301";
+		reg = <0x25>;
+		interrupt-parent = <&pio>;
+		interrupts = <3 IRQ_TYPE_LEVEL_LOW>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			power-role = "source";
+			data-role = "host";
+			typec-power-opmode = "default";
+			pd-disable;
+			vbus-supply = <&usb_p1_vbus>;
+		};
+	};
+
+	/*
+	 * TI BQ25896 single-cell Li-Ion charger. The vendor DT mislabels it
+	 * "bq24261@6b", but the board enables MTK_BQ25896_SUPPORT and the part
+	 * answers at 0x6b. Its INT line is not routed (the vendor firmware
+	 * tracks the MT6351 charger-detect comparator instead), so the driver
+	 * polls the status registers.
+	 *
+	 * Charge voltage (4.416 V) and current (2.048 A) match the vendor
+	 * settings. Termination (256 mA), precharge (128 mA), minimum system
+	 * voltage (3.5 V) and boost voltage (5.126 V) are the BQ25896 power-on
+	 * reset defaults (REG05 = 0x13, REG03 = 0x1a, REG0A = 0x93); the vendor
+	 * does not reprogram them. The 1.3 A boost current limit matches the
+	 * value the vendor firmware writes.
+	 *
+	 * The vendor kernel never resets the charger, so use linux,skip-reset to
+	 * keep the bootloader's setup. The BQ25896 has no D+/D- connection; a
+	 * register reset (REG_RST) instead reloads every register to its default
+	 * - IINLIM back to 500 mA, EN_HIZ, the I2C watchdog and CONV_RATE - and
+	 * restarts the converter, which can glitch VBUS and disturb an already
+	 * enumerated MTU3 gadget.
+	 */
+	charger: charger@6b {
+		compatible = "ti,bq25896", "ti,bq25890";
+		reg = <0x6b>;
+		linux,skip-reset;
+
+		monitored-battery = <&battery>;
+
+		ti,battery-regulation-voltage = <4416000>;
+		ti,charge-current = <2048000>;
+		ti,termination-current = <256000>;
+		ti,precharge-current = <128000>;
+		ti,minimum-sys-voltage = <3500000>;
+		ti,boost-voltage = <5126000>;
+		ti,boost-max-current = <1300000>;
+	};
+
+	/* FAN49101 is populated, but keep the regulator and consumer disabled. */
+	fan49101: regulator@70 {
+		compatible = "onnn,fan49101";
+		reg = <0x70>;
+		status = "disabled";
+
+		regulators {
+			fan49101_vout: vout {
+				regulator-name = "fan49101-vout";
+				regulator-min-microvolt = <603000>;
+				regulator-max-microvolt = <1411038>;
+			};
+		};
+	};
+};
+
+&i2c3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c3_pins_a>;
+	status = "okay";
+
+	/*
+	 * Awinic AW9120 20-channel constant-current LED controller on I2C3
+	 * (address 0x2c, PDN on GPIO245). The per-output colour map follows
+	 * the vendor Android LED mapping: five RGB indicator blocks, an RGB
+	 * status LED, a caps-lock LED and a power LED.
+	 */
+	led-controller@2c {
+		compatible = "awinic,aw9120";
+		reg = <0x2c>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		enable-gpios = <&pio 245 GPIO_ACTIVE_HIGH>;
+
+		multi-led@0 {
+			reg = <0>;
+			color = <LED_COLOR_ID_RGB>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@0 {
+				reg = <0>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@1 {
+				reg = <1>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@2 {
+				reg = <2>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
+		};
+
+		multi-led@3 {
+			reg = <3>;
+			color = <LED_COLOR_ID_RGB>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@3 {
+				reg = <3>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@4 {
+				reg = <4>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@5 {
+				reg = <5>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
+		};
+
+		multi-led@6 {
+			reg = <6>;
+			color = <LED_COLOR_ID_RGB>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <4>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@6 {
+				reg = <6>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@7 {
+				reg = <7>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@8 {
+				reg = <8>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
+		};
+
+		multi-led@9 {
+			reg = <9>;
+			color = <LED_COLOR_ID_RGB>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <5>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@9 {
+				reg = <9>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@a {
+				reg = <10>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@b {
+				reg = <11>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
+		};
+
+		multi-led@c {
+			reg = <12>;
+			color = <LED_COLOR_ID_RGB>;
+			function = LED_FUNCTION_INDICATOR;
+			function-enumerator = <2>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@c {
+				reg = <12>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@d {
+				reg = <13>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@e {
+				reg = <14>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
+		};
+
+		multi-led@f {
+			reg = <15>;
+			color = <LED_COLOR_ID_RGB>;
+			function = LED_FUNCTION_STATUS;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			led@f {
+				reg = <15>;
+				color = <LED_COLOR_ID_RED>;
+			};
+
+			led@10 {
+				reg = <16>;
+				color = <LED_COLOR_ID_GREEN>;
+			};
+
+			led@11 {
+				reg = <17>;
+				color = <LED_COLOR_ID_BLUE>;
+			};
+		};
+
+		led@12 {
+			reg = <18>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_CAPSLOCK;
+		};
+
+		led@13 {
+			reg = <19>;
+			color = <LED_COLOR_ID_BLUE>;
+			function = LED_FUNCTION_POWER;
+		};
+	};
+};
+
+&mfg_async {
+	/*
+	 * Keep the GPU (MFG) rail up while the MFG_ASYNC/MFG power domains
+	 * are powered. Without it the MFG power-on ack times out, the
+	 * power-controller probe fails and its cleanup powers off the
+	 * already-on MM domain, blanking the LK-enabled display.
+	 */
+	domain-supply = <&rt5735_vgpu>;
+};
+
+&mfgsys {
+	status = "okay";
+};
+
+&gpu {
+	mali-supply = <&rt5735_vgpu>;
+	operating-points-v2 = <&gpu_opp_table>;
+	status = "okay";
+};
+
+&{/} {
+	hall_gpio_keys: gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&hall_pins>;
+
+		hall-switch {
+			/* Vendor hall.c maps raw low to FCOVER_CLOSE/SW_LID=1. */
+			label = "Hall lid";
+			linux,input-type = <EV_SW>;
+			linux,code = <SW_LID>;
+			gpios = <&pio 66 GPIO_ACTIVE_LOW>;
+			debounce-interval = <64>;
+		};
+	};
+};
+
+&pio {
+	panel_pins: panel-pins {
+		pins-reset {
+			pinmux = <MT6797_GPIO180__FUNC_GPIO180>;
+		};
+	};
+};
+
+&mipi_tx0 {
+	status = "okay";
+};
+
+&dsi0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/*
+	 * NT36672-class FHD+ DSI video panel (vendor LCM
+	 * aeon_nt36672_fhd_dsi_vdo_x600_xinli): 4-lane burst mode, reset on
+	 * GPIO180 (LCM_RST). The panel's AVDD/AVEE analog rails are supplied by
+	 * the TPS65132 bias OUTP/OUTN outputs; the vendor sequence enables both
+	 * before releasing reset. VDDI is not switched by the vendor LCM (its
+	 * PMIC VGP1 calls are commented out), so no digital supply is described
+	 * here.
+	 */
+	panel: panel@0 {
+		compatible = "planet,gemini-pda-nt36672";
+		reg = <0>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&panel_pins>;
+		reset-gpios = <&pio 180 GPIO_ACTIVE_HIGH>;
+		avdd-supply = <&reg_lcd_bias_outp>;
+		avee-supply = <&reg_lcd_bias_outn>;
+		backlight = <&backlight>;
+		rotation = <270>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi0_out_ep>;
+			};
+		};
+	};
+};
+
+&dsi0_out {
+	dsi0_out_ep: endpoint {
+		remote-endpoint = <&panel_in>;
+	};
+};
+
+&afe {
+	status = "okay";
+};
+
+&pmic {
+	mt6351_codec: audio-codec {
+		compatible = "mediatek,mt6351-sound";
+	};
+
+	keys {
+		compatible = "mediatek,mt6351-keys";
+
+		power {
+			linux,keycodes = <KEY_POWER>;
+			wakeup-source;
+		};
+
+		home {
+			linux,keycodes = <KEY_HOME>;
+		};
+	};
+
+	accdet: accdet {
+		compatible = "mediatek,mt6351-accdet";
+		io-channels = <&pmic_adc MT6351_AUXADC_ACCDET>;
+		io-channel-names = "accdet";
+		nvmem-cells = <&accdet_calibration>;
+		nvmem-cell-names = "accdet-offset";
+		mediatek,mic-vol = <7>;
+		mediatek,mic-mode = <1>;
+		mediatek,key-mode = <0>;
+		mediatek,pwm-deb-setting = <0x500 0x500 1 0x1f0 0x800 0x800 0x20>;
+		mediatek,three-key-thr = <0 80 220 400>;
+	};
+};
+
+&{/} {
+	/*
+	 * Two one-wire pulse controlled class-D loudspeaker amplifiers
+	 * (AW8736-style). The vendor kernel pulses EXT_SPKAMP_EN (GPIO243) and
+	 * EXT_SPKAMP2_EN (GPIO244) three times (2 us low/high) to enable them.
+	 * They are fed from the MT6351 headphone outputs, not LINEOUT: playing
+	 * through LINEOUT L is silent, while routing DACL/DACR to HPL/HPR makes
+	 * the speakers play (vendor Headset_Speaker_Amp_Change(),
+	 * mt_soc_codec_63xx.c:2388, drives the headphone buffers for the
+	 * external amps).
+	 */
+	speaker_amp1: audio-amplifier-0 {
+		compatible = "awinic,aw8738";
+		mode-gpios = <&pio 243 GPIO_ACTIVE_HIGH>;
+		awinic,mode = <3>;
+		sound-name-prefix = "Speaker Amp 1";
+	};
+
+	speaker_amp2: audio-amplifier-1 {
+		compatible = "awinic,aw8738";
+		mode-gpios = <&pio 244 GPIO_ACTIVE_HIGH>;
+		awinic,mode = <3>;
+		sound-name-prefix = "Speaker Amp 2";
+	};
+
+	sound {
+		compatible = "mediatek,mt6797-mt6351-sound";
+		mediatek,platform = <&afe>;
+		mediatek,audio-codec = <&mt6351_codec>;
+		mediatek,accdet = <&accdet>;
+		aux-devs = <&speaker_amp1>, <&speaker_amp2>;
+		audio-routing = "Speaker Amp 1 IN", "Headphone L",
+				"Speaker Amp 2 IN", "Headphone R";
+	};
+};
