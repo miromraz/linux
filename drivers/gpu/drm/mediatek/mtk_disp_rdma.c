@@ -11,6 +11,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/reset.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
 
 #include "mtk_crtc.h"
@@ -45,11 +46,15 @@
 #define MEM_MODE_INPUT_SWAP				BIT(8)
 #define DISP_RDMA_MEM_SRC_PITCH			0x002c
 #define DISP_RDMA_MEM_GMC_SETTING_0		0x0030
+#define DISP_RDMA_MEM_GMC_SETTING_1		0x0034
+#define DISP_RDMA_MEM_GMC_SETTING_2		0x003c
 #define DISP_REG_RDMA_FIFO_CON			0x0040
 #define RDMA_FIFO_UNDERFLOW_EN				BIT(31)
 #define RDMA_FIFO_PSEUDO_SIZE(bytes)			(((bytes) / 16) << 16)
 #define RDMA_OUTPUT_VALID_FIFO_THRESHOLD(bytes)		((bytes) / 16)
 #define RDMA_FIFO_SIZE(rdma)			((rdma)->data->fifo_size)
+#define DISP_REG_RDMA_THRESHOLD_FOR_SODI	0x00a8
+#define DISP_REG_RDMA_THRESHOLD_FOR_DVFS	0x00ac
 #define DISP_RDMA_MEM_START_ADDR		0x0f00
 
 #define RDMA_MEM_GMC				0x40402020
@@ -70,6 +75,7 @@ static const u32 mt8173_formats[] = {
 
 struct mtk_disp_rdma_data {
 	unsigned int fifo_size;
+	bool golden_setting;
 	const u32 *formats;
 	size_t num_formats;
 };
@@ -181,6 +187,58 @@ void mtk_rdma_stop(struct device *dev)
 	rdma_update_bits(dev, DISP_REG_RDMA_GLOBAL_CON, RDMA_ENGINE_EN, 0);
 }
 
+/*
+ * Vendor "golden" ultra/pre-ultra thresholds for a direct-link (OVL -> RDMA)
+ * real-time path, as computed by the MT6797 BSP: thresholds are in 16-byte
+ * FIFO entries and are derived from the rate at which the display drains the
+ * FIFO. The fill rate assumes the 450 MHz mmsys clock.
+ */
+static void mtk_rdma_golden_setting(struct mtk_disp_rdma *rdma,
+				    unsigned int width, unsigned int height,
+				    unsigned int vrefresh, unsigned int bpp,
+				    unsigned int fifo_size,
+				    struct cmdq_pkt *cmdq_pkt)
+{
+	const int fill_rate = 960 * 450 * 3 / 16;
+	unsigned int fifo = fifo_size / 16;
+	unsigned int consume, pre_low, pre_high, ultra_low, sodi_high;
+	unsigned int issue, valid;
+	int left;
+
+	/*
+	 * Floor the frame rate used for the thresholds, as the vendor BSP
+	 * does (ddp_rdma_ex.c): any mode below 75 Hz is computed as 60 Hz.
+	 * The Gemini panel mode is ~57 Hz; using its real refresh gives
+	 * ultra/pre-ultra thresholds below the vendor values (less margin).
+	 */
+	if (vrefresh < 75)
+		vrefresh = 60;
+
+	/* FIFO entries drained per ms, with 20% blanking overhead */
+	consume = width * height / 8000 * vrefresh * bpp * 3 / 40;
+	pre_low = DIV_ROUND_UP(6 * consume, 1000);
+	pre_high = DIV_ROUND_UP(7 * consume, 1000);
+	ultra_low = DIV_ROUND_UP(4 * consume, 1000);
+	issue = min(fifo - pre_low, 255U);
+	valid = min(pre_low, width * height * bpp / 128 - 1);
+	left = fifo - 1200 * (fill_rate - (int)consume) / 1000000;
+	sodi_high = left < 0 ? pre_high : max_t(unsigned int, pre_high, left);
+
+	mtk_ddp_write(cmdq_pkt, pre_low | pre_high << 16, &rdma->cmdq_reg,
+		      rdma->regs, DISP_RDMA_MEM_GMC_SETTING_0);
+	mtk_ddp_write(cmdq_pkt, ultra_low | pre_low << 16, &rdma->cmdq_reg,
+		      rdma->regs, DISP_RDMA_MEM_GMC_SETTING_1);
+	mtk_ddp_write(cmdq_pkt, issue, &rdma->cmdq_reg, rdma->regs,
+		      DISP_RDMA_MEM_GMC_SETTING_2);
+	mtk_ddp_write(cmdq_pkt, RDMA_FIFO_UNDERFLOW_EN |
+		      RDMA_FIFO_PSEUDO_SIZE(fifo_size) | valid,
+		      &rdma->cmdq_reg, rdma->regs, DISP_REG_RDMA_FIFO_CON);
+	mtk_ddp_write(cmdq_pkt, pre_low | sodi_high << 16, &rdma->cmdq_reg,
+		      rdma->regs, DISP_REG_RDMA_THRESHOLD_FOR_SODI);
+	mtk_ddp_write(cmdq_pkt, pre_low | (pre_low + 1) << 16, &rdma->cmdq_reg,
+		      rdma->regs, DISP_REG_RDMA_THRESHOLD_FOR_DVFS);
+}
+
 void mtk_rdma_config(struct device *dev, unsigned int width,
 		     unsigned int height, unsigned int vrefresh,
 		     unsigned int bpc, struct cmdq_pkt *cmdq_pkt)
@@ -211,6 +269,11 @@ void mtk_rdma_config(struct device *dev, unsigned int width,
 	      RDMA_FIFO_PSEUDO_SIZE(rdma_fifo_size) |
 	      RDMA_OUTPUT_VALID_FIFO_THRESHOLD(threshold);
 	mtk_ddp_write(cmdq_pkt, reg, &rdma->cmdq_reg, rdma->regs, DISP_REG_RDMA_FIFO_CON);
+
+	if (rdma->data->golden_setting)
+		mtk_rdma_golden_setting(rdma, width, height, vrefresh,
+					bpc ? bpc * 3 : 24, rdma_fifo_size,
+					cmdq_pkt);
 }
 
 static unsigned int rdma_fmt_convert(struct mtk_disp_rdma *rdma,
@@ -295,7 +358,8 @@ void mtk_rdma_layer_config(struct device *dev, unsigned int idx,
 static int mtk_disp_rdma_bind(struct device *dev, struct device *master,
 			      void *data)
 {
-	return 0;
+	/* Clear any state a bootloader left behind (its frame setup). */
+	return device_reset_optional(dev);
 
 }
 
@@ -382,6 +446,13 @@ static const struct mtk_disp_rdma_data mt2701_rdma_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 };
 
+static const struct mtk_disp_rdma_data mt6797_rdma_driver_data = {
+	.fifo_size = SZ_8K,
+	.golden_setting = true,
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+};
+
 static const struct mtk_disp_rdma_data mt8173_rdma_driver_data = {
 	.fifo_size = SZ_8K,
 	.formats = mt8173_formats,
@@ -403,6 +474,8 @@ static const struct mtk_disp_rdma_data mt8195_rdma_driver_data = {
 static const struct of_device_id mtk_disp_rdma_driver_dt_match[] = {
 	{ .compatible = "mediatek,mt2701-disp-rdma",
 	  .data = &mt2701_rdma_driver_data},
+	{ .compatible = "mediatek,mt6797-disp-rdma",
+	  .data = &mt6797_rdma_driver_data},
 	{ .compatible = "mediatek,mt8173-disp-rdma",
 	  .data = &mt8173_rdma_driver_data},
 	{ .compatible = "mediatek,mt8183-disp-rdma",
