@@ -618,10 +618,8 @@ static void mt6359_auxadc_reset(struct mt6359_auxadc *adc_dev)
 		regmap_write(regmap, cinfo->regs[PMIC_HK_TOP_WKEY], cinfo->sec_unlock_key);
 
 	/* Assert ADC reset */
-	regmap_set_bits(regmap, cinfo->regs[PMIC_HK_TOP_RST_CON0], PMIC_RG_RESET_VAL);
 
 	/* De-assert ADC reset. No wait required, as pwrap takes care of that for us. */
-	regmap_clear_bits(regmap, cinfo->regs[PMIC_HK_TOP_RST_CON0], PMIC_RG_RESET_VAL);
 
 	/* Lock HK_TOP writes again */
 	if (cinfo->sec_unlock_key)
@@ -770,14 +768,17 @@ static int mt6359_auxadc_read_raw(struct iio_dev *indio_dev,
 	int ret;
 
 	if (mask == IIO_CHAN_INFO_SCALE) {
+		/*
+		 * The ADC produces a raw code of scan_type.realbits over the
+		 * full VREF range, optionally scaled down by an external
+		 * resistor divider (r_ratio). The processed voltage in mV is
+		 * therefore raw * vref_mV * r_ratio / 2^realbits, so fold the
+		 * 2^realbits (and the divider denominator) into the scale.
+		 */
 		*val = desc->r_ratio.numerator * cinfo->vref_mV;
+		*val2 = desc->r_ratio.denominator << chan->scan_type.realbits;
 
-		if (desc->r_ratio.denominator > 1) {
-			*val2 = desc->r_ratio.denominator;
-			return IIO_VAL_FRACTIONAL;
-		}
-
-		return IIO_VAL_INT;
+		return IIO_VAL_FRACTIONAL;
 	}
 
 	scoped_guard(mutex, &adc_dev->lock) {
