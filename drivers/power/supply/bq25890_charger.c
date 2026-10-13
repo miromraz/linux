@@ -15,6 +15,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/devm-helpers.h>
 #include <linux/usb/phy.h>
 
 #include <linux/acpi.h>
@@ -30,6 +31,9 @@
 #define PUMP_EXPRESS_START_DELAY	(5 * HZ)
 #define PUMP_EXPRESS_MAX_TRIES		6
 #define PUMP_EXPRESS_VBUS_MARGIN_uV	1000000
+
+/* Status polling interval used on boards that do not wire the INT line */
+#define BQ25890_POLL_INTERVAL		HZ
 
 enum bq25890_chip_version {
 	BQ25890,
@@ -102,6 +106,7 @@ struct bq25890_state {
 	u8 boost_fault;
 	u8 bat_fault;
 	u8 ntc_fault;
+	u8 vbus_status;
 };
 
 struct bq25890_device {
@@ -117,6 +122,7 @@ struct bq25890_device {
 	struct notifier_block usb_nb;
 	struct work_struct usb_work;
 	struct delayed_work pump_express_work;
+	struct delayed_work status_work;
 	unsigned long usb_event;
 
 	struct regmap *rmap;
@@ -778,6 +784,51 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 	power_supply_changed(psy);
 }
 
+/*
+ * REG0B VBUS_STAT as reported by the BQ25896's own USB D+/D- detection.
+ * Other chips in the family encode these bits differently.
+ */
+enum bq25896_vbus_status {
+	VBUS_STAT_NO_INPUT,
+	VBUS_STAT_USB_SDP,
+	VBUS_STAT_USB_CDP,
+	VBUS_STAT_USB_DCP,
+	VBUS_STAT_HV_DCP,
+	VBUS_STAT_UNKNOWN_ADAPTER,
+	VBUS_STAT_NONSTD_ADAPTER,
+	VBUS_STAT_OTG,
+};
+
+/*
+ * On boards without an external charger-type supplier the BQ25896 runs its own
+ * D+/D- detection (AUTO_DPDM_EN) and reports the result in VBUS_STAT, but it
+ * leaves the input current limit at the 500 mA power-on default. Program the
+ * limit from the detected source, mirroring the vendor kernel's per-type values
+ * (SDP 500 mA, CDP 650 mA, DCP up to the 3.25 A chip maximum, everything else
+ * the safe 500 mA default).
+ */
+static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
+{
+	int iinlim_ua;
+
+	switch (bq->state.vbus_status) {
+	case VBUS_STAT_USB_CDP:
+		iinlim_ua = 650000;
+		break;
+	case VBUS_STAT_USB_DCP:
+	case VBUS_STAT_HV_DCP:
+		iinlim_ua = 3250000;
+		break;
+	case VBUS_STAT_USB_SDP:
+	default:
+		iinlim_ua = 500000;
+		break;
+	}
+
+	bq25890_field_write(bq, F_IINLIM,
+			    bq25890_charger_get_scaled_iinlim_regval(bq, iinlim_ua));
+}
+
 static int bq25890_get_chip_state(struct bq25890_device *bq,
 				  struct bq25890_state *state)
 {
@@ -794,7 +845,8 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 		{F_BOOST_FAULT, &state->boost_fault},
 		{F_BAT_FAULT,	&state->bat_fault},
 		{F_CHG_FAULT,	&state->chrg_fault},
-		{F_NTC_FAULT,	&state->ntc_fault}
+		{F_NTC_FAULT,	&state->ntc_fault},
+		{F_VBUS_STAT,	&state->vbus_status}
 	};
 
 	for (i = 0; i < ARRAY_SIZE(state_fields); i++) {
@@ -805,11 +857,11 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 		*state_fields[i].data = ret;
 	}
 
-	dev_dbg(bq->dev, "S:CHG/PG/HIZ/VSYS=%d/%d/%d/%d, F:CHG/BOOST/BAT/NTC=%d/%d/%d/%d\n",
+	dev_dbg(bq->dev, "S:CHG/PG/HIZ/VSYS=%d/%d/%d/%d, F:CHG/BOOST/BAT/NTC=%d/%d/%d/%d, VBUS=%d\n",
 		state->chrg_status, state->online,
 		state->hiz, state->vsys_status,
 		state->chrg_fault, state->boost_fault,
-		state->bat_fault, state->ntc_fault);
+		state->bat_fault, state->ntc_fault, state->vbus_status);
 
 	return 0;
 }
@@ -818,6 +870,7 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 {
 	bool adc_conv_rate, new_adc_conv_rate;
 	struct bq25890_state new_state;
+	bool vbus_changed;
 	int ret;
 
 	ret = bq25890_get_chip_state(bq, &new_state);
@@ -826,6 +879,8 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 
 	if (!memcmp(&bq->state, &new_state, sizeof(new_state)))
 		return IRQ_NONE;
+
+	vbus_changed = new_state.vbus_status != bq->state.vbus_status;
 
 	/*
 	 * Restore HiZ bit in case it was set by user. The chip does not retain
@@ -849,6 +904,14 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	}
 
 	bq->state = new_state;
+
+	/*
+	 * A changed VBUS_STAT means the source was (un)plugged or re-detected;
+	 * reprogram the input current limit from the BQ25896's own detection.
+	 */
+	if (bq->chip_version == BQ25896 && vbus_changed)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+
 	power_supply_changed(bq->charger);
 
 	return IRQ_HANDLED;
@@ -868,6 +931,21 @@ static irqreturn_t bq25890_irq_handler_thread(int irq, void *private)
 	mutex_unlock(&bq->lock);
 
 	return ret;
+}
+
+/*
+ * Boards that do not wire the charger's INT line rely on this work to pick up
+ * state changes (cable plug/unplug, charge done, faults) by periodically
+ * running the same handler the interrupt would.
+ */
+static void bq25890_status_work(struct work_struct *work)
+{
+	struct bq25890_device *bq =
+		container_of(work, struct bq25890_device, status_work.work);
+
+	bq25890_irq_handler_thread(0, bq);
+
+	schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
 }
 
 static int bq25890_chip_reset(struct bq25890_device *bq)
@@ -975,6 +1053,10 @@ static int bq25890_hw_init(struct bq25890_device *bq)
 		dev_dbg(bq->dev, "Get state failed %d\n", ret);
 		return ret;
 	}
+
+	/* Match the input current limit to a source already present at probe */
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 
 	/* Configure ADC for continuous conversions when charging */
 	ret = bq25890_field_write(bq, F_CONV_RATE, bq->state.online && !bq->state.hiz);
@@ -1330,10 +1412,12 @@ static int bq25890_irq_probe(struct bq25890_device *bq)
 {
 	struct gpio_desc *irq;
 
-	irq = devm_gpiod_get(bq->dev, BQ25890_IRQ_PIN, GPIOD_IN);
+	irq = devm_gpiod_get_optional(bq->dev, BQ25890_IRQ_PIN, GPIOD_IN);
 	if (IS_ERR(irq))
 		return dev_err_probe(bq->dev, PTR_ERR(irq),
 				     "Could not probe irq pin.\n");
+	if (!irq)
+		return 0; /* no INT line wired, caller falls back to polling */
 
 	return gpiod_to_irq(irq);
 }
@@ -1495,10 +1579,8 @@ static int bq25890_probe(struct i2c_client *client)
 	if (client->irq <= 0)
 		client->irq = bq25890_irq_probe(bq);
 
-	if (client->irq < 0) {
-		dev_err(dev, "No irq resource found.\n");
+	if (client->irq < 0)
 		return client->irq;
-	}
 
 	/* OTG reporting */
 	bq->usb_phy = devm_usb_get_phy(dev, USB_PHY_TYPE_USB2);
@@ -1519,12 +1601,24 @@ static int bq25890_probe(struct i2c_client *client)
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "registering power supply\n");
 
-	ret = devm_request_threaded_irq(dev, client->irq, NULL,
-					bq25890_irq_handler_thread,
-					IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
-					BQ25890_IRQ_PIN, bq);
-	if (ret)
-		return ret;
+	if (client->irq > 0) {
+		ret = devm_request_threaded_irq(dev, client->irq, NULL,
+						bq25890_irq_handler_thread,
+						IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
+						BQ25890_IRQ_PIN, bq);
+		if (ret)
+			return ret;
+	} else {
+		/* No INT line: poll the status registers periodically. */
+		dev_info(dev, "No irq resource found, polling charger status\n");
+
+		ret = devm_delayed_work_autocancel(dev, &bq->status_work,
+						   bq25890_status_work);
+		if (ret)
+			return ret;
+
+		schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
+	}
 
 	if (!IS_ERR_OR_NULL(bq->usb_phy)) {
 		INIT_WORK(&bq->usb_work, bq25890_usb_work);
@@ -1576,12 +1670,26 @@ static void bq25890_shutdown(struct i2c_client *client)
 static int bq25890_suspend(struct device *dev)
 {
 	struct bq25890_device *bq = dev_get_drvdata(dev);
+	struct i2c_client *client = to_i2c_client(dev);
+	int ret;
+
+	if (client->irq <= 0)
+		cancel_delayed_work_sync(&bq->status_work);
 
 	/*
 	 * If charger is removed, while in suspend, make sure ADC is diabled
 	 * since it consumes slightly more power.
 	 */
-	return bq25890_field_write(bq, F_CONV_RATE, 0);
+	ret = bq25890_field_write(bq, F_CONV_RATE, 0);
+	if (ret < 0 && client->irq <= 0)
+		/*
+		 * Suspend is aborted on error, so resume will not run to
+		 * re-arm the poll.  Restart it here or status updates stop
+		 * until reboot.
+		 */
+		schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
+
+	return ret;
 }
 
 static int bq25890_resume(struct device *dev)
@@ -1607,6 +1715,9 @@ static int bq25890_resume(struct device *dev)
 
 unlock:
 	mutex_unlock(&bq->lock);
+
+	if (to_i2c_client(dev)->irq <= 0)
+		schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
 
 	return ret;
 }
