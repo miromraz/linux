@@ -6,9 +6,40 @@
 // Author: KaiChieh Chuang <kaichieh.chuang@mediatek.com>
 
 #include <linux/module.h>
+#include <linux/of_platform.h>
+#include <sound/jack.h>
 #include <sound/soc.h>
 
 #include "mt6797-afe-common.h"
+
+struct mt6797_mt6351_priv {
+	struct snd_soc_jack headset_jack;
+};
+
+/*
+ * ACCDET is registered as a card aux_dev, so the card core owns its lifetime.
+ * Its init runs once the component is bound: create the headset jack and hand
+ * it to the component through the generic set_jack path.  The component clears
+ * it again on teardown, so the ACCDET IRQ never touches a freed jack.
+ */
+static int mt6797_mt6351_accdet_init(struct snd_soc_component *component)
+{
+	struct snd_soc_card *card = component->card;
+	struct mt6797_mt6351_priv *priv = snd_soc_card_get_drvdata(card);
+	int ret;
+
+	ret = snd_soc_card_jack_new(card, "Headset Jack",
+				    SND_JACK_HEADSET | SND_JACK_BTN_0 |
+				    SND_JACK_BTN_1 | SND_JACK_BTN_2 |
+				    SND_JACK_BTN_3,
+				    &priv->headset_jack);
+	if (ret) {
+		dev_err(card->dev, "Headset Jack creation failed: %d\n", ret);
+		return ret;
+	}
+
+	return snd_soc_component_set_jack(component, &priv->headset_jack, NULL);
+}
 
 SND_SOC_DAILINK_DEFS(playback_1,
 	DAILINK_COMP_ARRAY(COMP_CPU("DL1")),
@@ -184,17 +215,63 @@ static struct snd_soc_card mt6797_mt6351_card = {
 static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 {
 	struct snd_soc_card *card = &mt6797_mt6351_card;
-	struct device_node *platform_node, *codec_node;
+	struct device_node *np = pdev->dev.of_node;
+	struct device_node *platform_node, *codec_node, *accdet_node;
 	struct snd_soc_dai_link *dai_link;
-	int ret, i;
+	struct mt6797_mt6351_priv *priv;
+	struct snd_soc_aux_dev *aux;
+	int ret, i, num_aux;
 
 	card->dev = &pdev->dev;
+
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+	snd_soc_card_set_drvdata(card, priv);
+
+	/* Optional board amplifiers, e.g. a loudspeaker amp on LINEOUT L */
+	num_aux = of_count_phandle_with_args(np, "aux-devs", NULL);
+	if (num_aux == -ENOENT)
+		num_aux = 0;
+	else if (num_aux < 0)
+		return num_aux;
+
+	/* One extra slot for ACCDET */
+	aux = devm_kcalloc(&pdev->dev, num_aux + 1, sizeof(*aux), GFP_KERNEL);
+	if (!aux)
+		return -ENOMEM;
+
+	for (i = 0; i < num_aux; i++) {
+		aux[i].dlc.of_node = of_parse_phandle(np, "aux-devs", i);
+		if (!aux[i].dlc.of_node)
+			return -EINVAL;
+	}
+
+	/*
+	 * Headset jack detection is optional.  Register ACCDET as a card
+	 * aux_dev so the card core manages its lifetime and the jack.
+	 */
+	accdet_node = of_parse_phandle(np, "mediatek,accdet", 0);
+	if (accdet_node) {
+		aux[num_aux].dlc.of_node = accdet_node;
+		aux[num_aux].init = mt6797_mt6351_accdet_init;
+		num_aux++;
+	}
+	card->aux_dev = aux;
+	card->num_aux_devs = num_aux;
+
+	if (of_property_present(np, "audio-routing")) {
+		ret = snd_soc_of_parse_audio_routing(card, "audio-routing");
+		if (ret)
+			goto put_accdet_node;
+	}
 
 	platform_node = of_parse_phandle(pdev->dev.of_node,
 					 "mediatek,platform", 0);
 	if (!platform_node) {
 		dev_err(&pdev->dev, "Property 'platform' missing or invalid\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto put_accdet_node;
 	}
 	for_each_card_prelinks(card, i, dai_link) {
 		if (dai_link->platforms->name)
@@ -211,7 +288,7 @@ static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 		goto put_platform_node;
 	}
 	for_each_card_prelinks(card, i, dai_link) {
-		if (dai_link->codecs->name)
+		if (!dai_link->num_codecs || dai_link->codecs->name)
 			continue;
 		dai_link->codecs->of_node = codec_node;
 	}
@@ -224,6 +301,8 @@ static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 	of_node_put(codec_node);
 put_platform_node:
 	of_node_put(platform_node);
+put_accdet_node:
+	of_node_put(accdet_node);
 	return ret;
 }
 
