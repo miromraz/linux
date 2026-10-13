@@ -11,6 +11,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/delay.h>
+#include <linux/mfd/mt6397/core.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -1450,6 +1451,7 @@ static const struct snd_soc_component_driver mt6351_soc_component_driver = {
 
 static int mt6351_codec_driver_probe(struct platform_device *pdev)
 {
+	struct mt6397_chip *mt6397 = dev_get_drvdata(pdev->dev.parent);
 	struct mt6351_priv *priv;
 
 	priv = devm_kzalloc(&pdev->dev,
@@ -1462,9 +1464,7 @@ static int mt6351_codec_driver_probe(struct platform_device *pdev)
 
 	priv->dev = &pdev->dev;
 
-	priv->regmap = dev_get_regmap(pdev->dev.parent, NULL);
-	if (!priv->regmap)
-		return -ENODEV;
+	priv->regmap = mt6397->regmap;
 
 	dev_dbg(priv->dev, "%s(), dev name %s\n",
 		__func__, dev_name(&pdev->dev));
@@ -1479,6 +1479,7 @@ static const struct of_device_id mt6351_of_match[] = {
 	{.compatible = "mediatek,mt6351-sound",},
 	{}
 };
+MODULE_DEVICE_TABLE(of, mt6351_of_match);
 
 static struct platform_driver mt6351_codec_driver = {
 	.driver = {
