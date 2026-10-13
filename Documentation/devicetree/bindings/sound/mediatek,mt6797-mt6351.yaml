@@ -27,6 +27,21 @@ properties:
       The phandle of the MT6351 ACCDET node, to enable headset plug and
       button detection through a headset jack.
 
+  aux-devs:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    description:
+      List of phandles of auxiliary devices, such as analog speaker
+      amplifiers fed by the MT6351 outputs.
+    items:
+      maxItems: 1
+
+  audio-routing:
+    $ref: /schemas/types.yaml#/definitions/non-unique-string-array
+    description:
+      A list of the connections between audio components. Each entry is a
+      pair of strings, the first being the connection's sink, the second
+      being the connection's source.
+
 required:
   - compatible
   - mediatek,platform
@@ -41,4 +56,6 @@ examples:
         mediatek,platform = <&afe>;
         mediatek,audio-codec = <&mt6351_codec>;
         mediatek,accdet = <&accdet>;
+        aux-devs = <&speaker_amp>;
+        audio-routing = "Speaker Amp IN", "LINEOUT L";
     };
