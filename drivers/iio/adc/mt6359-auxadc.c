@@ -22,6 +22,7 @@
 
 #include <linux/mfd/mt6397/core.h>
 
+#include <dt-bindings/iio/adc/mediatek,mt6351-auxadc.h>
 #include <dt-bindings/iio/adc/mediatek,mt6357-auxadc.h>
 #include <dt-bindings/iio/adc/mediatek,mt6358-auxadc.h>
 #include <dt-bindings/iio/adc/mediatek,mt6359-auxadc.h>
@@ -46,6 +47,24 @@
 
 #define MT6359_IMP0_CONV_EN		BIT(0)
 #define MT6359_IMP1_IRQ_RDY		BIT(15)
+
+/* MT6351 AUXADC reset bit in TOP_RST_CON0 (RG_AUXADC_RST). */
+#define MT6351_RG_AUXADC_RST		BIT(1)
+
+/*
+ * MT6351 AUXADC clock gating. The clock must be turned on explicitly as the
+ * bootloader is not guaranteed to leave it enabled: set the always-on clock
+ * in AUXADC_CON0 and clear the SMPS clock power-down in TOP_CKPDN_CON0.
+ */
+#define MT6351_AUXADC_CON0		0x0ea2
+#define MT6351_AUXADC_CK_AON		BIT(15)
+#define MT6351_TOP_CKPDN_CON0		0x023a
+#define MT6351_AUXADC_SMPS_CK_PDN	BIT(9)
+#define MT6351_TOP_CKPDN_CON1		0x0240
+#define MT6351_AUXADC_CK_PDN		BIT(10)
+#define MT6351_TOP_CKHWEN_CON0		0x0282
+#define MT6351_AUXADC_CK_PDN_HWEN	BIT(3)
+#define MT6351_AUXADC_SMPS_CK_PDN_HWEN	BIT(4)
 
 #define MT6363_EXT_CHAN_MASK		GENMASK(2, 0)
 #define MT6363_EXT_PURES_MASK		GENMASK(4, 3)
@@ -149,8 +168,11 @@ struct mtk_pmic_auxadc_chan {
  * @sec_unlock_key: Security unlock key for HK_TOP writes
  * @vref_mV:        AUXADC Reference Voltage (VREF) in millivolts
  * @imp_adc_num:    ADC channel for battery impedance readings
+ * @rst_mask:       Reset bitmask to assert in HK_TOP_RST_CON0; when zero the
+ *                  common PMIC_RG_RESET_VAL is used
  * @is_spmi:        Defines whether this PMIC communicates over SPMI
  * @no_reset:       If true, this PMIC does not support ADC reset
+ * @init:           Optional one-time hardware setup callback run at probe
  * @read_imp:       Callback to read impedance channels
  */
 struct mtk_pmic_auxadc_info {
@@ -162,8 +184,10 @@ struct mtk_pmic_auxadc_info {
 	u16 sec_unlock_key;
 	u32 vref_mV;
 	u8 imp_adc_num;
+	u16 rst_mask;
 	bool is_spmi;
 	bool no_reset;
+	int (*init)(struct mt6359_auxadc *adc_dev);
 	int (*read_imp)(struct mt6359_auxadc *adc_dev,
 			const struct iio_chan_spec *chan, int *vbat, int *ibat);
 };
@@ -203,6 +227,59 @@ struct mtk_pmic_auxadc_info {
 	},									\
 	.indexed = 1,								\
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) | BIT(IIO_CHAN_INFO_SCALE)	\
+}
+
+static const struct iio_chan_spec mt6351_auxadc_channels[] = {
+	MTK_PMIC_IIO_CHAN(MT6351, bat_adc, BATADC, 23, 15, IIO_RESISTANCE),
+	MTK_PMIC_IIO_CHAN(MT6351, isense, ISENSE, 25, 15, IIO_CURRENT),
+	MTK_PMIC_IIO_CHAN(MT6351, cdt_v, VCDT, 2, 12, IIO_VOLTAGE),
+	MTK_PMIC_IIO_CHAN(MT6351, batt_temp, BAT_TEMP, 3, 12, IIO_TEMP),
+	MTK_PMIC_IIO_CHAN(MT6351, chip_temp, CHIP_TEMP, 4, 12, IIO_TEMP),
+	MTK_PMIC_IIO_CHAN(MT6351, acc_det, ACCDET, 5, 12, IIO_VOLTAGE),
+	MTK_PMIC_IIO_CHAN(MT6351, tsx_temp, TSX_TEMP, 18, 15, IIO_TEMP),
+	MTK_PMIC_IIO_CHAN(MT6351, bif_v, VBIF, 11, 12, IIO_VOLTAGE),
+};
+
+static const struct mtk_pmic_auxadc_chan mt6351_auxadc_ch_desc[] = {
+	MTK_PMIC_ADC_CHAN(BATADC, PMIC_AUXADC_RQST0, 0, PMIC_AUXADC_ADC0, 15, 128, 3, 1),
+	MTK_PMIC_ADC_CHAN(ISENSE, PMIC_AUXADC_RQST0, 1, PMIC_AUXADC_ADC0, 15, 128, 3, 1),
+	MTK_PMIC_ADC_CHAN(VCDT, PMIC_AUXADC_RQST0, 2, PMIC_AUXADC_ADC0, 15, 8, 1, 1),
+	MTK_PMIC_ADC_CHAN(BAT_TEMP, PMIC_AUXADC_RQST0, 3, PMIC_AUXADC_ADC0, 15, 8, 2, 1),
+	MTK_PMIC_ADC_CHAN(CHIP_TEMP, PMIC_AUXADC_RQST0, 4, PMIC_AUXADC_ADC0, 15, 8, 1, 1),
+	MTK_PMIC_ADC_CHAN(ACCDET, PMIC_AUXADC_RQST0, 5, PMIC_AUXADC_ADC0, 15, 8, 1, 1),
+	MTK_PMIC_ADC_CHAN(TSX_TEMP, PMIC_AUXADC_RQST0, 7, PMIC_AUXADC_ADC0, 15, 128, 1, 1),
+	MTK_PMIC_ADC_CHAN(VBIF, PMIC_AUXADC_RQST0, 11, PMIC_AUXADC_ADC0, 15, 8, 2, 1),
+};
+
+static const u16 mt6351_auxadc_regs[] = {
+	[PMIC_HK_TOP_RST_CON0]	= 0x02a8,
+	[PMIC_AUXADC_ADC0]	= 0x0e00,
+	[PMIC_AUXADC_RQST0]	= 0x0e96,
+};
+
+static int mt6351_auxadc_init(struct mt6359_auxadc *adc_dev)
+{
+	struct regmap *regmap = adc_dev->regmap;
+	int ret;
+
+	/* Enable the AUXADC clock rather than relying on the bootloader. */
+	ret = regmap_set_bits(regmap, MT6351_AUXADC_CON0, MT6351_AUXADC_CK_AON);
+	if (ret)
+		return ret;
+
+	ret = regmap_clear_bits(regmap, MT6351_TOP_CKPDN_CON0,
+				MT6351_AUXADC_SMPS_CK_PDN);
+	if (ret)
+		return ret;
+
+	ret = regmap_clear_bits(regmap, MT6351_TOP_CKPDN_CON1,
+				MT6351_AUXADC_CK_PDN);
+	if (ret)
+		return ret;
+
+	return regmap_clear_bits(regmap, MT6351_TOP_CKHWEN_CON0,
+				 MT6351_AUXADC_CK_PDN_HWEN |
+				 MT6351_AUXADC_SMPS_CK_PDN_HWEN);
 }
 
 static const struct iio_chan_spec mt6357_auxadc_channels[] = {
@@ -549,6 +626,17 @@ static int mt6359_read_imp(struct mt6359_auxadc *adc_dev,
 	return 0;
 }
 
+static const struct mtk_pmic_auxadc_info mt6351_chip_info = {
+	.model_name = "MT6351",
+	.channels = mt6351_auxadc_channels,
+	.num_channels = ARRAY_SIZE(mt6351_auxadc_channels),
+	.desc = mt6351_auxadc_ch_desc,
+	.regs = mt6351_auxadc_regs,
+	.rst_mask = MT6351_RG_AUXADC_RST,
+	.init = mt6351_auxadc_init,
+	.vref_mV = 1800,
+};
+
 static const struct mtk_pmic_auxadc_info mt6357_chip_info = {
 	.model_name = "MT6357",
 	.channels = mt6357_auxadc_channels,
@@ -608,6 +696,7 @@ static void mt6359_auxadc_reset(struct mt6359_auxadc *adc_dev)
 {
 	const struct mtk_pmic_auxadc_info *cinfo = adc_dev->chip_info;
 	struct regmap *regmap = adc_dev->regmap;
+	u16 rst_mask = cinfo->rst_mask ? cinfo->rst_mask : PMIC_RG_RESET_VAL;
 
 	/* Some PMICs do not support reset */
 	if (cinfo->no_reset)
@@ -618,8 +707,10 @@ static void mt6359_auxadc_reset(struct mt6359_auxadc *adc_dev)
 		regmap_write(regmap, cinfo->regs[PMIC_HK_TOP_WKEY], cinfo->sec_unlock_key);
 
 	/* Assert ADC reset */
+	regmap_set_bits(regmap, cinfo->regs[PMIC_HK_TOP_RST_CON0], rst_mask);
 
 	/* De-assert ADC reset. No wait required, as pwrap takes care of that for us. */
+	regmap_clear_bits(regmap, cinfo->regs[PMIC_HK_TOP_RST_CON0], rst_mask);
 
 	/* Lock HK_TOP writes again */
 	if (cinfo->sec_unlock_key)
@@ -873,6 +964,12 @@ static int mt6359_auxadc_probe(struct platform_device *pdev)
 
 	mt6359_auxadc_reset(adc_dev);
 
+	if (chip_info->init) {
+		ret = chip_info->init(adc_dev);
+		if (ret)
+			return dev_err_probe(dev, ret, "Failed to initialize AUXADC\n");
+	}
+
 	indio_dev->name = adc_dev->chip_info->model_name;
 	indio_dev->info = &mt6359_auxadc_iio_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -887,6 +984,7 @@ static int mt6359_auxadc_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id mt6359_auxadc_of_match[] = {
+	{ .compatible = "mediatek,mt6351-auxadc", .data = &mt6351_chip_info },
 	{ .compatible = "mediatek,mt6357-auxadc", .data = &mt6357_chip_info },
 	{ .compatible = "mediatek,mt6358-auxadc", .data = &mt6358_chip_info },
 	{ .compatible = "mediatek,mt6359-auxadc", .data = &mt6359_chip_info },
