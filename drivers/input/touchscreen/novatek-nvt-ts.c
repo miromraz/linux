@@ -17,6 +17,8 @@
 
 #include <linux/unaligned.h>
 
+#include <drm/drm_panel.h>
+
 #define NVT_TS_TOUCH_START		0x00
 #define NVT_TS_TOUCH_SIZE		6
 
@@ -59,6 +61,18 @@ struct nvt_ts_data {
 	struct touchscreen_properties prop;
 	int max_touches;
 	u8 buf[NVT_TS_TOUCH_SIZE * NVT_TS_MAX_TOUCHES];
+
+	/*
+	 * For an in-cell TDDI module the touch controller shares the DSI
+	 * panel's power and reset, so the DRM panel-follower framework must
+	 * drive nvt_ts_start()/nvt_ts_stop() in lockstep with the panel's
+	 * prepare/unprepare. @prepared tracks whether the panel is currently
+	 * prepared (always true for non-follower boards); it gates the
+	 * hardware access in start/stop so the two power sources never fight.
+	 */
+	struct drm_panel_follower panel_follower;
+	bool is_panel_follower;
+	bool prepared;
 };
 
 static int nvt_ts_read_data(struct i2c_client *client, u8 reg, u8 *data, int count)
@@ -145,6 +159,15 @@ static int nvt_ts_start(struct input_dev *dev)
 	struct nvt_ts_data *data = input_get_drvdata(dev);
 	int error;
 
+	/*
+	 * In panel-follower mode the chip is powered by the DSI panel, so
+	 * defer the hardware bring-up to nvt_ts_panel_prepared() when the
+	 * panel is still unprepared (e.g. the input device is opened while
+	 * the display is blanked).
+	 */
+	if (!data->prepared)
+		return 0;
+
 	error = regulator_bulk_enable(ARRAY_SIZE(data->regulators), data->regulators);
 	if (error) {
 		dev_err(&data->client->dev, "failed to enable regulators\n");
@@ -161,6 +184,10 @@ static void nvt_ts_stop(struct input_dev *dev)
 {
 	struct nvt_ts_data *data = input_get_drvdata(dev);
 
+	/* The panel already powered the chip down, nothing to undo. */
+	if (!data->prepared)
+		return;
+
 	disable_irq(data->client->irq);
 	gpiod_set_value_cansleep(data->reset_gpio, 1);
 	regulator_bulk_disable(ARRAY_SIZE(data->regulators), data->regulators);
@@ -169,6 +196,10 @@ static void nvt_ts_stop(struct input_dev *dev)
 static int nvt_ts_suspend(struct device *dev)
 {
 	struct nvt_ts_data *data = i2c_get_clientdata(to_i2c_client(dev));
+
+	/* The panel follower powers the chip down via panel_unpreparing(). */
+	if (data->is_panel_follower)
+		return 0;
 
 	guard(mutex)(&data->input->mutex);
 
@@ -182,6 +213,10 @@ static int nvt_ts_resume(struct device *dev)
 {
 	struct nvt_ts_data *data = i2c_get_clientdata(to_i2c_client(dev));
 
+	/* The panel follower powers the chip up via panel_prepared(). */
+	if (data->is_panel_follower)
+		return 0;
+
 	guard(mutex)(&data->input->mutex);
 
 	if (input_device_enabled(data->input))
@@ -191,6 +226,52 @@ static int nvt_ts_resume(struct device *dev)
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(nvt_ts_pm_ops, nvt_ts_suspend, nvt_ts_resume);
+
+static int nvt_ts_panel_prepared(struct drm_panel_follower *follower)
+{
+	struct nvt_ts_data *data =
+		container_of(follower, struct nvt_ts_data, panel_follower);
+
+	guard(mutex)(&data->input->mutex);
+
+	data->prepared = true;
+
+	/*
+	 * The panel just restored power and reset to the in-cell controller,
+	 * re-initialising it. Mirror resume: bring the touch side back up
+	 * (reset release + IRQ enable) only if userspace has the device open.
+	 */
+	if (input_device_enabled(data->input))
+		return nvt_ts_start(data->input);
+
+	return 0;
+}
+
+static int nvt_ts_panel_unpreparing(struct drm_panel_follower *follower)
+{
+	struct nvt_ts_data *data =
+		container_of(follower, struct nvt_ts_data, panel_follower);
+
+	guard(mutex)(&data->input->mutex);
+
+	/*
+	 * The panel is about to cut the shared rails and assert reset. Disable
+	 * the IRQ and stop touching the bus before that happens; clear
+	 * @prepared so a concurrent input open/close does not poke the chip
+	 * while it is powered down.
+	 */
+	if (input_device_enabled(data->input))
+		nvt_ts_stop(data->input);
+
+	data->prepared = false;
+
+	return 0;
+}
+
+static const struct drm_panel_follower_funcs nvt_ts_panel_follower_funcs = {
+	.panel_prepared = nvt_ts_panel_prepared,
+	.panel_unpreparing = nvt_ts_panel_unpreparing,
+};
 
 static int nvt_ts_probe(struct i2c_client *client)
 {
@@ -215,6 +296,13 @@ static int nvt_ts_probe(struct i2c_client *client)
 
 	data->client = client;
 	i2c_set_clientdata(client, data);
+
+	/*
+	 * Non-follower boards power the chip from input open/close, so it is
+	 * always considered prepared. Follower boards start unprepared until
+	 * the panel reports it (see drm_is_panel_follower() handling below).
+	 */
+	data->prepared = !drm_is_panel_follower(dev);
 
 	/*
 	 * VCC is the analog voltage supply
@@ -305,6 +393,27 @@ static int nvt_ts_probe(struct i2c_client *client)
 	if (error) {
 		dev_err(dev, "failed to register input device: %d\n", error);
 		return error;
+	}
+
+	/*
+	 * An in-cell TDDI module (e.g. the NT36772 on the Planet Gemini PDA)
+	 * is powered and reset by its DSI panel, so register as a panel
+	 * follower to be told when the panel powers the chip down and back up.
+	 * drm_panel_add_follower() calls panel_prepared() synchronously if the
+	 * panel is already prepared, which sets @prepared. Boards without a
+	 * "panel" phandle keep the input-open driven power sequencing.
+	 */
+	if (drm_is_panel_follower(dev)) {
+		data->panel_follower.funcs = &nvt_ts_panel_follower_funcs;
+		error = devm_drm_panel_add_follower(dev, &data->panel_follower);
+		if (!error) {
+			data->is_panel_follower = true;
+		} else if (error == -ENODEV) {
+			/* Not actually a follower, fall back to legacy power. */
+			data->prepared = true;
+		} else {
+			return error;
+		}
 	}
 
 	return 0;
