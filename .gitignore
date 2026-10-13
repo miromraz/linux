@@ -86,7 +86,7 @@ modules.order
 #
 # Debian directory (make deb-pkg)
 #
-/debian/
+# /debian/ is tracked: OBS detects debian/control as the build recipe
 
 #
 # Snap directory (make snap-pkg)
