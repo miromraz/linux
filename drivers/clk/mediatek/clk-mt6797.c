@@ -644,6 +644,9 @@ static int mtk_infrasys_init(struct platform_device *pdev)
 		infra_clk_data = mtk_alloc_clk_data(CLK_INFRA_NR);
 		if (!infra_clk_data)
 			return -ENOMEM;
+		mtk_clk_register_factors(infra_fixed_divs,
+					 ARRAY_SIZE(infra_fixed_divs),
+					 infra_clk_data);
 	} else {
 		for (i = 0; i < CLK_INFRA_NR; i++) {
 			if (infra_clk_data->hws[i] == ERR_PTR(-EPROBE_DEFER))
