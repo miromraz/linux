@@ -9,7 +9,9 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/mfd/syscon.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/pm_runtime.h>
 
 #include <drm/drm_print.h>
@@ -112,6 +114,40 @@ void panfrost_gpu_amlogic_quirk(struct panfrost_device *pfdev)
 	 */
 	gpu_write(pfdev, GPU_PWR_KEY, GPU_PWR_KEY_UNLOCK);
 	gpu_write(pfdev, GPU_PWR_OVERRIDE1, 0xfff | (0x20 << 16));
+}
+
+/*
+ * The Mali-T880 on MediaTek MT6797 is fed by an integrated GPU-LDO whose
+ * reserved control fields (vendor name "RG_GPULDO_RSV_H_0..8") live in the
+ * always-on infracfg register block. They must be programmed before the GPU
+ * cores are powered, otherwise the shader/tiler/L2 power transition times out.
+ * Offsets and values are taken verbatim from the MT6797 vendor kernel; the
+ * enable register (0xfbc) must be written last.
+ */
+#define MT6797_INFRACFG_GPULDO_RSV0	0xfd8
+#define MT6797_INFRACFG_GPULDO_RSV1	0xfe4
+#define MT6797_INFRACFG_GPULDO_RSV2	0xfc0
+#define MT6797_INFRACFG_GPULDO_RSV3	0xfc4
+#define MT6797_INFRACFG_GPULDO_RSV4	0xfc8
+#define MT6797_INFRACFG_GPULDO_EN	0xfbc
+
+void panfrost_gpu_mt6797_quirk(struct panfrost_device *pfdev)
+{
+	struct regmap *infracfg;
+
+	infracfg = syscon_regmap_lookup_by_phandle(pfdev->base.dev->of_node,
+						   "mediatek,infracfg");
+	if (IS_ERR(infracfg))
+		return;
+
+	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_RSV0, 0x88888888);
+	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_RSV1, 0x00000008);
+	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_RSV2, 0x0f0f0f0f);
+	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_RSV3, 0x0f0f0f0f);
+	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_RSV4, 0x0000000f);
+	regmap_write(infracfg, MT6797_INFRACFG_GPULDO_EN, 0x000001ff);
+	/* Let the LDO settle before the cores are powered (vendor: >= 100 us). */
+	usleep_range(100, 200);
 }
 
 static void panfrost_gpu_init_quirks(struct panfrost_device *pfdev)
