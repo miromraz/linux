@@ -245,9 +245,17 @@ static int mtk_wdt_restart(struct watchdog_device *wdt_dev,
 	/* Enable reset in order to issue a system reset instead of an IRQ */
 	reg = readl(wdt_base + WDT_MODE);
 	reg &= ~WDT_MODE_IRQ_EN;
-	if (mtk_wdt->use_auto_restart)
-		reg |= WDT_MODE_AUTO_START;
+	if (mtk_wdt->use_auto_restart) {
+		/*
+		 * As the MT6797 bootloader does: drive the external reset to
+		 * the PMIC (a SoC-only reset leaves the board off) and bypass
+		 * the power key.
+		 */
+		reg &= ~(WDT_MODE_EN | WDT_MODE_DUAL_EN);
+		reg |= WDT_MODE_AUTO_START | WDT_MODE_EXRST_EN;
+	}
 	writel(reg | WDT_MODE_KEY, wdt_base + WDT_MODE);
+	udelay(100);
 
 	while (1) {
 		writel(WDT_SWRST_KEY, wdt_base + WDT_SWRST);
