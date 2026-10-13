@@ -824,7 +824,7 @@ static int aw9523_init_irq(struct aw9523 *awi, int irq)
 	girq->parent_handler = NULL;
 	girq->num_parents = 0;
 	girq->parents = NULL;
-	girq->default_type = IRQ_TYPE_EDGE_BOTH;
+	girq->default_type = IRQ_TYPE_NONE;
 	girq->handler = handle_simple_irq;
 	girq->threaded = true;
 
