@@ -302,8 +302,18 @@ static void mtk_dsi_disable(struct mtk_dsi *dsi)
 
 static void mtk_dsi_reset_engine(struct mtk_dsi *dsi)
 {
+	u32 inten = readl(dsi->regs + DSI_INTEN);
+
+	/*
+	 * Mask the DSI interrupts across the engine reset and restore them
+	 * afterwards, so a pending or late IRQ cannot fire while the block is
+	 * held in reset. Matches the vendor MT6797 driver (DSI_Reset() in
+	 * drivers/misc/mediatek/video/mt6797/dispsys/ddp_dsi.c).
+	 */
+	writel(0, dsi->regs + DSI_INTEN);
 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, DSI_RESET);
 	mtk_dsi_mask(dsi, DSI_CON_CTRL, DSI_RESET, 0);
+	writel(inten, dsi->regs + DSI_INTEN);
 }
 
 static void mtk_dsi_reset_dphy(struct mtk_dsi *dsi)
@@ -535,7 +545,6 @@ static void mtk_dsi_config_vdo_timing_per_line_lp(struct mtk_dsi *dsi)
 	horizontal_front_back_byte = horizontal_frontporch_byte + horizontal_backporch_byte;
 	data_phy_cycles_byte = data_phy_cycles * dsi->lanes + delta;
 
-	if (horizontal_front_back_byte > data_phy_cycles_byte) {
 		horizontal_frontporch_byte -= data_phy_cycles_byte *
 					      horizontal_frontporch_byte /
 					      horizontal_front_back_byte;
@@ -650,7 +659,6 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 		do {
 			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
 			tmp = readl(dsi->regs + DSI_INTSTA);
-		} while (tmp & DSI_BUSY);
 
 		mtk_dsi_mask(dsi, DSI_INTSTA, status, 0);
 		mtk_dsi_irq_data_set(dsi, status);
@@ -770,7 +778,7 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	 */
 	mtk_dsi_stop(dsi);
 
-	mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
+		mtk_dsi_switch_to_cmd_mode(dsi, VM_DONE_INT_FLAG, 500);
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_lane0_ulp_mode_enter(dsi);
 	mtk_dsi_clk_ulp_mode_enter(dsi);
@@ -778,6 +786,12 @@ static void mtk_dsi_poweroff(struct mtk_dsi *dsi)
 	writel(0, dsi->regs + DSI_TXRX_CTRL);
 
 	mtk_dsi_disable(dsi);
+
+	/*
+	 * Mask all DSI interrupts before gating the clocks, so a pending or
+	 * late IRQ cannot hit the now-unclocked block and hang the SoC.
+	 */
+	writel(0, dsi->regs + DSI_INTEN);
 
 	clk_disable_unprepare(dsi->engine_clk);
 	clk_disable_unprepare(dsi->digital_clk);
@@ -1110,10 +1124,8 @@ static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
 	mtk_dsi_cmdq(dsi, msg);
 	mtk_dsi_start(dsi);
 
-	if (!mtk_dsi_wait_for_irq_done(dsi, flag, 2000))
 		return -ETIME;
-	else
-		return 0;
+	return 0;
 }
 
 static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
@@ -1178,7 +1190,6 @@ static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
 		 recv_cnt, *((u8 *)(msg->tx_buf)));
 
 restore_dsi_mode:
-	if (dsi_mode & MODE) {
 		mtk_dsi_set_mode(dsi);
 		mtk_dsi_start(dsi);
 	}
@@ -1240,16 +1251,9 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dsi);
 
-	ret = mipi_dsi_host_register(&dsi->host);
-	if (ret < 0)
-		return dev_err_probe(dev, ret, "Failed to register DSI host\n");
-
 	ret = devm_request_irq(&pdev->dev, irq_num, mtk_dsi_irq,
 			       IRQF_TRIGGER_NONE, dev_name(&pdev->dev), dsi);
-	if (ret) {
-		mipi_dsi_host_unregister(&dsi->host);
 		return dev_err_probe(&pdev->dev, ret, "Failed to request DSI irq\n");
-	}
 
 	dsi->bridge.of_node = dev->of_node;
 	dsi->bridge.type = DRM_MODE_CONNECTOR_DSI;
