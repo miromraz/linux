@@ -68,6 +68,7 @@ struct scpsys_domain {
 	int num_subsys_clks;
 	struct clk_bulk_data *subsys_clks;
 	struct regulator *supply;
+	bool boot_on;
 };
 
 struct scpsys {
@@ -884,6 +885,16 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	}
 
 	/*
+	 * Remember whether the bootloader left this domain powered on before
+	 * we touch it.  On probe deferral the cleanup path must not power off
+	 * domains that were already on at boot (e.g. MM scanning out the
+	 * bootloader splash), as a power cycle mid-DMA wedges SMI/M4U.
+	 * HW-voter domains have no direct status registers to read.
+	 */
+	if (pd->data)
+		pd->boot_on = scpsys_domain_is_on(pd);
+
+	/*
 	 * Initially turn on all domains to make the domains usable
 	 * with !CONFIG_PM and to get the hardware in sync with the
 	 * software.  The unused domains will be switched off during
@@ -992,6 +1003,13 @@ static void scpsys_remove_one_domain(struct scpsys_domain *pd)
 		dev_err(pd->scpsys->dev,
 			"failed to remove domain '%s' : %d - state may be inconsistent\n",
 			pd->genpd.name, ret);
+	/*
+	 * Only power off domains that we powered on ourselves.  Domains the
+	 * bootloader left on may still be in active use (e.g. MM scanning out
+	 * the splash); power-cycling them during probe-defer unwind wedges the
+	 * display path for the rest of the boot.
+	 */
+	if (!pd->boot_on && scpsys_domain_is_on(pd))
 		scpsys_power_off(&pd->genpd);
 
 	clk_bulk_put(pd->num_clks, pd->clks);
