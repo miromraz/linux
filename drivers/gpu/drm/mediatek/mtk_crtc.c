@@ -844,6 +844,23 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 				   mtk_crtc->cmdq_vblank_cnt == 0,
 				   msecs_to_jiffies(500));
 #endif
+	/*
+	 * Wait, quietly, for the planes to be disabled by one more vblank.
+	 * The output may already have been stopped by the bridge: on shutdown
+	 * the DSI sends the panel-off commands in command mode and the
+	 * pipeline no longer produces frame-done IRQs, so no further vblank is
+	 * a legitimate outcome here rather than an error worth a WARN (which
+	 * drm_crtc_wait_one_vblank() would emit on timeout). The planes are
+	 * reprogrammed by mtk_crtc_ddp_hw_init() on the next enable anyway.
+	 */
+	if (drm_crtc_vblank_get(crtc) == 0) {
+		u64 vblank_cnt = drm_crtc_vblank_count(crtc);
+
+		wait_event_timeout(*drm_crtc_vblank_waitqueue(crtc),
+				   drm_crtc_vblank_count(crtc) != vblank_cnt,
+				   msecs_to_jiffies(50));
+		drm_crtc_vblank_put(crtc);
+	}
 
 	drm_crtc_vblank_off(crtc);
 	mtk_crtc_ddp_hw_fini(mtk_crtc);
