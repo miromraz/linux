@@ -288,6 +288,7 @@ static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 		goto put_platform_node;
 	}
 	for_each_card_prelinks(card, i, dai_link) {
+		if (!dai_link->num_codecs || dai_link->codecs->name)
 			continue;
 		dai_link->codecs->of_node = codec_node;
 	}
@@ -330,3 +331,4 @@ MODULE_DESCRIPTION("MT6797 MT6351 ALSA SoC machine driver");
 MODULE_AUTHOR("KaiChieh Chuang <kaichieh.chuang@mediatek.com>");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("mt6797 mt6351 soc card");
+
