@@ -334,6 +334,14 @@ static const struct mtk_composite top_muxes[] = {
 	MUX_GATE(CLK_TOP_MUX_PWM, "pwm_sel", pwm_parents, 0x0050, 0, 3, 7),
 	MUX_GATE(CLK_TOP_MUX_VDEC, "vdec_sel", vdec_parents, 0x0050, 8, 3, 15),
 	MUX_GATE(CLK_TOP_MUX_VENC, "venc_sel", venc_parents, 0x0050, 16, 2, 23),
+	/*
+	 * Keep mfg_sel on its assigned parent (mfgpll_ck) across rate changes:
+	 * a GPU devfreq clk_set_rate() must retune MFGPLL, not reparent to
+	 * syspll_d3/univpll_d3, which would retune the critical MAINPLL/UNIVPLL
+	 * and hang the SoC.
+	 */
+	MUX_GATE_FLAGS(CLK_TOP_MUX_MFG, "mfg_sel", mfg_parents, 0x0050, 24, 2, 31,
+		       CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT),
 	MUX_GATE(CLK_TOP_MUX_CAMTG, "camtg_sel", camtg, 0x0060, 0, 2, 7),
 	MUX_GATE(CLK_TOP_MUX_UART, "uart_sel", uart_parents, 0x0060, 8, 1, 15),
 	MUX_GATE(CLK_TOP_MUX_SPI, "spi_sel", spi_parents, 0x0060, 16, 2, 23),
