@@ -57,6 +57,9 @@ properties:
           - enum:
               - samsung,exynos8890-mali
           - const: arm,mali-t880
+      - items:
+          - const: mediatek,mt6797-mali
+          - const: arm,mali-t880
 
   reg:
     maxItems: 1
@@ -88,7 +91,10 @@ properties:
     type: object
 
   power-domains:
-    maxItems: 1
+    minItems: 1
+    maxItems: 5
+
+  power-domain-names: true
 
   resets:
     minItems: 1
@@ -100,6 +106,13 @@ properties:
     const: 2
 
   dma-coherent: true
+
+  mediatek,infracfg:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the device's infracfg (infrastructure configuration)
+      syscon. On MediaTek MT6797 the GPU-LDO control registers that must
+      be programmed before the Mali cores are powered live in this block.
 
   dynamic-power-coefficient:
     $ref: /schemas/types.yaml#/definitions/uint32
@@ -151,6 +164,25 @@ allOf:
           minItems: 2
       required:
         - resets
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6797-mali
+    then:
+      properties:
+        power-domains:
+          minItems: 4
+          maxItems: 4
+        power-domain-names:
+          items:
+            - const: core0
+            - const: core1
+            - const: core2
+            - const: core3
+      required:
+        - power-domains
+        - power-domain-names
 
 examples:
   - |
