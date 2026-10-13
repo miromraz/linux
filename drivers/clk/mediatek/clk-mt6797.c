@@ -4,12 +4,19 @@
  * Author: Kevin Chen <kevin-cw.chen@mediatek.com>
  */
 
+#include <linux/clk-provider.h>
+#include <linux/delay.h>
+#include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include "clk-gate.h"
 #include "clk-mtk.h"
+#include "clk-mux.h"
 #include "clk-pll.h"
+#include "reset.h"
 
 #include <dt-bindings/clock/mt6797-clk.h>
 
@@ -333,7 +340,14 @@ static const struct mtk_composite top_muxes[] = {
 	MUX_GATE(CLK_TOP_MUX_PWM, "pwm_sel", pwm_parents, 0x0050, 0, 3, 7),
 	MUX_GATE(CLK_TOP_MUX_VDEC, "vdec_sel", vdec_parents, 0x0050, 8, 3, 15),
 	MUX_GATE(CLK_TOP_MUX_VENC, "venc_sel", venc_parents, 0x0050, 16, 2, 23),
-	MUX_GATE(CLK_TOP_MUX_MFG, "mfg_sel", mfg_parents, 0x0050, 24, 2, 31),
+	/*
+	 * Keep mfg_sel on its assigned parent (mfgpll_ck) across rate changes:
+	 * a GPU devfreq clk_set_rate() must retune MFGPLL, not reparent to
+	 * syspll_d3/univpll_d3, which would retune the critical MAINPLL/UNIVPLL
+	 * and hang the SoC.
+	 */
+	MUX_GATE_FLAGS(CLK_TOP_MUX_MFG, "mfg_sel", mfg_parents, 0x0050, 24, 2, 31,
+		       CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT),
 	MUX_GATE(CLK_TOP_MUX_CAMTG, "camtg_sel", camtg, 0x0060, 0, 2, 7),
 	MUX_GATE(CLK_TOP_MUX_UART, "uart_sel", uart_parents, 0x0060, 8, 1, 15),
 	MUX_GATE(CLK_TOP_MUX_SPI, "spi_sel", spi_parents, 0x0060, 16, 2, 23),
@@ -379,11 +393,41 @@ static const struct mtk_composite top_muxes[] = {
 	    0x0104, 1, 2),
 };
 
+/*
+ * Register a clk mux notifier for the MFG mux.
+ *
+ * The GPU runs off MFGPLL through the mfg_sel mux, so reprogramming MFGPLL
+ * on a GPU OPP change would glitch the clock feeding the running GPU. Before
+ * the rate change the mux is transparently switched to the 26 MHz crystal
+ * (mfg_parents[0]), and switched back afterwards. This matches the vendor
+ * gpufreq driver, which parks the mux on its clk_sub_parent (clk26m) while
+ * modifying MFGPLL_CON1.
+ *
+ * mfg_sel is registered as an mtk_composite, so feed the common mux notifier
+ * the composite's own clk_ops; the notifier callback drives get_parent() and
+ * set_parent() on the mux clk it is registered on.
+ */
+static int clk_mt6797_reg_mfg_mux_notifier(struct device *dev, struct clk *clk)
+{
+	struct clk_composite *composite = to_clk_composite(__clk_get_hw(clk));
+	struct mtk_mux_nb *mfg_mux_nb;
+
+	mfg_mux_nb = devm_kzalloc(dev, sizeof(*mfg_mux_nb), GFP_KERNEL);
+	if (!mfg_mux_nb)
+		return -ENOMEM;
+
+	mfg_mux_nb->ops = &composite->ops;
+	mfg_mux_nb->bypass_index = 0; /* Bypass to 26M crystal */
+
+	return devm_mtk_clk_mux_notifier_register(dev, clk, mfg_mux_nb);
+}
+
 static int mtk_topckgen_init(struct platform_device *pdev)
 {
 	struct clk_hw_onecell_data *clk_data;
 	void __iomem *base;
 	struct device_node *node = pdev->dev.of_node;
+	int ret;
 
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
@@ -400,7 +444,12 @@ static int mtk_topckgen_init(struct platform_device *pdev)
 				    ARRAY_SIZE(top_muxes), base,
 				    &mt6797_clk_lock, clk_data);
 
-	return of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	ret = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	if (ret)
+		return ret;
+
+	return clk_mt6797_reg_mfg_mux_notifier(&pdev->dev,
+					       clk_data->hws[CLK_TOP_MUX_MFG]->clk);
 }
 
 static const struct mtk_gate_regs infra0_cg_regs = {
@@ -539,6 +588,24 @@ static const struct mtk_fixed_factor infra_fixed_divs[] = {
 	FACTOR(CLK_INFRA_13M, "clk13m", "clk26m", 1, 2),
 };
 
+/*
+ * The three INFRA_GLOBALCON_RST banks each expose a separate SET and CLR
+ * register: 0x120/0x124 (RST0), 0x130/0x134 (RST1) and 0x140/0x144 (RST2,
+ * the always-on bank that carries the PMIC wrapper reset). The array holds
+ * the SET offset of each bank; the set/clear ops derive CLR as SET + 0x4.
+ */
+static u16 infra_rst_ofs[] = {
+	INFRA_RST0_SET_OFFSET,
+	INFRA_RST1_SET_OFFSET,
+	INFRA_RST2_SET_OFFSET,
+};
+
+static const struct mtk_clk_rst_desc infra_rst_desc = {
+	.version = MTK_RST_SET_CLR,
+	.rst_bank_ofs = infra_rst_ofs,
+	.rst_bank_nr = ARRAY_SIZE(infra_rst_ofs),
+};
+
 static struct clk_hw_onecell_data *infra_clk_data;
 
 static void mtk_infrasys_init_early(struct device_node *node)
@@ -570,12 +637,16 @@ CLK_OF_DECLARE_DRIVER(mtk_infra, "mediatek,mt6797-infracfg",
 static int mtk_infrasys_init(struct platform_device *pdev)
 {
 	int i;
+	int ret;
 	struct device_node *node = pdev->dev.of_node;
 
 	if (!infra_clk_data) {
 		infra_clk_data = mtk_alloc_clk_data(CLK_INFRA_NR);
 		if (!infra_clk_data)
 			return -ENOMEM;
+		mtk_clk_register_factors(infra_fixed_divs,
+					 ARRAY_SIZE(infra_fixed_divs),
+					 infra_clk_data);
 	} else {
 		for (i = 0; i < CLK_INFRA_NR; i++) {
 			if (infra_clk_data->hws[i] == ERR_PTR(-EPROBE_DEFER))
@@ -585,8 +656,10 @@ static int mtk_infrasys_init(struct platform_device *pdev)
 
 	mtk_clk_register_gates(&pdev->dev, node, infra_clks,
 			       ARRAY_SIZE(infra_clks), infra_clk_data);
-	mtk_clk_register_factors(infra_fixed_divs, ARRAY_SIZE(infra_fixed_divs),
-				 infra_clk_data);
+
+	ret = mtk_register_reset_controller_with_dev(&pdev->dev, &infra_rst_desc);
+	if (ret)
+		return ret;
 
 	return of_clk_add_hw_provider(node, of_clk_hw_onecell_get,
 				      infra_clk_data);
@@ -646,18 +719,123 @@ static const struct mtk_pll_data plls[] = {
 	    0x2B4, 4, 0x2BC, 0x2B8, 0),
 };
 
+/*
+ * SSUSB 26 MHz USB reference clock, enabled through APMIXEDSYS. LK's USB
+ * save-current path leaves this gated after boot, so the SSUSB PLL never locks
+ * and every T-PHY register access is dropped until it is re-enabled. Mirror the
+ * vendor enable_ssusb_xtal_clock() (3.18 mu3phy/mt6797/mtk-phy-asic.c): first
+ * AP_PLL_CON0 enables the LTE clock-square source (RG_LTECLKSQ_EN, then after it
+ * settles RG_LTECLKSQ_LPF_EN), then AP_PLL_CON2 forwards it to USB
+ * (DA_REF2USB_TX_EN, settle, DA_REF2USB_TX_LPF_EN | _OUT_EN). Both stages wait
+ * 100 us, matching LK.
+ */
+#define AP_PLL_CON0			0x0
+#define CON0_RG_LTECLKSQ_EN		BIT(0)
+#define CON0_RG_LTECLKSQ_LPF_EN		BIT(1)
+#define CON0_LTECLKSQ_MASK		(CON0_RG_LTECLKSQ_EN | CON0_RG_LTECLKSQ_LPF_EN)
+
+#define AP_PLL_CON2			0x8
+#define CON2_DA_REF2USB_TX_EN		BIT(0)
+#define CON2_DA_REF2USB_TX_LPF_EN	BIT(1)
+#define CON2_DA_REF2USB_TX_OUT_EN	BIT(2)
+#define CON2_REF2USB_MASK		(CON2_DA_REF2USB_TX_EN | \
+					 CON2_DA_REF2USB_TX_LPF_EN | \
+					 CON2_DA_REF2USB_TX_OUT_EN)
+
+struct mt6797_ssusb_ref {
+	struct clk_hw hw;
+	void __iomem *base;
+};
+
+#define to_mt6797_ssusb_ref(_hw) \
+	container_of(_hw, struct mt6797_ssusb_ref, hw)
+
+static int mt6797_ssusb_ref_is_prepared(struct clk_hw *hw)
+{
+	struct mt6797_ssusb_ref *ref = to_mt6797_ssusb_ref(hw);
+
+	return (readl(ref->base + AP_PLL_CON0) & CON0_LTECLKSQ_MASK) == CON0_LTECLKSQ_MASK &&
+	       (readl(ref->base + AP_PLL_CON2) & CON2_REF2USB_MASK) == CON2_REF2USB_MASK;
+}
+
+static int mt6797_ssusb_ref_prepare(struct clk_hw *hw)
+{
+	struct mt6797_ssusb_ref *ref = to_mt6797_ssusb_ref(hw);
+	u32 val;
+
+	val = readl(ref->base + AP_PLL_CON0) | CON0_RG_LTECLKSQ_EN;
+	writel(val, ref->base + AP_PLL_CON0);
+	udelay(100);
+	writel(val | CON0_RG_LTECLKSQ_LPF_EN, ref->base + AP_PLL_CON0);
+
+	val = readl(ref->base + AP_PLL_CON2) | CON2_DA_REF2USB_TX_EN;
+	writel(val, ref->base + AP_PLL_CON2);
+	udelay(100);
+	writel(val | CON2_DA_REF2USB_TX_LPF_EN | CON2_DA_REF2USB_TX_OUT_EN,
+	       ref->base + AP_PLL_CON2);
+
+	return 0;
+}
+
+/*
+ * No .unprepare: AP_PLL_CON0 RG_LTECLKSQ_* is the shared LTE 26 MHz
+ * clock-square, not a USB-only gate, and the vendor never turns it (or the
+ * CON2 forwarding) off. The clock is also flagged CLK_IGNORE_UNUSED so
+ * clk_disable_unused() leaves it alone before the T-PHY binds.
+ */
+static const struct clk_ops mt6797_ssusb_ref_ops = {
+	.is_prepared	= mt6797_ssusb_ref_is_prepared,
+	.prepare	= mt6797_ssusb_ref_prepare,
+};
+
 static int mtk_apmixedsys_init(struct platform_device *pdev)
 {
 	struct clk_hw_onecell_data *clk_data;
 	struct device_node *node = pdev->dev.of_node;
+	struct clk_init_data init = {
+		.name = "ssusb_ref",
+		.ops = &mt6797_ssusb_ref_ops,
+		.flags = CLK_IGNORE_UNUSED,
+		.parent_names = (const char *[]){ "clk26m" },
+		.num_parents = 1,
+	};
+	struct mt6797_ssusb_ref *ssusb_ref;
+	void __iomem *base;
+	int ret;
+
+	base = of_iomap(node, 0);
+	if (!base)
+		return -ENOMEM;
 
 	clk_data = mtk_alloc_clk_data(CLK_APMIXED_NR);
-	if (!clk_data)
+	if (!clk_data) {
+		iounmap(base);
 		return -ENOMEM;
+	}
 
 	mtk_clk_register_plls(&pdev->dev, plls, ARRAY_SIZE(plls), clk_data);
 
-	return of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	ssusb_ref = devm_kzalloc(&pdev->dev, sizeof(*ssusb_ref), GFP_KERNEL);
+	if (!ssusb_ref) {
+		ret = -ENOMEM;
+		goto err;
+	}
+	ssusb_ref->base = base;
+	ssusb_ref->hw.init = &init;
+	ret = devm_clk_hw_register(&pdev->dev, &ssusb_ref->hw);
+	if (ret)
+		goto err;
+	clk_data->hws[CLK_APMIXED_SSUSB_REF] = &ssusb_ref->hw;
+
+	ret = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
+	if (ret)
+		goto err;
+
+	return 0;
+
+err:
+	iounmap(base);
+	return ret;
 }
 
 static const struct of_device_id of_match_clk_mt6797[] = {
