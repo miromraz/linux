@@ -221,6 +221,7 @@ struct mtk_dsi {
 	int refcount;
 	bool enabled;
 	bool lanes_ready;
+	bool init_failed;
 	u32 irq_data;
 	wait_queue_head_t irq_wait_queue;
 	const struct mtk_dsi_driver_data *driver_data;
@@ -707,6 +708,8 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 	if (++dsi->refcount != 1)
 		return 0;
 
+	dsi->init_failed = false;
+
 	ret = mipi_dsi_pixel_format_to_bpp(dsi->format);
 	if (ret < 0) {
 		dev_err(dev, "Unknown MIPI DSI format %d\n", dsi->format);
@@ -807,6 +810,18 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi)
 {
 	if (dsi->enabled)
 		return;
+
+	/*
+	 * A panel init transfer (drm_panel .prepare) in the pre-enable path
+	 * sets init_failed when a command times out. The DRM atomic enable
+	 * callbacks are void, so the panel/bridge error cannot be returned;
+	 * bail out here instead of starting video mode on a dead link, which
+	 * would otherwise time out the DSI engine and hard-hang the SoC.
+	 */
+	if (dsi->init_failed) {
+		DRM_ERROR("panel init failed, not starting DSI video mode\n");
+		return;
+	}
 
 	mtk_dsi_set_mode(dsi);
 	mtk_dsi_start(dsi);
@@ -1126,10 +1141,12 @@ static ssize_t mtk_dsi_host_send_cmd(struct mtk_dsi *dsi,
 	mtk_dsi_cmdq(dsi, msg);
 	mtk_dsi_start(dsi);
 
-	if (!mtk_dsi_wait_for_irq_done(dsi, flag, 2000))
+	if (!mtk_dsi_wait_for_irq_done(dsi, flag, 2000)) {
+		dsi->init_failed = true;
 		return -ETIME;
-	else
-		return 0;
+	}
+
+	return 0;
 }
 
 static ssize_t mtk_dsi_host_transfer(struct mipi_dsi_host *host,
