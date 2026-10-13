@@ -22,6 +22,7 @@ static const struct mtk_gate_regs venc_cg_regs = {
 	GATE_MTK(_id, _name, _parent, &venc_cg_regs, _shift, &mtk_clk_gate_ops_setclr_inv)
 
 static const struct mtk_gate venc_clks[] = {
+	GATE_DUMMY(CLK_DUMMY, "venc_dummy"),
 	GATE_VENC(CLK_VENC_0, "venc_0", "mm_sel", 0),
 	GATE_VENC(CLK_VENC_1, "venc_1", "venc_sel", 4),
 	GATE_VENC(CLK_VENC_2, "venc_2", "venc_sel", 8),
@@ -31,6 +32,7 @@ static const struct mtk_gate venc_clks[] = {
 static const struct mtk_clk_desc venc_desc = {
 	.clks = venc_clks,
 	.num_clks = ARRAY_SIZE(venc_clks),
+	.need_runtime_pm = true,
 };
 
 static const struct of_device_id of_match_clk_mt6797_venc[] = {

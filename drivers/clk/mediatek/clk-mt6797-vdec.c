@@ -31,6 +31,7 @@ static const struct mtk_gate_regs vdec1_cg_regs = {
 	GATE_MTK(_id, _name, _parent, &vdec1_cg_regs, _shift, &mtk_clk_gate_ops_setclr_inv)
 
 static const struct mtk_gate vdec_clks[] = {
+	GATE_DUMMY(CLK_DUMMY, "vdec_dummy"),
 	GATE_VDEC0(CLK_VDEC_CKEN_ENG, "vdec_cken_eng", "vdec_sel", 8),
 	GATE_VDEC0(CLK_VDEC_ACTIVE, "vdec_active", "vdec_sel", 4),
 	GATE_VDEC0(CLK_VDEC_CKEN, "vdec_cken", "vdec_sel", 0),
@@ -40,6 +41,7 @@ static const struct mtk_gate vdec_clks[] = {
 static const struct mtk_clk_desc vdec_desc = {
 	.clks = vdec_clks,
 	.num_clks = ARRAY_SIZE(vdec_clks),
+	.need_runtime_pm = true,
 };
 
 static const struct of_device_id of_match_clk_mt6797_vdec[] = {
