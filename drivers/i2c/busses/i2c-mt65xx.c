@@ -456,6 +456,20 @@ static const struct mtk_i2c_compatible mt7986_compat = {
 	.max_dma_support = 32,
 };
 
+static const struct mtk_i2c_compatible mt6797_compat = {
+	.regs = mt_i2c_regs_v1,
+	.pmic_i2c = 0,
+	.dcm = 1,
+	.auto_restart = 1,
+	.aux_len_reg = 1,
+	.timing_adjust = 0,
+	.dma_sync = 0,
+	.ltiming_adjust = 0,
+	.apdma_sync = 0,
+	/* The MT6797 APDMA has no 4G-mode registers; DMA stays below 4G. */
+	.max_dma_support = 32,
+};
+
 static const struct mtk_i2c_compatible mt8173_compat = {
 	.regs = mt_i2c_regs_v1,
 	.pmic_i2c = 0,
@@ -527,6 +541,7 @@ static const struct of_device_id mtk_i2c_of_match[] = {
 	{ .compatible = "mediatek,mt2712-i2c", .data = &mt2712_compat },
 	{ .compatible = "mediatek,mt6577-i2c", .data = &mt6577_compat },
 	{ .compatible = "mediatek,mt6589-i2c", .data = &mt6589_compat },
+	{ .compatible = "mediatek,mt6797-i2c", .data = &mt6797_compat },
 	{ .compatible = "mediatek,mt7622-i2c", .data = &mt7622_compat },
 	{ .compatible = "mediatek,mt7981-i2c", .data = &mt7981_compat },
 	{ .compatible = "mediatek,mt7986-i2c", .data = &mt7986_compat },
