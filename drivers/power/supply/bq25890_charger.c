@@ -106,6 +106,7 @@ struct bq25890_state {
 	u8 boost_fault;
 	u8 bat_fault;
 	u8 ntc_fault;
+	u8 vbus_status;
 };
 
 struct bq25890_device {
@@ -783,6 +784,51 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 	power_supply_changed(psy);
 }
 
+/*
+ * REG0B VBUS_STAT as reported by the BQ25896's own USB D+/D- detection.
+ * Other chips in the family encode these bits differently.
+ */
+enum bq25896_vbus_status {
+	VBUS_STAT_NO_INPUT,
+	VBUS_STAT_USB_SDP,
+	VBUS_STAT_USB_CDP,
+	VBUS_STAT_USB_DCP,
+	VBUS_STAT_HV_DCP,
+	VBUS_STAT_UNKNOWN_ADAPTER,
+	VBUS_STAT_NONSTD_ADAPTER,
+	VBUS_STAT_OTG,
+};
+
+/*
+ * On boards without an external charger-type supplier the BQ25896 runs its own
+ * D+/D- detection (AUTO_DPDM_EN) and reports the result in VBUS_STAT, but it
+ * leaves the input current limit at the 500 mA power-on default. Program the
+ * limit from the detected source, mirroring the vendor kernel's per-type values
+ * (SDP 500 mA, CDP 650 mA, DCP up to the 3.25 A chip maximum, everything else
+ * the safe 500 mA default).
+ */
+static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
+{
+	int iinlim_ua;
+
+	switch (bq->state.vbus_status) {
+	case VBUS_STAT_USB_CDP:
+		iinlim_ua = 650000;
+		break;
+	case VBUS_STAT_USB_DCP:
+	case VBUS_STAT_HV_DCP:
+		iinlim_ua = 3250000;
+		break;
+	case VBUS_STAT_USB_SDP:
+	default:
+		iinlim_ua = 500000;
+		break;
+	}
+
+	bq25890_field_write(bq, F_IINLIM,
+			    bq25890_charger_get_scaled_iinlim_regval(bq, iinlim_ua));
+}
+
 static int bq25890_get_chip_state(struct bq25890_device *bq,
 				  struct bq25890_state *state)
 {
@@ -799,6 +845,8 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 		{F_BOOST_FAULT, &state->boost_fault},
 		{F_BAT_FAULT,	&state->bat_fault},
 		{F_CHG_FAULT,	&state->chrg_fault},
+		{F_NTC_FAULT,	&state->ntc_fault},
+		{F_VBUS_STAT,	&state->vbus_status}
 	};
 
 	for (i = 0; i < ARRAY_SIZE(state_fields); i++) {
@@ -809,9 +857,11 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 		*state_fields[i].data = ret;
 	}
 
+	dev_dbg(bq->dev, "S:CHG/PG/HIZ/VSYS=%d/%d/%d/%d, F:CHG/BOOST/BAT/NTC=%d/%d/%d/%d, VBUS=%d\n",
 		state->chrg_status, state->online,
 		state->hiz, state->vsys_status,
 		state->chrg_fault, state->boost_fault,
+		state->bat_fault, state->ntc_fault, state->vbus_status);
 
 	return 0;
 }
@@ -820,6 +870,7 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 {
 	bool adc_conv_rate, new_adc_conv_rate;
 	struct bq25890_state new_state;
+	bool vbus_changed;
 	int ret;
 
 	ret = bq25890_get_chip_state(bq, &new_state);
@@ -828,6 +879,8 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 
 	if (!memcmp(&bq->state, &new_state, sizeof(new_state)))
 		return IRQ_NONE;
+
+	vbus_changed = new_state.vbus_status != bq->state.vbus_status;
 
 	/*
 	 * Restore HiZ bit in case it was set by user. The chip does not retain
@@ -851,6 +904,14 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	}
 
 	bq->state = new_state;
+
+	/*
+	 * A changed VBUS_STAT means the source was (un)plugged or re-detected;
+	 * reprogram the input current limit from the BQ25896's own detection.
+	 */
+	if (bq->chip_version == BQ25896 && vbus_changed)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+
 	power_supply_changed(bq->charger);
 
 	return IRQ_HANDLED;
@@ -992,6 +1053,10 @@ static int bq25890_hw_init(struct bq25890_device *bq)
 		dev_dbg(bq->dev, "Get state failed %d\n", ret);
 		return ret;
 	}
+
+	/* Match the input current limit to a source already present at probe */
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 
 	/* Configure ADC for continuous conversions when charging */
 	ret = bq25890_field_write(bq, F_CONV_RATE, bq->state.online && !bq->state.hiz);
