@@ -20,6 +20,7 @@
 
 #include "mt6735-pm-domains.h"
 #include "mt6795-pm-domains.h"
+#include "mt6797-pm-domains.h"
 #include "mt6893-pm-domains.h"
 #include "mt8167-pm-domains.h"
 #include "mt8173-pm-domains.h"
@@ -137,20 +138,22 @@ static int scpsys_sec_infra_power_on(bool on)
 static int scpsys_sram_enable(struct scpsys_domain *pd)
 {
 	u32 expected_ack, pdn_ack = pd->data->sram_pdn_ack_bits;
+	int pdn_offs = pd->data->sram_pdn_offs ? pd->data->sram_pdn_offs : pd->data->ctl_offs;
+	int ack_offs = pd->data->sram_ack_offs ? pd->data->sram_ack_offs : pd->data->ctl_offs;
 	struct scpsys *scpsys = pd->scpsys;
 	unsigned int tmp;
 	int ret;
 
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_SRAM_PDN_INVERTED)) {
-		regmap_set_bits(scpsys->base, pd->data->ctl_offs, pd->data->sram_pdn_bits);
+		regmap_set_bits(scpsys->base, pdn_offs, pd->data->sram_pdn_bits);
 		expected_ack = pdn_ack;
 	} else {
-		regmap_clear_bits(scpsys->base, pd->data->ctl_offs, pd->data->sram_pdn_bits);
+		regmap_clear_bits(scpsys->base, pdn_offs, pd->data->sram_pdn_bits);
 		expected_ack = 0;
 	}
 
 	/* Either wait until SRAM_PDN_ACK all 1 or 0 */
-	ret = regmap_read_poll_timeout(scpsys->base, pd->data->ctl_offs, tmp,
+	ret = regmap_read_poll_timeout(scpsys->base, ack_offs, tmp,
 				       (tmp & pdn_ack) == expected_ack,
 				       MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
 	if (ret < 0)
@@ -168,6 +171,8 @@ static int scpsys_sram_enable(struct scpsys_domain *pd)
 static int scpsys_sram_disable(struct scpsys_domain *pd)
 {
 	u32 expected_ack, pdn_ack = pd->data->sram_pdn_ack_bits;
+	int pdn_offs = pd->data->sram_pdn_offs ? pd->data->sram_pdn_offs : pd->data->ctl_offs;
+	int ack_offs = pd->data->sram_ack_offs ? pd->data->sram_ack_offs : pd->data->ctl_offs;
 	struct scpsys *scpsys = pd->scpsys;
 	unsigned int tmp;
 
@@ -178,15 +183,15 @@ static int scpsys_sram_disable(struct scpsys_domain *pd)
 	}
 
 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_SRAM_PDN_INVERTED)) {
-		regmap_clear_bits(scpsys->base, pd->data->ctl_offs, pd->data->sram_pdn_bits);
+		regmap_clear_bits(scpsys->base, pdn_offs, pd->data->sram_pdn_bits);
 		expected_ack = 0;
 	} else {
-		regmap_set_bits(scpsys->base, pd->data->ctl_offs, pd->data->sram_pdn_bits);
+		regmap_set_bits(scpsys->base, pdn_offs, pd->data->sram_pdn_bits);
 		expected_ack = pdn_ack;
 	}
 
 	/* Either wait until SRAM_PDN_ACK all 1 or 0 */
-	return regmap_read_poll_timeout(scpsys->base, pd->data->ctl_offs, tmp,
+	return regmap_read_poll_timeout(scpsys->base, ack_offs, tmp,
 					(tmp & pdn_ack) == expected_ack,
 					MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
 }
@@ -1156,6 +1161,10 @@ static const struct of_device_id scpsys_of_match[] = {
 	{
 		.compatible = "mediatek,mt6795-power-controller",
 		.data = &mt6795_scpsys_data,
+	},
+	{
+		.compatible = "mediatek,mt6797-power-controller",
+		.data = &mt6797_scpsys_data,
 	},
 	{
 		.compatible = "mediatek,mt6893-power-controller",
