@@ -107,6 +107,13 @@ properties:
 
   dma-coherent: true
 
+  mediatek,infracfg:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the device's infracfg (infrastructure configuration)
+      syscon. On MediaTek MT6797 the GPU-LDO control registers that must
+      be programmed before the Mali cores are powered live in this block.
+
   dynamic-power-coefficient:
     $ref: /schemas/types.yaml#/definitions/uint32
     description:
