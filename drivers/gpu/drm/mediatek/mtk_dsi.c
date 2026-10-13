@@ -764,6 +764,14 @@ static int mtk_dsi_poweron(struct mtk_dsi *dsi)
 		writel(FORCE_COMMIT | BYPASS_SHADOW,
 		       dsi->regs + dsi->driver_data->reg_shadow_dbg_off);
 
+	/*
+	 * The bootloader may hand over the engine still started in video
+	 * mode. Nothing feeds it pixels at this point, so the first panel
+	 * command would wait for a VM_DONE that never comes; start from
+	 * command mode instead, as after a power cycle.
+	 */
+	mtk_dsi_stop(dsi);
+	mtk_dsi_set_cmd_mode(dsi);
 	mtk_dsi_reset_engine(dsi);
 	mtk_dsi_phy_timconfig(dsi);
 
