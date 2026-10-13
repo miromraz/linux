@@ -16383,6 +16383,13 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/mmc/mtk-sd.yaml
 F:	drivers/mmc/host/mtk-sd.c
 
+MEDIATEK MT6351 ACCDET DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-sound@vger.kernel.org
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	sound/soc/codecs/mt6351-accdet.c
+
 MEDIATEK MT6351 REGULATOR DRIVER
 M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
 L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
