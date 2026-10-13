@@ -776,6 +776,12 @@ static const struct mtk_smi_common_plat mtk_smi_common_mt6795 = {
 	.init     = mtk_smi_common_mt6795_init,
 };
 
+static const struct mtk_smi_common_plat mtk_smi_common_mt6797 = {
+	.type     = MTK_SMI_GEN2,
+	.bus_sel  = F_MMU1_LARB(1) | F_MMU1_LARB(2) | F_MMU1_LARB(3) |
+		    F_MMU1_LARB(4) | F_MMU1_LARB(5) | F_MMU1_LARB(6),
+};
+
 static const struct mtk_smi_common_plat mtk_smi_common_mt6893 = {
 	.type     = MTK_SMI_GEN2,
 	.has_gals = true,
@@ -845,6 +851,7 @@ static const struct of_device_id mtk_smi_common_of_ids[] = {
 	{.compatible = "mediatek,mt2712-smi-common", .data = &mtk_smi_common_gen2},
 	{.compatible = "mediatek,mt6779-smi-common", .data = &mtk_smi_common_mt6779},
 	{.compatible = "mediatek,mt6795-smi-common", .data = &mtk_smi_common_mt6795},
+	{.compatible = "mediatek,mt6797-smi-common", .data = &mtk_smi_common_mt6797},
 	{.compatible = "mediatek,mt6893-smi-common", .data = &mtk_smi_common_mt6893},
 	{.compatible = "mediatek,mt8167-smi-common", .data = &mtk_smi_common_gen2},
 	{.compatible = "mediatek,mt8173-smi-common", .data = &mtk_smi_common_gen2},
