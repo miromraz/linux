@@ -1344,12 +1344,18 @@
 
 &rtc {
 	/*
-	 * Forward "reboot recovery" to LK through the RTC PDN1 factory-reset /
-	 * recovery field. The fast-boot bit (0x2000, "reboot bootloader") is
-	 * not described because this device's LK does not read it (fastboot
-	 * support is compiled out), verified on hardware.
+	 * Forward boot-mode requests through the RTC PDN1 spare bits, which
+	 * survive a warm reset. "reboot recovery" sets the factory-reset /
+	 * recovery field, which LK reads to boot the recovery partition.
+	 *
+	 * "reboot bootloader" sets the fast-boot bit (0x2000). This device's
+	 * LK compiles its own bit-13 reader out (fastboot support off, verified
+	 * on hardware), but the chainloaded U-Boot runs after LK, reads the bit
+	 * and enters fastboot, then clears it - so describing it here makes
+	 * unattended "reboot bootloader" land in fastboot with no key presses.
 	 */
 	mode-recovery = <0x10>;
+	mode-bootloader = <0x2000>;
 };
 
 &{/} {
