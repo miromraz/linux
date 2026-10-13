@@ -1,0 +1,23 @@
+Source: linux-gemini
+Section: kernel
+Priority: optional
+Maintainer: Miroslav Mraz <mraz.miro@seznam.cz>
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 12)
+Build-Depends-Arch: bc, bison, flex,
+ gcc-aarch64-linux-gnu <!pkg.linux-gemini.nokernelheaders>,
+ kmod, libdw-dev:native, libelf-dev:native,
+ libssl-dev:native, libssl-dev <!pkg.linux-gemini.nokernelheaders>,
+ python3:native, rsync
+Homepage: https://www.kernel.org/
+
+Package: linux-image-7.1.3-mt6797
+Architecture: arm64
+Description: Linux kernel, version 7.1.3-mt6797
+ Linux kernel for the Planet Computers Gemini PDA (MediaTek MT6797).
+
+Package: linux-headers-7.1.3-mt6797
+Architecture: arm64
+Build-Profiles: <!pkg.linux-gemini.nokernelheaders>
+Description: Linux kernel headers for 7.1.3-mt6797 on arm64
+ This package provides kernel header files for 7.1.3-mt6797 on arm64.
