@@ -375,15 +375,15 @@ void mtk_ovl_layer_on(struct device *dev, unsigned int idx,
 
 	mtk_ddp_write(cmdq_pkt, 0x1, &ovl->cmdq_reg, ovl->regs,
 		      DISP_REG_OVL_RDMA_CTRL(idx));
-	gmc_thrshd_l = GMC_THRESHOLD_LOW >>
-		      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
-	gmc_thrshd_h = GMC_THRESHOLD_HIGH >>
-		      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
-	if (ovl->data->gmc_bits == 10)
-		gmc_value = gmc_thrshd_h | gmc_thrshd_h << 16;
-	else
-		gmc_value = gmc_thrshd_l | gmc_thrshd_l << 8 |
-			    gmc_thrshd_h << 16 | gmc_thrshd_h << 24;
+		gmc_thrshd_l = GMC_THRESHOLD_LOW >>
+			      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
+		gmc_thrshd_h = GMC_THRESHOLD_HIGH >>
+			      (GMC_THRESHOLD_BITS - ovl->data->gmc_bits);
+		if (ovl->data->gmc_bits == 10)
+			gmc_value = gmc_thrshd_h | gmc_thrshd_h << 16;
+		else
+			gmc_value = gmc_thrshd_l | gmc_thrshd_l << 8 |
+				    gmc_thrshd_h << 16 | gmc_thrshd_h << 24;
 	mtk_ddp_write(cmdq_pkt, gmc_value,
 		      &ovl->cmdq_reg, ovl->regs, DISP_REG_OVL_RDMA_GMC(idx));
 	mtk_ddp_write_mask(cmdq_pkt, BIT(idx), &ovl->cmdq_reg, ovl->regs,
@@ -594,7 +594,6 @@ void mtk_ovl_bgclr_in_off(struct device *dev)
 static int mtk_disp_ovl_bind(struct device *dev, struct device *master,
 			     void *data)
 {
-	return 0;
 }
 
 static void mtk_disp_ovl_unbind(struct device *dev, struct device *master,
@@ -690,6 +689,16 @@ static const struct mtk_disp_ovl_data mt8173_ovl_driver_data = {
 	.num_formats = ARRAY_SIZE(mt8173_formats),
 };
 
+static const struct mtk_disp_ovl_data mt6797_ovl_2l_driver_data = {
+	.addr = DISP_REG_OVL_ADDR_MT8173,
+	.gmc_bits = 8,
+	.layer_nr = 2,
+	.fmt_rgb565_is_0 = true,
+	.smi_id_en = true,
+	.formats = mt8173_formats,
+	.num_formats = ARRAY_SIZE(mt8173_formats),
+};
+
 static const struct mtk_disp_ovl_data mt8183_ovl_driver_data = {
 	.addr = DISP_REG_OVL_ADDR_MT8173,
 	.gmc_bits = 10,
@@ -756,6 +765,8 @@ static const struct of_device_id mtk_disp_ovl_driver_dt_match[] = {
 	  .data = &mt8167_ovl_driver_data},
 	{ .compatible = "mediatek,mt8173-disp-ovl",
 	  .data = &mt8173_ovl_driver_data},
+	{ .compatible = "mediatek,mt6797-disp-ovl-2l",
+	  .data = &mt6797_ovl_2l_driver_data},
 	{ .compatible = "mediatek,mt8183-disp-ovl",
 	  .data = &mt8183_ovl_driver_data},
 	{ .compatible = "mediatek,mt8183-disp-ovl-2l",
