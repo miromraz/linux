@@ -337,6 +337,24 @@ ddp_cmdq_cb_out:
 }
 #endif
 
+/*
+ * An overlay exposes the background-colour input selector (bgclr_in). When an
+ * overlay is fed by another overlay it must route that upstream pixel stream in
+ * instead of its own constant background, otherwise the downstream overlay
+ * blanks the image. Paths with a single overlay, or whose second stage is not
+ * an overlay, never need it.
+ */
+static bool mtk_crtc_comp_is_ovl(struct mtk_ddp_comp *comp)
+{
+	return comp->funcs && comp->funcs->bgclr_in_on;
+}
+
+static bool mtk_crtc_comp_needs_bgclr_in(struct mtk_crtc *mtk_crtc, int i)
+{
+	return i > 0 && mtk_crtc_comp_is_ovl(mtk_crtc->ddp_comp[i]) &&
+	       mtk_crtc_comp_is_ovl(mtk_crtc->ddp_comp[i - 1]);
+}
+
 static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 {
 	struct drm_crtc *crtc = &mtk_crtc->base;
@@ -405,28 +423,11 @@ static int mtk_crtc_ddp_hw_init(struct mtk_crtc *mtk_crtc)
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[i];
 
-		if (i == 1)
+		if (mtk_crtc_comp_needs_bgclr_in(mtk_crtc, i))
 			mtk_ddp_comp_bgclr_in_on(comp);
 
 		mtk_ddp_comp_config(comp, width, height, vrefresh, bpc, NULL);
 		mtk_ddp_comp_start(comp);
-	}
-
-	/* Initially configure all planes */
-	for (i = 0; i < mtk_crtc->layer_nr; i++) {
-		struct drm_plane *plane = &mtk_crtc->planes[i];
-		struct mtk_plane_state *plane_state;
-		struct mtk_ddp_comp *comp;
-		unsigned int local_layer;
-
-		plane_state = to_mtk_plane_state(plane->state);
-
-		/* should not enable layer before crtc enabled */
-		plane_state->pending.enable = false;
-		comp = mtk_ddp_comp_for_plane(crtc, plane, &local_layer);
-		if (comp)
-			mtk_ddp_comp_layer_config(comp, local_layer,
-						  plane_state, NULL);
 	}
 
 	return 0;
@@ -447,7 +448,7 @@ static void mtk_crtc_ddp_hw_fini(struct mtk_crtc *mtk_crtc)
 
 	for (i = 0; i < mtk_crtc->ddp_comp_nr; i++) {
 		mtk_ddp_comp_stop(mtk_crtc->ddp_comp[i]);
-		if (i == 1)
+		if (mtk_crtc_comp_needs_bgclr_in(mtk_crtc, i))
 			mtk_ddp_comp_bgclr_in_off(mtk_crtc->ddp_comp[i]);
 	}
 
@@ -832,8 +833,6 @@ static void mtk_crtc_atomic_disable(struct drm_crtc *crtc,
 				   mtk_crtc->cmdq_vblank_cnt == 0,
 				   msecs_to_jiffies(500));
 #endif
-	/* Wait for planes to be disabled */
-	drm_crtc_wait_one_vblank(crtc);
 
 	drm_crtc_vblank_off(crtc);
 	mtk_crtc_ddp_hw_fini(mtk_crtc);
@@ -932,16 +931,17 @@ err_cleanup_crtc:
 
 static int mtk_crtc_num_comp_planes(struct mtk_crtc *mtk_crtc, int comp_idx)
 {
-	struct mtk_ddp_comp *comp;
+	struct mtk_ddp_comp *comp = mtk_crtc->ddp_comp[comp_idx];
 
-	if (comp_idx > 1)
-		return 0;
-
-	comp = mtk_crtc->ddp_comp[comp_idx];
 	if (!comp->funcs)
 		return 0;
 
-	if (comp_idx == 1 && !comp->funcs->bgclr_in_on)
+	/*
+	 * The first component always contributes its layers. A later overlay
+	 * contributes its layers only when it is chained behind another overlay
+	 * (i.e. it takes bgclr_in), so its planes blend over the upstream image.
+	 */
+	if (comp_idx != 0 && !mtk_crtc_comp_needs_bgclr_in(mtk_crtc, comp_idx))
 		return 0;
 
 	return mtk_ddp_comp_layer_nr(comp);
