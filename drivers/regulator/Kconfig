@@ -937,6 +937,15 @@ config REGULATOR_MT6332
 	  This driver supports the control of different power rails of device
 	  through regulator interface
 
+config REGULATOR_MT6351
+	tristate "MediaTek MT6351 PMIC"
+	depends on MFD_MT6397
+	help
+	  Say y here to select this option to enable the power regulators of
+	  the MediaTek MT6351 PMIC.
+	  This driver supports the control of the buck and LDO rails through
+	  the regulator interface.
+
 config REGULATOR_MT6357
 	tristate "MediaTek MT6357 PMIC"
 	depends on MFD_MT6397
@@ -1361,6 +1370,19 @@ config REGULATOR_RT5739
 
 	  This driver can also be built as a module. If so, the module
 	  will be called rt5739.
+
+config REGULATOR_RT5735
+	tristate "Richtek RT5735 regulator"
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  This driver supports the VSEL0 output of the Richtek RT5735 I2C
+	  step-down regulator.  On the MediaTek MT6797 Gemini PDA it supplies
+	  the external GPU buck rail, and its output voltage is configured
+	  over I2C through the regulator framework.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called rt5735-regulator.
 
 config REGULATOR_RT5759
 	tristate "Richtek RT5759 Regulator"
@@ -1887,5 +1909,18 @@ config REGULATOR_QCOM_LABIBB
 	  based PMIC implementations. LAB can be used as positive
 	  boost regulator and IBB can be used as a negative boost regulator
 	  for LCD display panel.
+
+config REGULATOR_FAN49101
+	tristate "onsemi FAN49101 buck-boost regulator"
+	depends on I2C && OF
+	select REGMAP_I2C
+	help
+	  This driver supports the onsemi FAN49101 I2C buck-boost regulator.
+	  It has a register protocol distinct from the FAN53555 family and
+	  provides one standard regulator output whose voltage is set over
+	  I2C through the regulator framework.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called fan49101.
 
 endif
