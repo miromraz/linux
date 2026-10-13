@@ -668,9 +668,18 @@ static irqreturn_t mtk_dsi_irq(int irq, void *dev_id)
 	status = readl(dsi->regs + DSI_INTSTA) & flag;
 
 	if (status) {
+		unsigned int loops = 0;
+
+		/*
+		 * Acknowledge the read and wait for the engine to clear BUSY.
+		 * Bound the wait: if the pipeline is stalled the engine can
+		 * stay BUSY forever, and this runs in hard-IRQ context, so an
+		 * unbounded loop would hang the CPU.
+		 */
 		do {
 			mtk_dsi_mask(dsi, DSI_RACK, RACK, RACK);
 			tmp = readl(dsi->regs + DSI_INTSTA);
+		} while ((tmp & DSI_BUSY) && ++loops < 2000);
 
 		mtk_dsi_mask(dsi, DSI_INTSTA, status, 0);
 		mtk_dsi_irq_data_set(dsi, status);
