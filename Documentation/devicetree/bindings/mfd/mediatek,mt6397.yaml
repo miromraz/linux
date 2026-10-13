@@ -4,17 +4,17 @@
 $id: http://devicetree.org/schemas/mfd/mediatek,mt6397.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: MediaTek MT6397/MT6323 PMIC
+title: MediaTek MT6397/MT6323/MT6351 PMIC
 
 maintainers:
   - Sen Chu <sen.chu@mediatek.com>
   - Macpaul Lin <macpaul.lin@mediatek.com>
 
 description: |
-  MT6397/MT6323 is a power management system chip.
+  MT6397/MT6323/MT6351 is a power management system chip.
   Please see the sub-modules below for supported features.
 
-  MT6397/MT6323 is a multifunction device with the following sub modules:
+  MT6397/MT6323/MT6351 is a multifunction device with the following sub modules:
   - Regulators
   - RTC
   - ADC
@@ -37,6 +37,7 @@ properties:
           - mediatek,mt6323
           - mediatek,mt6331 # "mediatek,mt6331" for PMIC MT6331 and MT6332.
           - mediatek,mt6328
+          - mediatek,mt6351
           - mediatek,mt6358
           - mediatek,mt6359
           - mediatek,mt6397
@@ -66,6 +67,7 @@ properties:
           - enum:
               - mediatek,mt6323-rtc
               - mediatek,mt6331-rtc
+              - mediatek,mt6351-rtc
               - mediatek,mt6358-rtc
               - mediatek,mt6397-rtc
           - items:
@@ -91,6 +93,7 @@ properties:
               - mediatek,mt6323-regulator
               - mediatek,mt6328-regulator
               - mediatek,mt6331-regulator
+              - mediatek,mt6351-regulator
               - mediatek,mt6358-regulator
               - mediatek,mt6359-regulator
               - mediatek,mt6397-regulator
@@ -117,6 +120,7 @@ properties:
       compatible:
         oneOf:
           - enum:
+              - mediatek,mt6351-sound
               - mediatek,mt6358-sound
               - mediatek,mt6359-codec
               - mediatek,mt6397-codec
@@ -124,6 +128,113 @@ properties:
               - enum:
                   - mediatek,mt6366-sound
               - const: mediatek,mt6358-sound
+
+    required:
+      - compatible
+
+  accdet:
+    type: object
+    additionalProperties: false
+    description:
+      MT6351 accessory (headset) detection block. It reports headphone and
+      headset plug state and headset buttons. The interrupts are provided by
+      the PMIC MFD and need not be described here.
+
+    properties:
+      compatible:
+        const: mediatek,mt6351-accdet
+
+      io-channels:
+        maxItems: 1
+        description:
+          AUXADC channel used to read the accessory voltage for buttons.
+
+      io-channel-names:
+        const: accdet
+
+      nvmem-cells:
+        maxItems: 1
+        description:
+          eFuse cell holding the factory AUXADC offset applied before button
+          decoding.
+
+      nvmem-cell-names:
+        const: accdet-offset
+
+      mediatek,mic-vol:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: MICBIAS1 reference voltage selection.
+        minimum: 0
+        maximum: 7
+        default: 7
+
+      mediatek,mic-mode:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: |
+          Microphone bias mode:
+            1 - ACC mode
+            2 - low cost mode without internal bias
+            6 - low cost mode with internal bias
+        enum: [1, 2, 6]
+        default: 1
+
+      mediatek,eint-level-pol:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: |
+          Internal EINT level that means a jack is plugged in:
+            0 - active low (default)
+            1 - active high
+        enum: [0, 1]
+        default: 0
+
+      mediatek,key-mode:
+        $ref: /schemas/types.yaml#/definitions/uint32
+        description: |
+          Headset button layout: 0 for three keys, 1 for four keys.
+        enum: [0, 1]
+        default: 0
+
+      mediatek,pwm-deb-setting:
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        description: |
+          PWM and debounce timing, as
+          <pwm-width pwm-thresh fall-delay rise-delay
+           debounce0 debounce1 debounce3>.
+        minItems: 7
+        maxItems: 7
+
+      mediatek,three-key-thr:
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        description: |
+          Three-key voltage thresholds in millivolts, as
+          <0 media-max up-max down-max>.
+        minItems: 4
+        maxItems: 4
+
+      mediatek,four-key-thr:
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+        description: |
+          Four-key voltage thresholds in millivolts, as
+          <0 media-max voice-max up-max down-max>.
+        minItems: 5
+        maxItems: 5
+
+    required:
+      - compatible
+      - io-channels
+      - io-channel-names
+
+  efuse:
+    type: object
+    $ref: /schemas/nvmem/nvmem.yaml#
+    unevaluatedProperties: false
+    description:
+      MT6351 PMIC eFuse (OTP), holding factory calibration such as the ACCDET
+      AUXADC offset. Read-only.
+
+    properties:
+      compatible:
+        const: mediatek,mt6351-efuse
 
     required:
       - compatible
@@ -165,6 +276,7 @@ properties:
           - mediatek,mt6323-led
           - mediatek,mt6331-led
           - mediatek,mt6332-led
+          - mediatek,mt6351-led
 
       reg:
         maxItems: 1
@@ -230,6 +342,19 @@ required:
   - regulators
 
 additionalProperties: false
+
+allOf:
+  # The accessory detection block and the eFuse are only described for MT6351.
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              const: mediatek,mt6351
+    then:
+      properties:
+        accdet: false
+        efuse: false
 
 examples:
   - |
