@@ -112,6 +112,12 @@ allOf:
         - "#interrupt-cells"
 
 patternProperties:
+  '-hog(-[0-9]+)?$':
+    type: object
+    required:
+      - gpio-hog
+    $ref: /schemas/gpio/gpio-hog.yaml
+
   '(-[0-9]+|-pins)$':
     type: object
     additionalProperties: false
