@@ -792,6 +792,8 @@
 
 		pins-irq {
 			pinmux = <MT6797_GPIO87__FUNC_EINT10>;
+			/* AW9523 INT is open-drain active-low */
+			bias-pull-up;
 		};
 	};
 };
@@ -917,6 +919,7 @@
 		 * interrupts from the AW9523 nested irqchip, so the scan is
 		 * driven by key presses instead of being polled.
 		 */
+		wakeup-source;
 	};
 };
 
