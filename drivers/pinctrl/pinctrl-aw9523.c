@@ -74,6 +74,7 @@ struct aw9523_irq {
  * @pctl: pinctrl handle for current device
  * @gpio: structure holding gpiochip params
  * @irq: Interrupt controller structure
+ * @parent_irq: SoC interrupt the expander INT pin is wired to
  */
 struct aw9523 {
 	struct device *dev;
@@ -84,6 +85,7 @@ struct aw9523 {
 	struct pinctrl_dev *pctl;
 	struct gpio_chip gpio;
 	struct aw9523_irq *irq;
+	int parent_irq;
 };
 
 static const struct pinctrl_pin_desc aw9523_pins[] = {
@@ -515,6 +517,23 @@ static void aw9523_irq_bus_sync_unlock(struct irq_data *d)
 	mutex_unlock(&awi->irq->lock);
 }
 
+/*
+ * aw9523_irq_set_wake - Forward wakeup enablement to the parent interrupt
+ * @d: irq data
+ * @on: enable (non-zero) or disable wakeup
+ *
+ * The expander multiplexes all pin interrupts onto a single parent (SoC) line,
+ * so wakeup has to be armed on that parent. The IRQ core refcounts the parent
+ * wake state, hence several wake-enabled expander pins arm and disarm the
+ * parent exactly once.
+ */
+static int aw9523_irq_set_wake(struct irq_data *d, unsigned int on)
+{
+	struct aw9523 *awi = gpiochip_get_data(irq_data_get_irq_chip_data(d));
+
+	return irq_set_irq_wake(awi->parent_irq, on);
+}
+
 static int aw9523_gpio_get_direction(struct gpio_chip *chip,
 				     unsigned int offset)
 {
@@ -795,6 +814,7 @@ static const struct irq_chip aw9523_irq_chip = {
 	.irq_bus_lock = aw9523_irq_bus_lock,
 	.irq_bus_sync_unlock = aw9523_irq_bus_sync_unlock,
 	.irq_set_type = aw9523_gpio_irq_type,
+	.irq_set_wake = aw9523_irq_set_wake,
 	.flags = IRQCHIP_IMMUTABLE,
         GPIOCHIP_IRQ_RESOURCE_HELPERS,
 };
@@ -818,6 +838,8 @@ static int aw9523_init_irq(struct aw9523 *awi, int irq)
 					IRQF_ONESHOT, dev_name(dev), awi);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to request irq %d\n", irq);
+
+	awi->parent_irq = irq;
 
 	girq = &awi->gpio.irq;
 	gpio_irq_chip_set_chip(girq, &aw9523_irq_chip);
