@@ -26,6 +26,16 @@
  * must tolerate finding it off.
  */
 #define MTK_SCPD_OFF_AT_BOOT		BIT(13)
+/*
+ * This domain is powered on at boot but has no consumer that needs it to
+ * stay on until the provider's ->sync_state() fires, so let genpd gate it as
+ * soon as its own consumers are idle. Without this, a single consumer of the
+ * provider that never binds a driver keeps ->sync_state() pending forever and
+ * pins every boot-on domain of the provider on. Do NOT set it on a domain that
+ * scans out the bootloader splash (e.g. MM) - that one must stay on until its
+ * display driver takes over.
+ */
+#define MTK_SCPD_NO_STAY_ON		BIT(14)
 #define MTK_SCPD_CAPS(_scpd, _x)	((_scpd)->data ?		\
 					 (_scpd)->data->caps & (_x) :	\
 					 (_scpd)->hwv_data->caps & (_x))
