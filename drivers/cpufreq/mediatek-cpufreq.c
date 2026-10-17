@@ -313,6 +313,25 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 	}
 
 	/*
+	 * clk_set_rate() cannot report a PLL that silently failed to change:
+	 * the clk core discards .set_rate()'s return value. Read the rate back
+	 * before scaling the voltage down -- a firmware-backed ARMPLL reports
+	 * its last good rate, so a mismatch means the PLL is still fast and
+	 * lowering Vproc now would undervolt the cluster. Restore the original
+	 * rate and voltage and bail out.
+	 */
+	if (clk_get_rate(cpu_clk) / 1000 != freq_table[index].frequency) {
+		dev_err(cpu_dev, "cpu%d: cpu clock rate was not applied!\n",
+			policy->cpu);
+		clk_set_parent(cpu_clk, info->inter_clk);
+		clk_set_rate(armpll, pre_freq_hz);
+		clk_set_parent(cpu_clk, armpll);
+		mtk_cpufreq_set_voltage(info, pre_vproc);
+		ret = -EIO;
+		goto out;
+	}
+
+	/*
 	 * If the new voltage is lower than the intermediate voltage or the
 	 * original voltage, scale down to the new voltage.
 	 */
