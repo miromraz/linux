@@ -1286,20 +1286,6 @@
 		#clock-cells = <1>;
 	};
 
-	/*
-	 * Cortex-A72 cluster power-on sequencer. reg is the MCUCFG2 / iDVFS
-	 * window (MP2 DCM and the iDVFS PLL control word). Disabled here and
-	 * enabled, with vproc-supply, by boards that bring the cluster up.
-	 */
-	a72_power: power-sequencer@10222000 {
-		compatible = "mediatek,mt6797-a72-power";
-		reg = <0 0x10222000 0 0x1000>;
-		mediatek,spm = <&spm>;
-		resets = <&watchdog MT6797_TOPRGU_PWRAP_SPI_CTL_RST>;
-		reset-names = "pwrap";
-		status = "disabled";
-	};
-
 	afe: audio-controller@11220000 {
 		compatible = "mediatek,mt6797-audio";
 		reg = <0 0x11220000 0 0x1000>;
