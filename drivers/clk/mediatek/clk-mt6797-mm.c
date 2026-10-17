@@ -26,14 +26,32 @@ static const struct mtk_gate_regs mm1_cg_regs = {
 #define GATE_MM0(_id, _name, _parent, _shift)	\
 	GATE_MTK(_id, _name, _parent, &mm0_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
 
+#define GATE_MM0_FLAGS(_id, _name, _parent, _shift, _flags)		\
+	GATE_MTK_FLAGS(_id, _name, _parent, &mm0_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_setclr, _flags)
+
 #define GATE_MM1(_id, _name, _parent, _shift)	\
 	GATE_MTK(_id, _name, _parent, &mm1_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
 
+/*
+ * The SMI common and local arbiters form the multimedia memory bus: every
+ * MM/display access to DRAM is arbitrated through them. Their consumers
+ * (mtk-smi, mediatek-drm) enable the clocks only from their runtime-resume
+ * callbacks, which run long after clk_disable_unused() (late_initcall_sync).
+ * The bootloader hands over a live, scanning-out DSI panel, so gating the SMI
+ * path from under that in-flight framebuffer DMA wedges the MM memory fabric
+ * and hangs the system. Mark the SMI common + larb gates critical so the bus
+ * stays clocked while the MM power domain is on; this does not affect the
+ * video/GPU island gating.
+ */
 static const struct mtk_gate mm_clks[] = {
 	GATE_DUMMY(CLK_DUMMY, "mm_dummy"),
-	GATE_MM0(CLK_MM_SMI_COMMON, "mm_smi_common", "mm_sel", 0),
-	GATE_MM0(CLK_MM_SMI_LARB0, "mm_smi_larb0", "mm_sel", 1),
-	GATE_MM0(CLK_MM_SMI_LARB5, "mm_smi_larb5", "mm_sel", 2),
+	GATE_MM0_FLAGS(CLK_MM_SMI_COMMON, "mm_smi_common", "mm_sel", 0,
+		       CLK_IS_CRITICAL),
+	GATE_MM0_FLAGS(CLK_MM_SMI_LARB0, "mm_smi_larb0", "mm_sel", 1,
+		       CLK_IS_CRITICAL),
+	GATE_MM0_FLAGS(CLK_MM_SMI_LARB5, "mm_smi_larb5", "mm_sel", 2,
+		       CLK_IS_CRITICAL),
 	GATE_MM0(CLK_MM_CAM_MDP, "mm_cam_mdp", "mm_sel", 3),
 	GATE_MM0(CLK_MM_MDP_RDMA0, "mm_mdp_rdma0", "mm_sel", 4),
 	GATE_MM0(CLK_MM_MDP_RDMA1, "mm_mdp_rdma1", "mm_sel", 5),
