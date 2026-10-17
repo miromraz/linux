@@ -20899,6 +20899,12 @@ S:	Maintained
 F:	include/linux/delayacct.h
 F:	kernel/delayacct.c
 
+RICHTEK RT5735 REGULATOR DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+S:	Maintained
+F:	Documentation/devicetree/bindings/regulator/richtek,rt5735.yaml
+F:	drivers/regulator/rt5735-regulator.c
+
 TASK DELAY MONITORING TOOLS
 M:	Andrew Morton <akpm@linux-foundation.org>
 M:	Wang Yaxin <wang.yaxin@zte.com.cn>
