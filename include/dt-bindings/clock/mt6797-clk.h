@@ -301,5 +301,7 @@
 #define CLK_MCU_ARMPLLDIV_LL			4
 #define CLK_MCU_ARMPLLDIV_L			5
 #define CLK_MCU_ARMPLLDIV_CCI			6
+#define CLK_MCU_ARMPLL_B			7
+#define CLK_MCU_ARMPLLDIV_B			8
 
 #endif /* _DT_BINDINGS_CLK_MT6797_H */
