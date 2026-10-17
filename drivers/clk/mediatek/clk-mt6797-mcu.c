@@ -3,22 +3,35 @@
  * MediaTek MT6797 MCUMIXED clock driver
  *
  * The MCUMIXED block provides the per-cluster CPU PLLs and the muxes that
- * select each cluster's clock source. Only the Cortex-A53 little (LL) and
- * big (L) clusters and the CCI are handled here; the Cortex-A72 cluster PLL
- * is controlled through secure firmware and is out of scope.
+ * select each cluster's clock source. The Cortex-A53 little (LL) and big (L)
+ * clusters and the CCI use the register-mapped ARMPLLs and ARMPLLDIV muxes
+ * directly.
+ *
+ * The Cortex-A72 ("big") cluster ARMPLL is also exposed here even though it
+ * is not in the MCUMIXED register map: it lives inside the iDVFS block and is
+ * reachable only through secure-firmware SMC calls (the MT6797 ships the
+ * vendor's closed ATF, which this port cannot replace, so the PLL is driven
+ * exactly as the vendor 3.18 BSP does through the iDVFS SIP calls). Its CPU
+ * clock mux, by contrast, is the B-cluster field of the same shared ARMPLLDIV
+ * register (0x270) this block owns, so it is a normal MCUMIXED cpumux. Keeping
+ * both in one driver lets the shared register's regmap serialise the A72 mux
+ * switch with the A53 muxes, and lets the generic mediatek-cpufreq driver run
+ * A72 DVFS with the flow it already uses for the A53 clusters.
  *
  * Register access does not take the vendor MCUMIXED hardware semaphore at
  * 0x11015440 (shared with ATF and SPM). That is safe while there is no SPM
- * idle/suspend path and the A72 cluster stays off; it must be revisited
- * before either is enabled.
+ * idle/suspend path; it must be revisited before one is enabled.
  */
 
 #include <dt-bindings/clock/mt6797-clk.h>
+#include <linux/arm-smccc.h>
 #include <linux/bitops.h>
+#include <linux/clk-provider.h>
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include "clk-cpumux.h"
 #include "clk-mtk.h"
@@ -115,23 +128,190 @@ static const struct mtk_pll_data mcu_plls[] = {
 };
 
 /*
+ * Cortex-A72 ("big") cluster ARMPLL, driven through the iDVFS SIP calls
+ * (vendor mt_idvfs.h: BigiDVFSPllSetFreq -> SMC 0xC20003B8, BigiDVFSPllGetFreq
+ * -> SMC 0xC20003BA, both taking/returning the frequency in MHz). The PLL is
+ * powered and relocked by firmware, so it has no Linux gate and no parent;
+ * cpufreq parks the cluster on clk26m (through the ARMPLLDIV mux below) while
+ * the SMC relocks it, exactly as the A53 clusters do on this register.
+ */
+#define MTK_SIP_IDVFS_PLLSETFREQ	0xC20003B8UL
+#define MTK_SIP_IDVFS_PLLGETFREQ	0xC20003BAUL
+
+/* Vendor BigiDVFSPllSetFreq accepts 250..3000 MHz; the OPP tables stay well
+ * inside this range.
+ */
+#define MT6797_ARMPLL_B_FMIN_MHZ	250U
+#define MT6797_ARMPLL_B_FMAX_MHZ	3000U
+
+/*
+ * Rate reported before the first cpufreq setpoint, and whenever the iDVFS
+ * GetFreq SIP cannot be read: the shared mid OPP (1495 MHz) the firmware/
+ * bootloader brings the cluster up at. clk_get_rate() must never return 0 for
+ * a clock backing a live cpufreq policy -- a 0 makes cpufreq_online()'s ->get()
+ * check fail with -EIO and the whole A72 policy is dropped.
+ */
+#define MT6797_ARMPLL_B_DEFAULT_HZ	(1495UL * MHZ)
+
+/*
+ * The A72 ARMPLL has no Linux-visible register (it lives in the iDVFS block,
+ * reachable only through the secure SIP calls), so its rate cannot be computed
+ * from hardware like the register-mapped A53/CCI PLLs. Cache the last rate
+ * programmed through .set_rate so .recalc_rate always has a usable value to
+ * report when the live SIP read is unavailable.
+ */
+struct mt6797_armpll_b {
+	struct clk_hw	hw;
+	unsigned long	rate;
+};
+
+static inline struct mt6797_armpll_b *to_armpll_b(struct clk_hw *hw)
+{
+	return container_of(hw, struct mt6797_armpll_b, hw);
+}
+
+static unsigned long mt6797_armpll_b_recalc_rate(struct clk_hw *hw,
+						 unsigned long parent_rate)
+{
+	struct mt6797_armpll_b *armpll = to_armpll_b(hw);
+	struct arm_smccc_res res;
+	s32 mhz;
+
+	/*
+	 * Prefer the live rate from firmware, but trust it only when it is in
+	 * the PLL's range. BigiDVFSPllGetFreq reads the iDVFS block, which is
+	 * reliable only once firmware has enabled iDVFS; on this port the
+	 * cluster is powered from the bootloader with iDVFS left disabled, so
+	 * the SIP can return 0 (or an out-of-range value). Never propagate that
+	 * to clk_get_rate(): fall back to the last rate programmed through
+	 * .set_rate (seeded at the power-on rate), so a clock backing a live
+	 * cpufreq policy always reports a usable rate.
+	 */
+	arm_smccc_smc(MTK_SIP_IDVFS_PLLGETFREQ, 0, 0, 0, 0, 0, 0, 0, &res);
+	mhz = (s32)res.a0;
+	if (mhz >= (s32)MT6797_ARMPLL_B_FMIN_MHZ &&
+	    mhz <= (s32)MT6797_ARMPLL_B_FMAX_MHZ)
+		return (unsigned long)mhz * 1000000UL;
+
+	return armpll->rate;
+}
+
+static int mt6797_armpll_b_determine_rate(struct clk_hw *hw,
+					  struct clk_rate_request *req)
+{
+	unsigned long rate = clamp(req->rate, req->min_rate, req->max_rate);
+	unsigned int mhz = DIV_ROUND_CLOSEST_ULL(rate, 1000000);
+
+	/*
+	 * The SIP programs an integer number of MHz. Round the request to the
+	 * nearest MHz within the caller's [min_rate, max_rate] window and the
+	 * PLL's own frequency range.
+	 */
+	mhz = clamp(mhz, MT6797_ARMPLL_B_FMIN_MHZ, MT6797_ARMPLL_B_FMAX_MHZ);
+	req->rate = (unsigned long)mhz * 1000000UL;
+
+	return 0;
+}
+
+static int mt6797_armpll_b_set_rate(struct clk_hw *hw, unsigned long rate,
+				    unsigned long parent_rate)
+{
+	struct mt6797_armpll_b *armpll = to_armpll_b(hw);
+	unsigned int mhz = DIV_ROUND_CLOSEST_ULL(rate, 1000000);
+	struct arm_smccc_res res;
+
+	mhz = clamp(mhz, MT6797_ARMPLL_B_FMIN_MHZ, MT6797_ARMPLL_B_FMAX_MHZ);
+
+	arm_smccc_smc(MTK_SIP_IDVFS_PLLSETFREQ, mhz, 0, 0, 0, 0, 0, 0, &res);
+	/*
+	 * The iDVFS SIP returns an SMCCC-style 32-bit status (the vendor casts
+	 * the result to int). Any negative value -- NOT_SUPPORTED, INVALID_
+	 * PARAMETER or a firmware error -- means the rate was not programmed.
+	 */
+	if ((s32)res.a0 < 0)
+		return -EIO;
+
+	armpll->rate = (unsigned long)mhz * 1000000UL;
+
+	return 0;
+}
+
+static const struct clk_ops mt6797_armpll_b_ops = {
+	.recalc_rate	= mt6797_armpll_b_recalc_rate,
+	.determine_rate	= mt6797_armpll_b_determine_rate,
+	.set_rate	= mt6797_armpll_b_set_rate,
+};
+
+static int mt6797_register_armpll_b(struct device *dev,
+				    struct clk_hw_onecell_data *clk_data)
+{
+	static const struct clk_init_data init = {
+		.name		= "armpll_b",
+		.ops		= &mt6797_armpll_b_ops,
+		.num_parents	= 0,
+	};
+	struct mt6797_armpll_b *armpll;
+	int ret;
+
+	armpll = devm_kzalloc(dev, sizeof(*armpll), GFP_KERNEL);
+	if (!armpll)
+		return -ENOMEM;
+
+	/*
+	 * No SMC is issued at probe: the cluster may still be off here (it is
+	 * powered by the board/bootloader, not by this driver), so there is no
+	 * live rate to read yet. Seed the fallback with the power-on rate;
+	 * .recalc_rate reads the live rate once a consumer needs it and reuses
+	 * this value whenever the SIP read is unavailable.
+	 */
+	armpll->rate = MT6797_ARMPLL_B_DEFAULT_HZ;
+	armpll->hw.init = &init;
+
+	ret = devm_clk_hw_register(dev, &armpll->hw);
+	if (ret)
+		return ret;
+
+	clk_data->hws[CLK_MCU_ARMPLL_B] = &armpll->hw;
+
+	return 0;
+}
+
+/*
  * Each ARMPLLDIV mux can select clk26m, its own ARMPLL, mainpll or univpll,
  * but the mainpll/univpll inputs are only valid with a TOPCKGEN alternate
- * clock this driver does not model, so only clk26m and the cluster's ARMPLL
- * are exposed. cpufreq parks the cluster on clk26m while the ARMPLL relocks.
+ * clock this driver does not model, so for the Cortex-A53 and CCI muxes only
+ * clk26m and the cluster's ARMPLL are exposed (the A72 mux lists all four,
+ * see its comment). cpufreq parks the cluster on clk26m while the ARMPLL
+ * relocks.
  */
 static const char * const armpll_ll_parents[] = { "clk26m", "armpll_ll" };
 static const char * const armpll_l_parents[] = { "clk26m", "armpll_l" };
 static const char * const ccipll_parents[] = { "clk26m", "ccipll" };
 
-/* ARMPLLDIV_MUXSEL (0x270): LL = [3:2], L = [5:4], CCI = [7:6] */
+/*
+ * The A72 mux is read back by the generic cpumux .get_parent, which returns
+ * the raw 2-bit ARMPLLDIV field. The bootloader can leave that field at any
+ * of the four hardware selector values, so all four are listed -- clk26m,
+ * the A72 ARMPLL, mainpll and univpll, encoded 0..3 as the vendor ARMPLLDIV
+ * semantics define (vendor mt_cpufreq.c TOP_CKMUXSEL_{CLKSQ,ARMPLL,MAINPLL,
+ * UNIVPLL}) -- so .get_parent never indexes out of range. The cpufreq flow
+ * only ever selects clk26m and armpll_b; mainpll/univpll additionally need a
+ * TOPCKGEN alternate this driver does not program, as for the A53 muxes, and
+ * so are never selected here.
+ */
+static const char * const armpll_b_parents[] = {
+	"clk26m", "armpll_b", "mainpll", "univpll"
+};
+
+/* ARMPLLDIV_MUXSEL (0x270): B = [1:0], LL = [3:2], L = [5:4], CCI = [7:6] */
 static const struct mtk_composite cpu_muxes[] = {
 	MUX(CLK_MCU_ARMPLLDIV_LL, "armpll_ll_sel", armpll_ll_parents, 0x270, 2, 2),
 	MUX(CLK_MCU_ARMPLLDIV_L, "armpll_l_sel", armpll_l_parents, 0x270, 4, 2),
 	MUX(CLK_MCU_ARMPLLDIV_CCI, "ccipll_sel", ccipll_parents, 0x270, 6, 2),
+	MUX(CLK_MCU_ARMPLLDIV_B, "armpll_b_sel", armpll_b_parents, 0x270, 0, 2),
 };
 
-#define MT6797_MCU_NR_CLK	(CLK_MCU_ARMPLLDIV_CCI + 1)
+#define MT6797_MCU_NR_CLK	(CLK_MCU_ARMPLLDIV_B + 1)
 
 static int clk_mt6797_mcu_probe(struct platform_device *pdev)
 {
@@ -147,6 +327,11 @@ static int clk_mt6797_mcu_probe(struct platform_device *pdev)
 				    clk_data);
 	if (ret)
 		goto free_clk_data;
+
+	/* Register "armpll_b" before the cpumuxes: the B mux is its consumer. */
+	ret = mt6797_register_armpll_b(&pdev->dev, clk_data);
+	if (ret)
+		goto unregister_plls;
 
 	ret = mtk_clk_register_cpumuxes(&pdev->dev, node, cpu_muxes,
 					ARRAY_SIZE(cpu_muxes), clk_data);
