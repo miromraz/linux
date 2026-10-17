@@ -1301,6 +1301,7 @@
 			linux,code = <SW_LID>;
 			gpios = <&pio 66 GPIO_ACTIVE_LOW>;
 			debounce-interval = <64>;
+			wakeup-source;
 		};
 	};
 };
