@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/regulator/consumer.h>
+#include <linux/units.h>
 
 struct mtk_cpufreq_platform_data {
 	int min_volt_shift;
@@ -309,6 +310,30 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		dev_err(cpu_dev,
 			"cpu%d: failed to re-parent cpu clock!\n", policy->cpu);
 		mtk_cpufreq_set_voltage(info, inter_vproc);
+		goto out;
+	}
+
+	/*
+	 * clk_set_rate() cannot report a PLL that silently failed to change:
+	 * the clk core discards .set_rate()'s return value. Read the rate back
+	 * before scaling the voltage down -- a firmware-backed ARMPLL reports
+	 * its last good rate, so a large mismatch means the PLL is still fast
+	 * and lowering Vproc now would undervolt the cluster. Restore the
+	 * original rate and voltage and bail out.
+	 *
+	 * Allow a sub-MHz difference: a register ARMPLL's pcw granularity makes
+	 * clk_get_rate() land a few hundred Hz to ~1.5 kHz off the OPP, same
+	 * tolerance cpufreq_verify_current_freq() uses. A genuinely unapplied
+	 * rate is a whole OPP step (tens to hundreds of MHz) away.
+	 */
+	if (abs((long)clk_get_rate(cpu_clk) - freq_hz) >= HZ_PER_MHZ) {
+		dev_err(cpu_dev, "cpu%d: cpu clock rate was not applied!\n",
+			policy->cpu);
+		clk_set_parent(cpu_clk, info->inter_clk);
+		clk_set_rate(armpll, pre_freq_hz);
+		clk_set_parent(cpu_clk, armpll);
+		mtk_cpufreq_set_voltage(info, pre_vproc);
+		ret = -EIO;
 		goto out;
 	}
 
