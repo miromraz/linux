@@ -131,6 +131,16 @@ properties:
 
       where voltage is in V, frequency is in MHz.
 
+  nvmem-cell-names:
+    items:
+      - const: speed-bin
+
+  nvmem-cells:
+    maxItems: 1
+    description:
+      Speed binning information for the GPU, used to select the supported
+      operating points via opp-supported-hw.
+
 required:
   - compatible
   - reg
