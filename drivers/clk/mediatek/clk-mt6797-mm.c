@@ -23,11 +23,24 @@ static const struct mtk_gate_regs mm1_cg_regs = {
 	.sta_ofs = 0x0110,
 };
 
-#define GATE_MM0(_id, _name, _parent, _shift)	\
-	GATE_MTK(_id, _name, _parent, &mm0_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
+/*
+ * The MM (display) subsystem clocks are handed over live from the bootloader,
+ * which leaves a DSI panel scanning out the boot framebuffer. Their only
+ * software consumer is mediatek-drm, which binds long after
+ * clk_disable_unused() (late_initcall_sync). Letting clk_disable_unused() gate
+ * these clocks from under the in-flight display wedges the MM memory fabric and
+ * hangs the SoC. Flag every MM gate CLK_IGNORE_UNUSED so clk_disable_unused()
+ * leaves them alone until the display driver owns them; they are still gated
+ * normally by runtime PM afterwards, so idle power is unaffected. Same approach
+ * mt8196 takes for its vdec/venc gates.
+ */
+#define GATE_MM0(_id, _name, _parent, _shift)				\
+	GATE_MTK_FLAGS(_id, _name, _parent, &mm0_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_setclr, CLK_IGNORE_UNUSED)
 
-#define GATE_MM1(_id, _name, _parent, _shift)	\
-	GATE_MTK(_id, _name, _parent, &mm1_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
+#define GATE_MM1(_id, _name, _parent, _shift)				\
+	GATE_MTK_FLAGS(_id, _name, _parent, &mm1_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_setclr, CLK_IGNORE_UNUSED)
 
 static const struct mtk_gate mm_clks[] = {
 	GATE_DUMMY(CLK_DUMMY, "mm_dummy"),
