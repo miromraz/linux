@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/regulator/consumer.h>
+#include <linux/units.h>
 
 struct mtk_cpufreq_platform_data {
 	int min_volt_shift;
@@ -309,6 +310,30 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		dev_err(cpu_dev,
 			"cpu%d: failed to re-parent cpu clock!\n", policy->cpu);
 		mtk_cpufreq_set_voltage(info, inter_vproc);
+		goto out;
+	}
+
+	/*
+	 * clk_set_rate() cannot report a PLL that silently failed to change:
+	 * the clk core discards .set_rate()'s return value. Read the rate back
+	 * before scaling the voltage down -- a firmware-backed ARMPLL reports
+	 * its last good rate, so a large mismatch means the PLL is still fast
+	 * and lowering Vproc now would undervolt the cluster. Restore the
+	 * original rate and voltage and bail out.
+	 *
+	 * Allow a sub-MHz difference: a register ARMPLL's pcw granularity makes
+	 * clk_get_rate() land a few hundred Hz to ~1.5 kHz off the OPP, same
+	 * tolerance cpufreq_verify_current_freq() uses. A genuinely unapplied
+	 * rate is a whole OPP step (tens to hundreds of MHz) away.
+	 */
+	if (abs((long)clk_get_rate(cpu_clk) - freq_hz) >= HZ_PER_MHZ) {
+		dev_err(cpu_dev, "cpu%d: cpu clock rate was not applied!\n",
+			policy->cpu);
+		clk_set_parent(cpu_clk, info->inter_clk);
+		clk_set_rate(armpll, pre_freq_hz);
+		clk_set_parent(cpu_clk, armpll);
+		mtk_cpufreq_set_voltage(info, pre_vproc);
+		ret = -EIO;
 		goto out;
 	}
 
@@ -655,7 +680,9 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 {
 	struct mtk_cpu_dvfs_info *info;
 	struct cpufreq_frequency_table *freq_table;
-	int ret;
+	struct clk *parent;
+	unsigned int cur_khz;
+	int ret, idx;
 
 	info = mtk_cpu_dvfs_info_lookup(policy->cpu);
 	if (!info) {
@@ -677,7 +704,51 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 	policy->driver_data = info;
 	policy->clk = info->cpu_clk;
 
+	/*
+	 * .set_target takes clk_get_parent(cpu_clk) as the cluster ARMPLL and
+	 * calls clk_set_rate() on it. The CPU clock mux may only sit on the
+	 * ARMPLL or the intermediate clock it parks on; both are described mux
+	 * parents, so a bootloader that left the mux on any other source reads
+	 * back as no parent. Refuse that rather than retune an unknown clock.
+	 */
+	parent = clk_get_parent(policy->clk);
+	if (!parent) {
+		dev_err(info->cpu_dev,
+			"cpu%d: CPU clock has no valid parent\n", policy->cpu);
+		ret = -ENODEV;
+		goto free_table;
+	}
+
+	/*
+	 * cpufreq_online() uses CPUFREQ_NEED_INITIAL_FREQ_CHECK to force the CPU
+	 * onto a listed OPP when it boots at an unlisted rate, but it BUG_ON()s
+	 * if that forced transition fails. A firmware-backed ARMPLL (the MT6797
+	 * A72) can fail its very first setpoint, so do the sync here, where a
+	 * failure drops the policy cleanly. Act only when the boot rate is more
+	 * than the sub-MHz rounding away from every OPP, so SoCs that boot at (or
+	 * within rounding of) a table frequency are unaffected.
+	 */
+	cur_khz = clk_get_rate(policy->clk) / 1000;
+	for (idx = 0; freq_table[idx].frequency != CPUFREQ_TABLE_END; idx++)
+		if (freq_table[idx].frequency != CPUFREQ_ENTRY_INVALID &&
+		    abs((int)freq_table[idx].frequency - (int)cur_khz) <
+		    KHZ_PER_MHZ)
+			break;
+	if (freq_table[idx].frequency == CPUFREQ_TABLE_END) {
+		ret = mtk_cpufreq_set_target(policy, 0);
+		if (ret) {
+			dev_err(info->cpu_dev,
+				"cpu%d: failed to apply an initial OPP: %d\n",
+				policy->cpu, ret);
+			goto free_table;
+		}
+	}
+
 	return 0;
+
+free_table:
+	dev_pm_opp_free_cpufreq_table(info->cpu_dev, &policy->freq_table);
+	return ret;
 }
 
 static void mtk_cpufreq_exit(struct cpufreq_policy *policy)
