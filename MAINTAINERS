@@ -19965,6 +19965,13 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/regulator/onnn,fan49101.yaml
 F:	drivers/regulator/fan49101.c
 
+ON SEMICONDUCTOR FUSB301 TYPE-C CONTROLLER DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-usb@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/usb/onnn,fusb301.yaml
+F:	drivers/usb/typec/fusb301.c
+
 ONENAND FLASH DRIVER
 M:	Kyungmin Park <kyungmin.park@samsung.com>
 L:	linux-mtd@lists.infradead.org
