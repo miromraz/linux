@@ -30,6 +30,13 @@
 	psci {
 		compatible = "arm,psci-0.2";
 		method = "smc";
+		/*
+		 * The Cortex-A72 "B" cluster is powered up out-of-band by the
+		 * bootloader; the closed ATF advertises PSCI CPU_OFF but cannot
+		 * power it down, so offlining an A72 wedges the SoC. Keep both
+		 * A72 cores non-removable.
+		 */
+		mediatek,broken-cpu-off-cpus = <&cpu8>, <&cpu9>;
 	};
 
 	cpus {
