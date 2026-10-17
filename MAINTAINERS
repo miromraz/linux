@@ -19959,6 +19959,12 @@ S:	Maintained
 F:	Documentation/ABI/testing/sysfs-bus-platform-onboard-usb-dev
 F:	drivers/usb/misc/onboard_usb_dev.c
 
+ON SEMICONDUCTOR FAN49101 REGULATOR DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+S:	Maintained
+F:	Documentation/devicetree/bindings/regulator/onnn,fan49101.yaml
+F:	drivers/regulator/fan49101.c
+
 ONENAND FLASH DRIVER
 M:	Kyungmin Park <kyungmin.park@samsung.com>
 L:	linux-mtd@lists.infradead.org
