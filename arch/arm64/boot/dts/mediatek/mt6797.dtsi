@@ -1172,6 +1172,8 @@
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE3>;
 		power-domain-names = "core0", "core1", "core2", "core3";
 		mediatek,infracfg = <&infrasys>;
+		nvmem-cells = <&gpu_speed_bin>;
+		nvmem-cell-names = "speed-bin";
 		#cooling-cells = <2>;
 		/*
 		 * Active dynamic-power coefficient (uW/MHz/V^2) for the IPA
@@ -1369,6 +1371,20 @@
 		cpu_speed_bin: speed-bin@71c {
 			reg = <0x71c 0x1>;
 			bits = <0 4>;
+		};
+
+		/*
+		 * FUNC_CODE_1 again, but read as the GPU speed bin: the vendor
+		 * mt_gpufreq OPP table is selected by this same field (crossed
+		 * with the PTP version), and the only variant that enables the
+		 * 900 MHz "Speed-Bin" table is FUNC_CODE_1 == 4. Exposed as a
+		 * separate <= 3-bit "gpu-speedbin" cell so the MT6797 efuse
+		 * post-processing turns the index into a BIT() mask for
+		 * panfrost's opp-supported-hw selection (see docs/gpu-bin.md).
+		 */
+		gpu_speed_bin: gpu-speedbin@71c {
+			reg = <0x71c 0x1>;
+			bits = <0 3>;
 		};
 	};
 
