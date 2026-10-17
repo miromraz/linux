@@ -17,23 +17,37 @@
  *                       SIP. The PLL is powered and relocked glitchlessly by
  *                       firmware, so it has no Linux gate (always reported
  *                       enabled) and no parent.
- *   index 1 "armpll_b_mux" (the cpu clock): a mux of {clk26m, armpll_b}.
- *                       mediatek-cpufreq parks the CPU clock on the
- *                       intermediate (clk26m) while it reprograms the PLL.
- *                       The real A72 clock mux is firmware-internal and the
- *                       SMC relock is glitchless, so this mux only needs to
- *                       track the selected parent in software.
+ *   index 1 "armpll_b_mux" (the cpu clock): the MCUMIXED ARMPLLDIV mux for the
+ *                       B cluster (reg 0x270 bits 1:0 in the mcumixed syscon),
+ *                       selecting {clk26m, armpll_b}. mediatek-cpufreq parks the
+ *                       CPU clock on clk26m while it relocks the PLL. This has
+ *                       to be a real hardware switch -- exactly as the A53
+ *                       clusters do through the same register in
+ *                       clk-mt6797-mcu.c -- so the cores run off clk26m, not the
+ *                       PLL, while the SMC relocks it: relocking the A72 PLL
+ *                       under the running cores silently resets the SoC.
  */
 
 #include <linux/arm-smccc.h>
 #include <linux/clk-provider.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/slab.h>
 
 /* iDVFS SIP calls, SMC64 IDs (vendor mt_idvfs.h). Freq argument is in MHz. */
 #define MTK_SIP_IDVFS_PLLSETFREQ	0xC20003B8UL
 #define MTK_SIP_IDVFS_PLLGETFREQ	0xC20003BAUL
+
+/*
+ * MCUMIXED ARMPLLDIV mux (same register the A53 clusters use in
+ * clk-mt6797-mcu.c): reg 0x270, the B cluster field is bits 1:0. Values match
+ * the parent order {clk26m = 0 (CLKSQ), armpll_b = 1 (ARMPLL)}.
+ */
+#define MT6797_ARMPLLDIV_MUXSEL		0x270
+#define MT6797_ARMPLLDIV_B_SHIFT	0
+#define MT6797_ARMPLLDIV_B_MASK		0x3
 
 /* Vendor BigiDVFSPllSetFreq accepts 250..3000 MHz; the OPP tables stay well
  * inside this. Keep a sane boot default for recalc before the first set.
@@ -41,11 +55,13 @@
 #define MT6797_ARMPLL_B_FMIN_MHZ	250U
 #define MT6797_ARMPLL_B_FMAX_MHZ	3000U
 /*
- * The rate the firmware power-on leaves the PLL at (vendor logs report the
- * cluster comes up at ~845 MHz, which is also an OPP), reported until cpufreq
- * programs the first setpoint.
+ * The rate the firmware power-on leaves the PLL at. The vendor iDVFS brings the
+ * B cluster up at ~1.5 GHz (1495 MHz is the shared mid OPP), reported until
+ * cpufreq programs the first setpoint. (The safety of the first transition no
+ * longer depends on this being exact: the mux now parks on clk26m in hardware
+ * before the SMC relock.)
  */
-#define MT6797_ARMPLL_B_DEFAULT_HZ	845000000UL
+#define MT6797_ARMPLL_B_DEFAULT_HZ	1495000000UL
 
 /* Provider cells. */
 #define CLK_ARMPLL_B		0
@@ -55,8 +71,8 @@
 struct mt6797_armpll_b {
 	struct clk_hw pll_hw;
 	struct clk_hw mux_hw;
+	struct regmap *mcumixed;	/* ARMPLLDIV mux register bank */
 	unsigned long rate;	/* last rate programmed through the SIP */
-	u8 mux_index;
 };
 
 static struct mt6797_armpll_b *pll_to_data(struct clk_hw *hw)
@@ -119,17 +135,33 @@ static const struct clk_ops mt6797_armpll_b_ops = {
 
 static u8 mt6797_armpll_b_mux_get_parent(struct clk_hw *hw)
 {
-	return mux_to_data(hw)->mux_index;
+	struct mt6797_armpll_b *data = mux_to_data(hw);
+	unsigned int val;
+
+	regmap_read(data->mcumixed, MT6797_ARMPLLDIV_MUXSEL, &val);
+	val = (val >> MT6797_ARMPLLDIV_B_SHIFT) & MT6797_ARMPLLDIV_B_MASK;
+
+	/* Only clk26m (0) and armpll_b (1) are modelled; map any other
+	 * firmware selection to the PLL so cpufreq's parent tracking is sane.
+	 */
+	return val == 0 ? 0 : 1;
 }
 
 static int mt6797_armpll_b_mux_set_parent(struct clk_hw *hw, u8 index)
 {
-	mux_to_data(hw)->mux_index = index;
+	struct mt6797_armpll_b *data = mux_to_data(hw);
 
-	return 0;
+	return regmap_update_bits(data->mcumixed, MT6797_ARMPLLDIV_MUXSEL,
+				  MT6797_ARMPLLDIV_B_MASK << MT6797_ARMPLLDIV_B_SHIFT,
+				  (u32)index << MT6797_ARMPLLDIV_B_SHIFT);
 }
 
-/* Software-only mux: no register, so it never forces a reparent for a rate. */
+/*
+ * Real hardware mux on the shared MCUMIXED ARMPLLDIV register. cpufreq parks on
+ * clk26m (index 0) across the PLL relock and switches back to armpll_b
+ * (index 1). regmap serialises the read-modify-write with the A53 clusters'
+ * muxes, which share this register.
+ */
 static const struct clk_ops mt6797_armpll_b_mux_ops = {
 	.get_parent		= mt6797_armpll_b_mux_get_parent,
 	.set_parent		= mt6797_armpll_b_mux_set_parent,
@@ -162,13 +194,30 @@ static int mt6797_armpll_b_probe(struct platform_device *pdev)
 	if (!data)
 		return -ENOMEM;
 
+	{
+		struct device_node *np;
+
+		np = of_parse_phandle(dev->of_node, "mediatek,mcumixed", 0);
+		if (!np)
+			return dev_err_probe(dev, -EINVAL,
+					     "missing mediatek,mcumixed phandle\n");
+		/* device_node_to_regmap() caches per node, so this is the same
+		 * regmap instance clk-mt6797-mcu uses for the A53 muxes; its
+		 * lock serialises our RMW of the shared ARMPLLDIV register.
+		 */
+		data->mcumixed = device_node_to_regmap(np);
+		of_node_put(np);
+		if (IS_ERR(data->mcumixed))
+			return dev_err_probe(dev, PTR_ERR(data->mcumixed),
+					     "failed to get mcumixed regmap\n");
+	}
+
 	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws, CLK_ARMPLL_B_NR),
 				GFP_KERNEL);
 	if (!clk_data)
 		return -ENOMEM;
 
 	data->rate = MT6797_ARMPLL_B_DEFAULT_HZ;
-	data->mux_index = 1;
 
 	data->pll_hw.init = &pll_init;
 	ret = devm_clk_hw_register(dev, &data->pll_hw);

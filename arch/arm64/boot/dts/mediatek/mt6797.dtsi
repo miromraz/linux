@@ -709,6 +709,9 @@
 		compatible = "mediatek,mt6797-armpll-b";
 		clocks = <&clk26m>;
 		clock-names = "clk26m";
+		/* The A72 CPU-clock mux lives in the shared MCUMIXED ARMPLLDIV
+		 * register (0x270), the same bank the A53 cluster muxes use. */
+		mediatek,mcumixed = <&mcumixed>;
 		#clock-cells = <1>;
 		status = "disabled";
 	};
