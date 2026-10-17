@@ -110,6 +110,15 @@ struct panfrost_compatible {
 	/* Vendor implementation quirks callback */
 	void (*vendor_quirk)(struct panfrost_device *pfdev);
 
+	/*
+	 * True when the "speed-bin" nvmem cell holds the bin as a small
+	 * index that panfrost must turn into a BIT() bitmask before matching
+	 * it against the OPP opp-supported-hw masks. This is needed where the
+	 * cell is a raw efuse field rather than a value pre-decoded by the
+	 * nvmem provider (e.g. MT6797 reuses the CPU FUNC_CODE_1 field).
+	 */
+	bool speedbin_is_index;
+
 	/* Allowed PM features */
 	u8 pm_features;
 
