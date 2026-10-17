@@ -63,7 +63,8 @@
 			enable-method = "psci";
 			reg = <0x000>;
 			mem-supply = <&cpu_sram>;
-			capacity-dmips-mhz = <741>;
+			capacity-dmips-mhz = <578>;
+			dynamic-power-coefficient = <69>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster0_opp>;
@@ -78,7 +79,8 @@
 			enable-method = "psci";
 			reg = <0x001>;
 			mem-supply = <&cpu_sram>;
-			capacity-dmips-mhz = <741>;
+			capacity-dmips-mhz = <578>;
+			dynamic-power-coefficient = <69>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster0_opp>;
@@ -93,7 +95,8 @@
 			enable-method = "psci";
 			reg = <0x002>;
 			mem-supply = <&cpu_sram>;
-			capacity-dmips-mhz = <741>;
+			capacity-dmips-mhz = <578>;
+			dynamic-power-coefficient = <69>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster0_opp>;
@@ -108,7 +111,8 @@
 			enable-method = "psci";
 			reg = <0x003>;
 			mem-supply = <&cpu_sram>;
-			capacity-dmips-mhz = <741>;
+			capacity-dmips-mhz = <578>;
+			dynamic-power-coefficient = <69>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster0_opp>;
@@ -123,7 +127,8 @@
 			enable-method = "psci";
 			reg = <0x100>;
 			mem-supply = <&cpu_sram>;
-			capacity-dmips-mhz = <741>;
+			capacity-dmips-mhz = <578>;
+			dynamic-power-coefficient = <111>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster1_opp>;
@@ -138,7 +143,8 @@
 			enable-method = "psci";
 			reg = <0x101>;
 			mem-supply = <&cpu_sram>;
-			capacity-dmips-mhz = <741>;
+			capacity-dmips-mhz = <578>;
+			dynamic-power-coefficient = <111>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster1_opp>;
@@ -153,7 +159,8 @@
 			enable-method = "psci";
 			reg = <0x102>;
 			mem-supply = <&cpu_sram>;
-			capacity-dmips-mhz = <741>;
+			capacity-dmips-mhz = <578>;
+			dynamic-power-coefficient = <111>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster1_opp>;
@@ -168,7 +175,8 @@
 			enable-method = "psci";
 			reg = <0x103>;
 			mem-supply = <&cpu_sram>;
-			capacity-dmips-mhz = <741>;
+			capacity-dmips-mhz = <578>;
+			dynamic-power-coefficient = <111>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster1_opp>;
@@ -193,6 +201,7 @@
 			enable-method = "psci";
 			reg = <0x200>;
 			capacity-dmips-mhz = <1024>;
+			dynamic-power-coefficient = <375>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster2_opp>;
@@ -207,6 +216,7 @@
 			enable-method = "psci";
 			reg = <0x201>;
 			capacity-dmips-mhz = <1024>;
+			dynamic-power-coefficient = <375>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster2_opp>;
@@ -228,6 +238,7 @@
 			polling-delay-passive = <100>;
 			polling-delay = <500>;
 			thermal-sensors = <&thermal>;
+			sustainable-power = <3000>;
 
 			trips {
 				cpu_passive: trip-point0 {
