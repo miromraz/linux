@@ -47,9 +47,33 @@ static int cpu_psci_cpu_boot(unsigned int cpu)
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
+/*
+ * Some firmware advertises PSCI CPU_OFF but cannot actually power a given CPU
+ * down: e.g. a closed EL3 (TF-A) that never learnt to power-gate a cluster
+ * which was brought up out-of-band by the bootloader. Issuing CPU_OFF to such
+ * a core wedges it instead of parking it and hangs the SoC. The cpu node is
+ * then flagged "cpu-off-broken" so the kernel refuses the offline cleanly
+ * (-EOPNOTSUPP / not hotpluggable) rather than issuing a fatal CPU_OFF. The
+ * proper fix lives in firmware (TF-A pwr_domain_off); this honours an
+ * unreplaceable firmware's limitation.
+ */
+static bool cpu_psci_cpu_off_broken(unsigned int cpu)
+{
+	struct device_node *np = of_get_cpu_node(cpu, NULL);
+	bool broken;
+
+	if (!np)
+		return false;
+
+	broken = of_property_read_bool(np, "cpu-off-broken");
+	of_node_put(np);
+
+	return broken;
+}
+
 static bool cpu_psci_cpu_can_disable(unsigned int cpu)
 {
-	return !psci_tos_resident_on(cpu);
+	return !psci_tos_resident_on(cpu) && !cpu_psci_cpu_off_broken(cpu);
 }
 
 static int cpu_psci_cpu_disable(unsigned int cpu)
@@ -61,6 +85,10 @@ static int cpu_psci_cpu_disable(unsigned int cpu)
 	/* Trusted OS will deny CPU_OFF */
 	if (psci_tos_resident_on(cpu))
 		return -EPERM;
+
+	/* Firmware cannot power this CPU down; CPU_OFF would hang it */
+	if (cpu_psci_cpu_off_broken(cpu))
+		return -EOPNOTSUPP;
 
 	return 0;
 }
