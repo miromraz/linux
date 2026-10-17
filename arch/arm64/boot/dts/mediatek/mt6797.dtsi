@@ -269,6 +269,13 @@
 			enable-method = "psci";
 			reg = <0x200>;
 			/*
+			 * The B cluster is powered up out-of-band by the
+			 * bootloader; the closed MT6797 ATF advertises PSCI
+			 * CPU_OFF but cannot power it down, so CPU_OFF of an
+			 * A72 wedges the SoC. Refuse the offline instead.
+			 */
+			cpu-off-broken;
+			/*
 			 * Cortex-A72 fixed L1 geometry: 48 KiB 3-way L1-I and
 			 * 32 KiB 2-way L1-D, 64-byte lines (Arm Cortex-A72 TRM
 			 * r0p3, 6.1 "About the L1 memory system").
@@ -295,6 +302,8 @@
 			compatible = "arm,cortex-a72";
 			enable-method = "psci";
 			reg = <0x201>;
+			/* See cpu@200: firmware CPU_OFF wedges the A72 cluster. */
+			cpu-off-broken;
 			i-cache-size = <49152>;
 			i-cache-line-size = <64>;
 			i-cache-sets = <256>;
