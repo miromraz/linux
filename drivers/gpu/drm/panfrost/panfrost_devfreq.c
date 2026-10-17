@@ -93,24 +93,52 @@ static struct devfreq_dev_profile panfrost_devfreq_profile = {
 
 static int panfrost_read_speedbin(struct device *dev)
 {
+	struct panfrost_device *pfdev = dev_get_drvdata(dev);
 	u32 val;
 	int ret;
 
 	ret = nvmem_cell_read_variable_le_u32(dev, "speed-bin", &val);
 	if (ret) {
 		/*
-		 * -ENOENT means that this platform doesn't support speedbins
-		 * as it didn't declare any speed-bin nvmem: in this case, we
-		 * keep going without it; any other error means that we are
-		 * supposed to read the bin value, but we failed doing so.
+		 * A missing speed-bin nvmem (-ENOENT/-EOPNOTSUPP) means this
+		 * platform does not gate OPPs by bin: return without setting
+		 * supported_hw, so no OPP is dropped. This is true for every
+		 * compatible, index-based or not.
 		 */
-		if (ret != -ENOENT && ret != -EOPNOTSUPP) {
+		if (ret == -ENOENT || ret == -EOPNOTSUPP)
+			return 0;
+		/*
+		 * A real read error is fatal on a bitmask platform. On an
+		 * index-based bin (see below) it is not: fall back to the
+		 * lowest bin so the always-supported OPPs stay enabled and
+		 * only the bin-gated turbo point is dropped.
+		 */
+		if (!pfdev->comp->speedbin_is_index) {
 			DRM_DEV_ERROR(dev, "Cannot read speed-bin (%d).", ret);
 			return ret;
 		}
-
-		return 0;
+		DRM_DEV_INFO(dev, "Cannot read speed-bin (%d), using the base OPPs.\n",
+			     ret);
+		val = 0;
 	}
+	/*
+	 * Some platforms store the bin as a raw index rather than a bitmask
+	 * (e.g. MT6797 reuses the CPU FUNC_CODE_1 efuse field). Convert it to
+	 * BIT(index) so all bits are honoured and distinct bins never alias,
+	 * e.g. index 12 (BIT(12)) must not match index 4 (BIT(4)). Once
+	 * supported_hw is set the OPP core drops each OPP that lacks
+	 * opp-supported-hw, so such a board's always-on OPPs must use
+	 * opp-supported-hw = <0xffffffff> and only the turbo points are gated.
+	 */
+	if (pfdev->comp->speedbin_is_index) {
+		if (val >= 32) {
+			DRM_DEV_ERROR(dev, "speed-bin index %u out of range, using the base OPPs\n",
+				      val);
+			val = 0;
+		}
+		val = BIT(val);
+	}
+
 	DRM_DEV_DEBUG(dev, "Using speed-bin = 0x%x\n", val);
 
 	return devm_pm_opp_set_supported_hw(dev, &val, 1);
