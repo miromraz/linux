@@ -16390,6 +16390,12 @@ L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
 S:	Maintained
 F:	sound/soc/codecs/mt6351-accdet.c
 
+MEDIATEK MT6351 EFUSE DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	drivers/nvmem/mt6351-efuse.c
+
 MEDIATEK MT6351 FUEL GAUGE DRIVER
 M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
 L:	linux-pm@vger.kernel.org
