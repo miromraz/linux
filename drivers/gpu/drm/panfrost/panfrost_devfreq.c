@@ -93,6 +93,7 @@ static struct devfreq_dev_profile panfrost_devfreq_profile = {
 
 static int panfrost_read_speedbin(struct device *dev)
 {
+	struct panfrost_device *pfdev = dev_get_drvdata(dev);
 	u32 val;
 	int ret;
 
@@ -111,6 +112,21 @@ static int panfrost_read_speedbin(struct device *dev)
 
 		return 0;
 	}
+	/*
+	 * Some platforms store the bin as a raw index rather than a bitmask
+	 * (e.g. MT6797 reuses the CPU FUNC_CODE_1 efuse field). Convert it so
+	 * all bits are honoured and distinct bins never alias, e.g. index 12
+	 * (BIT(12)) must not match index 4 (BIT(4)).
+	 */
+	if (pfdev->comp->speedbin_is_index) {
+		if (val >= 32) {
+			DRM_DEV_ERROR(dev, "speed-bin index %u out of range\n",
+				      val);
+			return -EINVAL;
+		}
+		val = BIT(val);
+	}
+
 	DRM_DEV_DEBUG(dev, "Using speed-bin = 0x%x\n", val);
 
 	return devm_pm_opp_set_supported_hw(dev, &val, 1);
