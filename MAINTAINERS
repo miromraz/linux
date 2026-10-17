@@ -19931,6 +19931,12 @@ S:	Maintained
 T:	git git://linuxtv.org/media.git
 F:	drivers/media/i2c/ov9734.c
 
+ON SEMICONDUCTOR FAN49101 REGULATOR DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+S:	Maintained
+F:	Documentation/devicetree/bindings/regulator/onnn,fan49101.yaml
+F:	drivers/regulator/fan49101.c
+
 ON SEMICONDUCTOR FUSB301 TYPE-C CONTROLLER DRIVER
 M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
 L:	linux-usb@vger.kernel.org
