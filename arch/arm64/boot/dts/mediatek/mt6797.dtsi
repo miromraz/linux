@@ -1172,6 +1172,16 @@
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE3>;
 		power-domain-names = "core0", "core1", "core2", "core3";
 		mediatek,infracfg = <&infrasys>;
+		/*
+		 * The GPU has no dedicated speed-bin efuse field. The vendor
+		 * 3.18 mt_gpufreq driver selects the GPU OPP table from
+		 * FUNC_CODE_1 (efuse word 22[3:0], mt_gpufreq.c get_dvfs_table
+		 * _type()), the same raw index the CPU speed bin uses, so reuse
+		 * that cell. panfrost converts the index to a BIT() mask (the
+		 * speedbin_as_bitmask compatible flag).
+		 */
+		nvmem-cells = <&cpu_speed_bin>;
+		nvmem-cell-names = "speed-bin";
 		#cooling-cells = <2>;
 		/*
 		 * Active dynamic-power coefficient (uW/MHz/V^2) for the IPA
