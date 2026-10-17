@@ -363,10 +363,19 @@ static const struct mtk_composite top_muxes[] = {
 		 0x0070, 24, 3, 31),
 	MUX_GATE(CLK_TOP_MUX_MSDC30_2, "msdc30_2_sel", msdc30_2_parents,
 		 0x0080, 0, 3, 7),
-	MUX_GATE(CLK_TOP_MUX_AUDIO, "audio_sel", audio_parents,
-		 0x0080, 16, 2, 23),
-	MUX(CLK_TOP_MUX_AUD_INTBUS, "aud_intbus_sel", aud_intbus_parents,
-	    0x0080, 24, 2),
+	/*
+	 * The audio clock tree (audio_sel, aud_intbus_sel, aud_1/2_sel,
+	 * audio_h_sel) is owned by the MT6797 audio (AFE) driver, which
+	 * probe-defers and binds long after clk_disable_unused()
+	 * (late_initcall_sync). Gating the audio internal bus from under the
+	 * bootloader-inherited audio block hangs the SoC, so flag the whole
+	 * tree CLK_IGNORE_UNUSED: clk_disable_unused() leaves it alone until
+	 * the audio driver owns it, and runtime gating still applies afterwards.
+	 */
+	MUX_GATE_FLAGS(CLK_TOP_MUX_AUDIO, "audio_sel", audio_parents,
+		       0x0080, 16, 2, 23, CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED),
+	MUX_FLAGS(CLK_TOP_MUX_AUD_INTBUS, "aud_intbus_sel", aud_intbus_parents,
+		  0x0080, 24, 2, CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED),
 	MUX(CLK_TOP_MUX_PMICSPI, "pmicspi_sel", pmicspi_parents,
 	    0x0090, 0, 3),
 	MUX(CLK_TOP_MUX_SCP, "scp_sel", scp_parents,
@@ -375,18 +384,18 @@ static const struct mtk_composite top_muxes[] = {
 	    0x0090, 16, 2),
 	MUX_GATE(CLK_TOP_MUX_MJC, "mjc_sel", mjc_parents, 0x0090, 24, 2, 31),
 	MUX_GATE(CLK_TOP_MUX_DPI0, "dpi0_sel", dpi0_parents, 0x00A0, 0, 3, 7),
-	MUX_GATE(CLK_TOP_MUX_AUD_1, "aud_1_sel", aud_1_parents,
-		 0x00A0, 16, 1, 23),
-	MUX_GATE(CLK_TOP_MUX_AUD_2, "aud_2_sel", aud_2_parents,
-		 0x00A0, 24, 1, 31),
+	MUX_GATE_FLAGS(CLK_TOP_MUX_AUD_1, "aud_1_sel", aud_1_parents,
+		       0x00A0, 16, 1, 23, CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED),
+	MUX_GATE_FLAGS(CLK_TOP_MUX_AUD_2, "aud_2_sel", aud_2_parents,
+		       0x00A0, 24, 1, 31, CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED),
 	MUX(CLK_TOP_MUX_SSUSB_TOP_SYS, "ssusb_top_sys_sel",
 	    ssusb_top_sys_parents, 0x00B0, 8, 1),
 	MUX(CLK_TOP_MUX_SPM, "spm_sel", spm_parents,
 	    0x00C0, 0, 1),
 	MUX(CLK_TOP_MUX_BSI_SPI, "bsi_spi_sel", bsi_spi_parents,
 	    0x00C0, 8, 2),
-	MUX_GATE(CLK_TOP_MUX_AUDIO_H, "audio_h_sel", audio_h_parents,
-		 0x00C0, 16, 2, 23),
+	MUX_GATE_FLAGS(CLK_TOP_MUX_AUDIO_H, "audio_h_sel", audio_h_parents,
+		       0x00C0, 16, 2, 23, CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED),
 	MUX_GATE(CLK_TOP_MUX_ANC_MD32, "anc_md32_sel", anc_md32_parents,
 		 0x00C0, 24, 2, 31),
 	MUX(CLK_TOP_MUX_MFG_52M, "mfg_52m_sel", mfg_52m_parents,
