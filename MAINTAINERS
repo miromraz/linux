@@ -19924,6 +19924,13 @@ S:	Maintained
 T:	git git://linuxtv.org/media.git
 F:	drivers/media/i2c/ov9734.c
 
+ON SEMICONDUCTOR FUSB301 TYPE-C CONTROLLER DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-usb@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/usb/onnn,fusb301.yaml
+F:	drivers/usb/typec/fusb301.c
+
 ONBOARD USB HUB DRIVER
 M:	Matthias Kaehlcke <mka@chromium.org>
 L:	linux-usb@vger.kernel.org
