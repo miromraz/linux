@@ -46,6 +46,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.pwr_sta2nd_offs = MT6797_PWR_STATUS_2ND,
 		.sram_pdn_bits = GENMASK(8, 8),
 		.sram_pdn_ack_bits = GENMASK(12, 12),
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_VENC] = {
 		.name = "venc",
@@ -55,6 +56,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.pwr_sta2nd_offs = MT6797_PWR_STATUS_2ND,
 		.sram_pdn_bits = GENMASK(11, 8),
 		.sram_pdn_ack_bits = GENMASK(15, 12),
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_ISP] = {
 		.name = "isp",
@@ -64,6 +66,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.pwr_sta2nd_offs = MT6797_PWR_STATUS_2ND,
 		.sram_pdn_bits = GENMASK(9, 8),
 		.sram_pdn_ack_bits = GENMASK(13, 12),
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_MM] = {
 		.name = "mm",
@@ -101,7 +104,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		 * its mfg_async domain, otherwise the MFG power-on ack times
 		 * out.
 		 */
-		.caps = MTK_SCPD_DOMAIN_SUPPLY,
+		.caps = MTK_SCPD_DOMAIN_SUPPLY | MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_MFG] = {
 		.name = "mfg",
@@ -117,6 +120,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.bp_cfg = {
 			BUS_PROT_INFRA_UPDATE_TOPAXI(MT6797_TOP_AXI_PROT_EN_MFG),
 		},
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_MFG_CORE0] = {
 		.name = "mfg_core0",
@@ -128,6 +132,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.sram_ack_offs = MT6797_SPM_MFG_SRAM_CON,
 		.sram_pdn_bits = BIT(8),
 		.sram_pdn_ack_bits = BIT(20),
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_MFG_CORE1] = {
 		.name = "mfg_core1",
@@ -138,6 +143,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.sram_ack_offs = MT6797_SPM_MFG_SRAM_CON,
 		.sram_pdn_bits = BIT(8),
 		.sram_pdn_ack_bits = BIT(21),
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_MFG_CORE2] = {
 		.name = "mfg_core2",
@@ -148,6 +154,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.sram_ack_offs = MT6797_SPM_MFG_SRAM_CON,
 		.sram_pdn_bits = BIT(8),
 		.sram_pdn_ack_bits = BIT(22),
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_MFG_CORE3] = {
 		.name = "mfg_core3",
@@ -158,6 +165,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.sram_ack_offs = MT6797_SPM_MFG_SRAM_CON,
 		.sram_pdn_bits = BIT(8),
 		.sram_pdn_ack_bits = BIT(23),
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_MJC] = {
 		.name = "mjc",
@@ -167,6 +175,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt6797[] = {
 		.pwr_sta2nd_offs = MT6797_PWR_STATUS_2ND,
 		.sram_pdn_bits = GENMASK(8, 8),
 		.sram_pdn_ack_bits = GENMASK(12, 12),
+		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
 	},
 	[MT6797_POWER_DOMAIN_CONN] = {
 		.name = "conn",
