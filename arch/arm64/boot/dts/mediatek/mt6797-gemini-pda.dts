@@ -643,11 +643,24 @@
 	 * mount-matrix is the vendor coordinate direction 7 (aeon6797_6m_n.dts
 	 * cust_accel@1/cust_gyro@1) expanded through the MediaTek hwmsen
 	 * conversion table (sign {-1,-1,-1}, axis map {1,0,2}).
+	 *
+	 * The data-ready interrupt is wired to GPIO65 (EINT4): the vendor
+	 * aeon6797_6m_n.dts gyro_intpin_cfg ("gyropincfg", GPIO65 as GPIO with
+	 * bias-pull-down) is the pinctrl state the vendor &gyro node selects for
+	 * this part. The pull-down idle means the BMI160 drives the pin
+	 * active-high, so flag it edge-rising. The line goes to the chip's
+	 * primary INT1 pin, which is also the one the BMI160 IIO driver selects
+	 * first. No supply is described: the vendor cust_accel@1/cust_gyro@1
+	 * both use power_id = <0xffff> (no switchable MT6351 LDO), so the chip
+	 * runs off a fixed always-on rail whose identity is not established here
+	 * (the dummy regulator covers it).
 	 */
 	bmi160: imu@69 {
 		compatible = "bosch,bmi160";
 		reg = <0x69>;
 		label = "accel-base";
+		interrupts-extended = <&pio 4 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "INT1";
 		mount-matrix = "0", "-1", "0",
 			       "-1", "0", "0",
 			       "0", "0", "-1";
