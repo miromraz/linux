@@ -106,23 +106,39 @@ static int panfrost_read_speedbin(struct device *dev)
 		 * supposed to read the bin value, but we failed doing so.
 		 */
 		if (ret != -ENOENT && ret != -EOPNOTSUPP) {
-			DRM_DEV_ERROR(dev, "Cannot read speed-bin (%d).", ret);
-			return ret;
+			/*
+			 * On an index-based bin (see below) a failed read must
+			 * not kill the GPU: fall back to the lowest bin so the
+			 * always-supported OPPs stay enabled and only the
+			 * bin-gated turbo point is dropped.
+			 */
+			if (!pfdev->comp->speedbin_is_index) {
+				DRM_DEV_ERROR(dev, "Cannot read speed-bin (%d).", ret);
+				return ret;
+			}
+			DRM_DEV_INFO(dev, "Cannot read speed-bin (%d), using the base OPPs.\n",
+				     ret);
 		}
 
-		return 0;
+		if (!pfdev->comp->speedbin_is_index)
+			return 0;
+
+		val = 0;
 	}
 	/*
 	 * Some platforms store the bin as a raw index rather than a bitmask
-	 * (e.g. MT6797 reuses the CPU FUNC_CODE_1 efuse field). Convert it so
-	 * all bits are honoured and distinct bins never alias, e.g. index 12
-	 * (BIT(12)) must not match index 4 (BIT(4)).
+	 * (e.g. MT6797 reuses the CPU FUNC_CODE_1 efuse field). Convert it to
+	 * BIT(index) so all bits are honoured and distinct bins never alias,
+	 * e.g. index 12 (BIT(12)) must not match index 4 (BIT(4)). The OPP
+	 * core rejects the whole table if supported_hw is set but an OPP
+	 * carries no opp-supported-hw, so such a board's always-on OPPs must
+	 * use opp-supported-hw = <0xffffffff> and only gate the turbo points.
 	 */
 	if (pfdev->comp->speedbin_is_index) {
 		if (val >= 32) {
-			DRM_DEV_ERROR(dev, "speed-bin index %u out of range\n",
+			DRM_DEV_ERROR(dev, "speed-bin index %u out of range, using the base OPPs\n",
 				      val);
-			return -EINVAL;
+			val = 0;
 		}
 		val = BIT(val);
 	}
