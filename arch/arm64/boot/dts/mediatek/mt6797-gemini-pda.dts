@@ -506,6 +506,20 @@
 };
 
 /*
+ * The two Cortex-A72 cores are powered by the DA9214 buck B rail. On this
+ * unit the bootloader powers the cluster up before booting Linux (buck B, the
+ * B SRAM LDO and the SPM/MCUCFG sequence), so the kernel brings both cores
+ * online with plain PSCI at boot-time SMP; cpufreq then scales the cluster.
+ */
+&cpu8 {
+	cpu-supply = <&da9214_buckb>;
+};
+
+&cpu9 {
+	cpu-supply = <&da9214_buckb>;
+};
+
+/*
  * The CCI shares the DA9214 buck A rail with the Cortex-A53 clusters. As a
  * devfreq consumer it holds that rail at the voltage its own frequency needs,
  * so for the FY/M/SB bins the board no longer has to pin buck A at a fixed
@@ -565,12 +579,31 @@
 			};
 
 			/*
-			 * Buck B ("VPROC2") powers the Cortex-A72 cluster,
-			 * which is off at boot and not brought up in stage 1.
-			 * It must not be forced always-on.
+			 * Buck B ("VPROC2") powers the Cortex-A72 cluster, which
+			 * is brought up only by the A72-enabled U-Boot (the
+			 * gemini-a72-ram board code) with maxcpus>8; a stock
+			 * six-core boot leaves the cluster off and this rail
+			 * idle. When the cluster is enabled the bootloader
+			 * powers it (buck B at the 1.00 V boot value) before
+			 * booting Linux and the cores run on it for the whole
+			 * boot. There is no CPU_OFF path for the A72 (the
+			 * vendor warns taking the last A72 offline can hang the
+			 * SoC), so the cores are never offlined and the rail must
+			 * never be disabled under them: it is therefore boot-on
+			 * and always-on. cpufreq still scales it between the
+			 * limits. The minimum is the bootloader value (1.00 V,
+			 * the floor the cluster boots at); the maximum is the
+			 * 1.09 V cap on the Cortex-A72 OPPs, kept below the fixed
+			 * 1.10 V B SRAM LDO so Vsram stays >= Vproc. The ramp
+			 * delay matches the DA9214 buck A rail.
 			 */
 			da9214_buckb: BUCKB {
 				regulator-name = "vproc-big";
+				regulator-min-microvolt = <1000000>;
+				regulator-max-microvolt = <1090000>;
+				regulator-ramp-delay = <2000>;
+				regulator-boot-on;
+				regulator-always-on;
 			};
 		};
 	};
