@@ -1408,7 +1408,13 @@
 		io-channels = <&pmic_adc MT6351_AUXADC_ISENSE>;
 		io-channel-names = "vbat";
 		monitored-battery = <&battery>;
-		power-supplies = <&charger>;
+		/*
+		 * No power-supplies = <&charger>: the bq25890 charger registers
+		 * its power supply without a fwnode, so power_supply_check_supplies()
+		 * can never resolve the phandle and the gauge deferred forever.
+		 * The gauge reads the FGADC directly and polls, so the link is
+		 * not needed for it to report battery state.
+		 */
 		/* R_FG 10 mOhm / CAR_TUNE 1.15 (battery_meter_hal.c). */
 		shunt-resistor-micro-ohms = <8696>;
 	};
