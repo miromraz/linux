@@ -98,6 +98,17 @@ properties:
       [1] Kernel documentation - ARM idle states bindings
         Documentation/devicetree/bindings/cpu/idle-states.yaml
 
+  mediatek,broken-cpu-off-cpus:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    items:
+      maxItems: 1
+    description:
+      A list of phandles to CPU nodes whose firmware advertises the PSCI
+      CPU_OFF function but cannot actually power the CPU down (for example a
+      cluster that is powered up out-of-band by the bootloader and that the
+      firmware never learnt to power-gate). The OS must not issue CPU_OFF to
+      these CPUs; they are kept non-removable instead.
+
 patternProperties:
   "^power-domain-":
     $ref: /schemas/power/power-domain.yaml#
