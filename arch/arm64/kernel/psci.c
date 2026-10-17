@@ -43,19 +43,38 @@ static void __init psci_init_cpu_off_broken(void)
 
 	n = of_count_phandle_with_args(np, "mediatek,broken-cpu-off-cpus", NULL);
 	for (i = 0; i < n; i++) {
+		u64 hwid;
 		int cpu;
 
 		cpu_np = of_parse_phandle(np, "mediatek,broken-cpu-off-cpus", i);
 		if (!cpu_np)
 			continue;
 
-		cpu = of_cpu_node_to_id(cpu_np);
+		/*
+		 * This runs from cpu_psci_cpu_init() during smp_init_cpus(),
+		 * before the CPUs are added to the possible mask, so
+		 * of_cpu_node_to_id() (which walks for_each_possible_cpu())
+		 * cannot resolve them yet. Match the MPIDR against the logical
+		 * map, which of_parse_and_init_cpus() has already populated.
+		 */
+		hwid = of_get_cpu_hwid(cpu_np, 0);
 		of_node_put(cpu_np);
-		if (cpu >= 0)
-			cpumask_set_cpu(cpu, &psci_cpu_off_broken_mask);
+		if (hwid == INVALID_HWID)
+			continue;
+
+		for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
+			if (cpu_logical_map(cpu) == hwid) {
+				cpumask_set_cpu(cpu, &psci_cpu_off_broken_mask);
+				break;
+			}
+		}
 	}
 
 	of_node_put(np);
+
+	if (!cpumask_empty(&psci_cpu_off_broken_mask))
+		pr_info("firmware cannot CPU_OFF CPUs %*pbl; keeping them non-removable\n",
+			cpumask_pr_args(&psci_cpu_off_broken_mask));
 }
 
 /*
