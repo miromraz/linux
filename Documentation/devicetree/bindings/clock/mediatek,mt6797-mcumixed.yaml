@@ -13,7 +13,15 @@ description:
   The MCUMIXED block on the MediaTek MT6797 provides the per-cluster CPU
   PLLs (ARMPLL for the little and big Cortex-A53 clusters and the CCI PLL)
   together with the muxes that select each cluster's clock source between
-  the 26 MHz oscillator and its ARMPLL. The clock indices are defined in
+  the 26 MHz oscillator and its ARMPLL.
+
+  The Cortex-A72 ("big") cluster ARMPLL is also exposed here, even though it
+  is not in the MCUMIXED register map (it lives inside the iDVFS block and is
+  reachable only through secure-firmware SMC calls). Its clock mux, however,
+  is the B-cluster field of the same shared ARMPLLDIV register this block
+  owns, so modelling both in one controller keeps the read-modify-write of
+  that register serialised with the Cortex-A53 muxes and needs no extra reg
+  or phandle. The clock indices are defined in
   include/dt-bindings/clock/mt6797-clk.h.
 
 properties:
