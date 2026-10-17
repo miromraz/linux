@@ -26,11 +26,25 @@
 	};
 
 	/*
-	 * GPU operating points for this board's MT6797 speed bin. The
-	 * frequency/voltage pairs are the vendor 3.18 mt_gpufreq non-M-bin
-	 * grid (238-700 MHz); M-bin parts use a disjoint grid topping out at
-	 * 600 MHz, so this table is not valid for every MT6797 and lives in
-	 * the board DTS rather than the shared SoC dtsi.
+	 * GPU operating points for this board's MT6797. The 238-700 MHz grid
+	 * is the vendor 3.18 mt_gpufreq worst-segment voltages rounded up to
+	 * the RT5735 6.25 mV step. It is not correct for every MT6797 (the
+	 * vendor type 6 table lp_tbl_e1_2, FUNC_CODE_1 2/7 with ptp <= 5, and
+	 * type 11 v7_tbl_e1_3, FUNC_CODE_1 0xF, top out at 600 MHz), but this
+	 * board only ever ships FUNC_CODE_1 == 4 (a Speed Bin part), so the
+	 * grid stays enabled for every bin.
+	 *
+	 * panfrost reads the speed bin (FUNC_CODE_1), applies BIT(bin) as the
+	 * supported-hw value, and once supported_hw is set the OPP core drops
+	 * each OPP whose opp-supported-hw does not match, and each OPP that
+	 * lacks the property. So the always-on grid carries opp-supported-hw
+	 * = <0xffffffff> (match every bin) rather than omitting it. Only
+	 * FUNC_CODE_1 == 4 (BIT(4) = 0x10) selects the vendor "Speed Bin"
+	 * table (mt_gpufreq.c mt_gpufreq_opp_plus_tbl_e1_1, type 12) that
+	 * tops out at 900 MHz, so the 900 MHz point alone is gated to
+	 * opp-supported-hw = <0x10>. The 900 MHz voltage is the vendor
+	 * GPU_DVFS_VOLT0_S (1154.5 mV) rounded up to the RT5735 step
+	 * (1156250 uV).
 	 */
 	gpu_opp_table: opp-table-gpu {
 		compatible = "operating-points-v2";
@@ -65,6 +79,11 @@
 			opp-hz = /bits/ 64 <700000000>;
 			opp-microvolt = <1131250>;
 			opp-supported-hw = <0xffffffff>;
+		};
+		opp-900000000 {
+			opp-hz = /bits/ 64 <900000000>;
+			opp-microvolt = <1156250>;
+			opp-supported-hw = <0x10>;
 		};
 	};
 
@@ -635,7 +654,8 @@
 		reg = <0x1c>;
 		regulator-name = "vgpu";
 		regulator-min-microvolt = <862500>;
-		regulator-max-microvolt = <1131250>;
+		/* Raised from the 700 MHz point to cover the 900 MHz bin OPP. */
+		regulator-max-microvolt = <1156250>;
 		regulator-ramp-delay = <32000>;
 	};
 };
