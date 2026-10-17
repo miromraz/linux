@@ -23,6 +23,35 @@
 
 	chosen {
 		stdout-path = "serial0:921600n8";
+
+		/*
+		 * The LK/U-Boot stage hands control to Linux with the DSI panel
+		 * still scanning out its framebuffer through the MM SMI memory
+		 * fabric and the OVL0 -> RDMA0 -> DSI0 pipeline. Those MM clocks
+		 * and the MM power domain have no Linux consumer until
+		 * mediatek-drm binds (~9 s), far past clk_disable_unused() at
+		 * late_initcall_sync (~1.25 s); without a holder the core gates
+		 * them from under the live scanout and wedges the MM fabric at
+		 * mm_smi_common. simpledrm (CONFIG_DRM_SIMPLEDRM) claims these
+		 * clocks and the MM power domain early so clk_disable_unused()
+		 * and the genpd power-off skip them, and releases them when
+		 * mediatek-drm evicts the aperture. U-Boot fills reg/width/
+		 * height/stride/format and flips status to "okay" when its video
+		 * device is active; the node stays disabled otherwise.
+		 */
+		framebuffer {
+			compatible = "simple-framebuffer";
+			clocks = <&mmsys CLK_MM_SMI_COMMON>,
+				 <&mmsys CLK_MM_SMI_LARB0>,
+				 <&mmsys CLK_MM_DISP_OVL0>,
+				 <&mmsys CLK_MM_DISP_OVL0_2L>,
+				 <&mmsys CLK_MM_DISP_OVL1_2L>,
+				 <&mmsys CLK_MM_DISP_RDMA0>,
+				 <&mmsys CLK_MM_DSI0_MM_CLOCK>,
+				 <&mmsys CLK_MM_DSI0_INTERFACE_CLOCK>;
+			power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
+			status = "disabled";
+		};
 	};
 
 	/*
