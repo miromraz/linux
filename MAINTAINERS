@@ -22948,6 +22948,12 @@ F:	include/linux/rhashtable.h
 F:	lib/rhashtable.c
 F:	lib/test_rhashtable.c
 
+RICHTEK RT5735 REGULATOR DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+S:	Maintained
+F:	Documentation/devicetree/bindings/regulator/richtek,rt5735.yaml
+F:	drivers/regulator/rt5735-regulator.c
+
 RICOH R5C592 MEMORYSTICK DRIVER
 M:	Maxim Levitsky <maximlevitsky@gmail.com>
 S:	Maintained
