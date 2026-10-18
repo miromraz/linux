@@ -515,6 +515,17 @@
 	pinctrl-names = "default", "state_uhs";
 	pinctrl-0 = <&mmc0_pins_default>;
 	pinctrl-1 = <&mmc0_pins_default>;
+	/*
+	 * The GDMA engine that drains/fills the MSDC0 data FIFO is clocked by
+	 * the "hclk" bus clock (MSDC_PATCH_BIT1.AHB_GDMA_HCLK). Its mux
+	 * (msdc50_0_hclk_sel) comes out of reset selecting clk26m (26 MHz),
+	 * which cannot keep the FIFO moving at the HS200 192 MHz card clock:
+	 * the controller flow-controls the card clock almost continuously and
+	 * throughput collapses well below the 25 MHz legacy figure. Pin it to
+	 * syspll1_d2 (273 MHz), the vendor's reference rate for this clock.
+	 */
+	assigned-clocks = <&topckgen CLK_TOP_MUX_MSDC50_0_HCLK>;
+	assigned-clock-parents = <&topckgen CLK_TOP_SYSPLL1_D2>;
 	bus-width = <8>;
 	max-frequency = <200000000>;
 	cap-mmc-highspeed;
