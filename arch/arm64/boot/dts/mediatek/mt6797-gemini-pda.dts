@@ -22,6 +22,19 @@
 	};
 
 	chosen {
+		/*
+		 * The framebuffer below has a "reg" that U-Boot fills in at boot.
+		 * /chosen has no #address-cells/#size-cells of its own, so make
+		 * them explicit and equal to the SoC root (2/2): U-Boot encodes
+		 * the reg from this node's cells (its #size-cells default is 1),
+		 * while the kernel decodes it with the root's #size-cells (2).
+		 * Without this the reg is 3 cells where the kernel expects 4,
+		 * of_address_to_resource() returns -EINVAL and simpledrm fails
+		 * its probe after already gating the live MM scanout clocks.
+		 */
+		#address-cells = <2>;
+		#size-cells = <2>;
+
 		stdout-path = "serial0:921600n8";
 
 		/*
