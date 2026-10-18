@@ -519,6 +519,16 @@
 	max-frequency = <200000000>;
 	cap-mmc-highspeed;
 	mmc-hs200-1_8v;
+	/*
+	 * Scan the full 64-cell pad delay line when tuning. The driver's
+	 * eMMC default is 32 (half the line); at the HS200 192 MHz clock that
+	 * only finds a marginal read-sampling point - the single tuning block
+	 * (CMD21) and single-block reads pass, but sustained multi-block reads
+	 * fail with data CRC. The vendor autok scans the full range; mt6797
+	 * carries the second-stage delay fields (PAD_TUNE1 DATRRDLY2/CMDRDLY2),
+	 * so request the full scan here.
+	 */
+	mediatek,tuning-step = <64>;
 	vmmc-supply = <&mt6351_vemc_reg>;
 	vqmmc-supply = <&mt6351_vio18_reg>;
 	non-removable;
