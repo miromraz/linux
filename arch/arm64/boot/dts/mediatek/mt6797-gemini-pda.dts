@@ -516,7 +516,16 @@
 	pinctrl-0 = <&mmc0_pins_default>;
 	pinctrl-1 = <&mmc0_pins_default>;
 	bus-width = <8>;
-	max-frequency = <200000000>;
+	/*
+	 * Keep HS200 but cap the clock. MSDC0's source is 384 MHz (msdcpll);
+	 * msdc_set_mclk() produces sclk = src/2 = 192 MHz for a 200 MHz
+	 * request, which is where the unreliable multi-block-read sampling
+	 * sits. The only achievable rates below that are src/4 = 96 MHz and
+	 * src/(4*div). A 100 MHz max-frequency would round down to 96 MHz
+	 * anyway, so request exactly 96 MHz (div = 1) for a wider sampling
+	 * window while staying in HS200.
+	 */
+	max-frequency = <96000000>;
 	cap-mmc-highspeed;
 	mmc-hs200-1_8v;
 	/*
