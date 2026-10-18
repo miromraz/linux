@@ -446,6 +446,7 @@ struct mtk_mmc_compatible {
 	u8 pop_en_cnt;
 	bool enhance_rx;
 	bool set_latch_sel; /* set PB2 resp/CRC-status latch per timing (mt6797) */
+	bool no_autocmd23; /* send CMD23 in software, not HW auto-CMD23 (mt6797) */
 	bool support_64g;
 	bool use_internal_cd;
 	bool support_new_tx;
@@ -592,6 +593,7 @@ static const struct mtk_mmc_compatible mt6797_compat = {
 	.stop_clk_fix = false,
 	.enhance_rx = false,
 	.set_latch_sel = true,
+	.no_autocmd23 = true,
 	.support_64g = false,
 };
 
@@ -1251,7 +1253,8 @@ static inline u32 msdc_cmd_prepare_raw_cmd(struct msdc_host *host,
 
 		if (mmc_op_multi(opcode)) {
 			if (mmc_card_mmc(mmc->card) && mrq->sbc &&
-			    !(mrq->sbc->arg & 0xFFFF0000))
+			    !(mrq->sbc->arg & 0xFFFF0000) &&
+			    !host->dev_comp->no_autocmd23)
 				rawcmd |= BIT(29); /* AutoCMD23 */
 		}
 
@@ -1578,7 +1581,8 @@ static void msdc_ops_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	 * use HW option,  otherwise use SW option
 	 */
 	if (mrq->sbc && (!mmc_card_mmc(mmc->card) ||
-	    (mrq->sbc->arg & 0xFFFF0000)))
+	    (mrq->sbc->arg & 0xFFFF0000) ||
+	    host->dev_comp->no_autocmd23))
 		msdc_start_command(host, mrq, mrq->sbc);
 	else
 		msdc_start_command(host, mrq, mrq->cmd);
