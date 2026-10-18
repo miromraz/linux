@@ -22,6 +22,22 @@
 	};
 
 	chosen {
+		/*
+		 * The framebuffer below is addressed via "memory-region", not
+		 * its "reg": a simple-framebuffer sits under /chosen, which has
+		 * no "ranges", so on arm64 of_translate_one() cannot translate a
+		 * reg here (the empty-ranges pass-through is PowerPC-only) and
+		 * of_address_to_resource() fails, leaving simpledrm with no
+		 * memory resource (-EINVAL). Pointing at the fb_reserved region
+		 * instead takes simpledrm's preferred reserved-memory path and
+		 * skips reg translation entirely. #address-cells/#size-cells and
+		 * an (empty) ranges keep the U-Boot-written reg well-formed and
+		 * translatable too, so no stale reg trips a warning.
+		 */
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
 		stdout-path = "serial0:921600n8";
 
 		/*
@@ -41,6 +57,7 @@
 		 */
 		framebuffer {
 			compatible = "simple-framebuffer";
+			memory-region = <&fb_reserved>;
 			clocks = <&mmsys CLK_MM_SMI_COMMON>,
 				 <&mmsys CLK_MM_SMI_LARB0>,
 				 <&mmsys CLK_MM_DISP_OVL0>,
@@ -271,6 +288,19 @@
 		 */
 		consys_reserved: consys@bfa00000 {
 			reg = <0 0xbfa00000 0 0x200000>;
+			no-map;
+		};
+
+		/*
+		 * The LK/U-Boot framebuffer carveout, scanned out live across
+		 * the handoff. LK always places it at 0x7dfb0000 (32320 KiB, up
+		 * to 0x7ff3ffff); the retained MT6797 LK also re-adds this as a
+		 * runtime mblock reservation, which harmlessly overlaps this
+		 * no-map node. Referenced by /chosen/framebuffer's
+		 * memory-region so simpledrm can map the live scanout buffer.
+		 */
+		fb_reserved: framebuffer@7dfb0000 {
+			reg = <0 0x7dfb0000 0 0x1f90000>;
 			no-map;
 		};
 	};
