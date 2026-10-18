@@ -498,11 +498,17 @@ static const struct mtk_gate_regs infra2_cg_regs = {
  * Linux driver claims and which the vendor kernel never gates.
  */
 static const struct mtk_gate infra_clks[] = {
-	GATE_ICG0(CLK_INFRA_PMIC_TMR, "infra_pmic_tmr", "ulposc", 0),
+	/* PMIC wrapper timer and modem/connsys channels (non-AP masters) */
+	GATE_ICG0_FLAGS(CLK_INFRA_PMIC_TMR, "infra_pmic_tmr", "ulposc", 0,
+			CLK_IS_CRITICAL),
 	GATE_ICG0(CLK_INFRA_PMIC_AP, "infra_pmic_ap", "pmicspi_sel", 1),
-	GATE_ICG0(CLK_INFRA_PMIC_MD, "infra_pmic_md", "pmicspi_sel", 2),
-	GATE_ICG0(CLK_INFRA_PMIC_CONN, "infra_pmic_conn", "pmicspi_sel", 3),
-	GATE_ICG0(CLK_INFRA_SCP, "infra_scp", "scp_sel", 4),
+	GATE_ICG0_FLAGS(CLK_INFRA_PMIC_MD, "infra_pmic_md", "pmicspi_sel", 2,
+			CLK_IS_CRITICAL),
+	GATE_ICG0_FLAGS(CLK_INFRA_PMIC_CONN, "infra_pmic_conn", "pmicspi_sel",
+			3, CLK_IS_CRITICAL),
+	/* System companion processor, firmware loaded by the bootloader */
+	GATE_ICG0_FLAGS(CLK_INFRA_SCP, "infra_scp", "scp_sel", 4,
+			CLK_IS_CRITICAL),
 	GATE_ICG0(CLK_INFRA_SEJ, "infra_sej", "axi_sel", 5),
 	/*
 	 * Register clock of the APXGPT block behind the mediatek,mt6577-timer
@@ -532,7 +538,9 @@ static const struct mtk_gate infra_clks[] = {
 	GATE_ICG0(CLK_INFRA_MD2MD_CCIF_0, "infra_md2md_ccif_0", "axi_sel", 27),
 	GATE_ICG0(CLK_INFRA_MD2MD_CCIF_1, "infra_md2md_ccif_1", "axi_sel", 28),
 	GATE_ICG0(CLK_INFRA_MD2MD_CCIF_2, "infra_md2md_ccif_2", "axi_sel", 29),
-	GATE_ICG0(CLK_INFRA_FHCTL, "infra_fhctl", "clk26m", 30),
+	/* PLL frequency-hopping controller */
+	GATE_ICG0_FLAGS(CLK_INFRA_FHCTL, "infra_fhctl", "clk26m", 30,
+			CLK_IS_CRITICAL),
 	GATE_ICG0(CLK_INFRA_BTIF, "infra_btif", "axi_sel", 31),
 	GATE_ICG1(CLK_INFRA_MD2MD_CCIF_3, "infra_md2md_ccif_3", "axi_sel", 0),
 	GATE_ICG1(CLK_INFRA_SPI, "infra_spi", "spi_sel", 1),
@@ -552,7 +560,9 @@ static const struct mtk_gate infra_clks[] = {
 	GATE_ICG1(CLK_INFRA_CLDMA, "infra_cldma", "axi_sel", 16),
 	GATE_ICG1(CLK_INFRA_DISP_PWM, "infra_disp_pwm", "pwm_sel", 17),
 	GATE_ICG1(CLK_INFRA_AP_DMA, "infra_ap_dma", "axi_sel", 18),
-	GATE_ICG1(CLK_INFRA_DEVICE_APC, "infra_device_apc", "axi_sel", 20),
+	/* Device access-permission control on the infra bus */
+	GATE_ICG1_FLAGS(CLK_INFRA_DEVICE_APC, "infra_device_apc", "axi_sel",
+			20, CLK_IS_CRITICAL),
 	/*
 	 * infra_l2c_sram clocks the CPU cluster's L2 cache-as-SRAM (MCUSYS);
 	 * it has no Linux driver consumer, so without this flag
@@ -573,13 +583,17 @@ static const struct mtk_gate infra_clks[] = {
 	GATE_ICG2(CLK_INFRA_I2C3_IMM, "infra_i2c3_imm", "axi_sel", 5),
 	GATE_ICG2(CLK_INFRA_I2C3_ARB, "infra_i2c3_arb", "axi_sel", 6),
 	GATE_ICG2(CLK_INFRA_I2C5, "infra_i2c5", "axi_sel", 7),
-	GATE_ICG2(CLK_INFRA_SYS_CIRQ, "infra_sys_cirq", "axi_sel", 8),
+	/* SPM wake-up interrupt mirror */
+	GATE_ICG2_FLAGS(CLK_INFRA_SYS_CIRQ, "infra_sys_cirq", "axi_sel", 8,
+			CLK_IS_CRITICAL),
 	GATE_ICG2(CLK_INFRA_SPI1, "infra_spi1", "spi_sel", 10),
 	GATE_ICG2_FLAGS(CLK_INFRA_DRAMC_B_F26M, "infra_dramc_b_f26m",
 			"clk26m", 11, CLK_IS_CRITICAL),
 	GATE_ICG2(CLK_INFRA_ANC_MD32, "infra_anc_md32", "anc_md32_sel", 12),
 	GATE_ICG2(CLK_INFRA_ANC_MD32_32K, "infra_anc_md32_32k", "clk26m", 13),
-	GATE_ICG2(CLK_INFRA_DVFS_SPM1, "infra_dvfs_spm1", "axi_sel", 15),
+	/* SPM DVFS interface */
+	GATE_ICG2_FLAGS(CLK_INFRA_DVFS_SPM1, "infra_dvfs_spm1", "axi_sel", 15,
+			CLK_IS_CRITICAL),
 	GATE_ICG2(CLK_INFRA_AES_TOP0, "infra_aes_top0", "axi_sel", 16),
 	GATE_ICG2(CLK_INFRA_AES_TOP1, "infra_aes_top1", "axi_sel", 17),
 	GATE_ICG2(CLK_INFRA_SSUSB_BUS, "infra_ssusb_bus", "axi_sel", 18),
