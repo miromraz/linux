@@ -2609,6 +2609,13 @@ skip_fall:
 	msdc_set_cmd_delay(host, final_delay);
 	msdc_set_data_delay(host, final_delay);
 
+	dev_info(host->dev,
+		 "DEBUG tune_together: rise=0x%016llx (start=%u len=%u) fall=0x%016llx (start=%u len=%u) edge=%s final_delay=0x%x\n",
+		 rise_delay, final_rise_delay.start, final_rise_delay.maxlen,
+		 fall_delay, final_fall_delay.start, final_fall_delay.maxlen,
+		 (final_maxlen == final_rise_delay.maxlen) ? "rise" : "fall",
+		 final_delay);
+
 	dev_dbg(host->dev, "Final pad delay: %x\n", final_delay);
 	return final_delay == 0xff ? -EIO : 0;
 }
