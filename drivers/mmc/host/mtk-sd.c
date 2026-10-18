@@ -588,8 +588,9 @@ static const struct mtk_mmc_compatible mt6797_compat = {
 	.async_fifo = true,
 	.data_tune = true,
 	.busy_check = false,
-	.stop_clk_fix = false,
-	.enhance_rx = false,
+	.stop_clk_fix = true,
+	.stop_dly_sel = 3,
+	.enhance_rx = true,
 	.support_64g = false,
 };
 
