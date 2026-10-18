@@ -516,19 +516,17 @@
 	pinctrl-0 = <&mmc0_pins_default>;
 	pinctrl-1 = <&mmc0_pins_default>;
 	bus-width = <8>;
-	max-frequency = <200000000>;
-	cap-mmc-highspeed;
-	mmc-hs200-1_8v;
 	/*
-	 * Scan the full 64-cell pad delay line when tuning. The driver's
-	 * eMMC default is 32 (half the line); at the HS200 192 MHz clock that
-	 * only finds a marginal read-sampling point - the single tuning block
-	 * (CMD21) and single-block reads pass, but sustained multi-block reads
-	 * fail with data CRC. The vendor autok scans the full range; mt6797
-	 * carries the second-stage delay fields (PAD_TUNE1 DATRRDLY2/CMDRDLY2),
-	 * so request the full scan here.
+	 * HS DDR at 52 MHz, 1.8 V I/O (vqmmc is the fixed 1.8 V VIO18 rail).
+	 * DDR52 needs no read tuning - the mmc core selects it via
+	 * mmc_select_hs_ddr(), which never calls ->execute_tuning() - so this
+	 * mode sidesteps the HS200 192 MHz multi-block-read CRC/retune problem.
+	 * mtk-sd drives the MSDC_CFG CKMOD DDR mode (mode 0x2) for DDR52 on the
+	 * mt6797 12-bit clk-div layout, so this is the mainline-proper fallback.
 	 */
-	mediatek,tuning-step = <64>;
+	max-frequency = <52000000>;
+	cap-mmc-highspeed;
+	mmc-ddr-1_8v;
 	vmmc-supply = <&mt6351_vemc_reg>;
 	vqmmc-supply = <&mt6351_vio18_reg>;
 	non-removable;
