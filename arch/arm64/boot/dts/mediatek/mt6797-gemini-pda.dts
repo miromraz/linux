@@ -69,9 +69,17 @@
 			 * larb0 that carry its EMI traffic. Missing the post-OVL
 			 * stages (COLOR..UFOE) let clk_disable_unused() stop an
 			 * engine mid-scanout and wedge the MM/SMI fabric.
+			 *
+			 * SMI_LARB5 is also held: it is the other populated MM-domain
+			 * SMI larb and shares smi_common with larb0's live display
+			 * traffic. Gating it (with every other MM clock held) still
+			 * wedges the SoC mid-scanout, so smi_common needs both of its
+			 * powered larbs clocked while the panel scans out. Released,
+			 * like the rest, when mediatek-drm evicts the aperture.
 			 */
 			clocks = <&mmsys CLK_MM_SMI_COMMON>,
 				 <&mmsys CLK_MM_SMI_LARB0>,
+				 <&mmsys CLK_MM_SMI_LARB5>,
 				 <&mmsys CLK_MM_DISP_OVL0>,
 				 <&mmsys CLK_MM_DISP_OVL0_2L>,
 				 <&mmsys CLK_MM_DISP_OVL1_2L>,
