@@ -473,6 +473,10 @@ static const struct mtk_gate_regs infra2_cg_regs = {
 #define GATE_ICG0(_id, _name, _parent, _shift)				\
 	GATE_MTK(_id, _name, _parent, &infra0_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
 
+#define GATE_ICG0_FLAGS(_id, _name, _parent, _shift, _flags)		\
+	GATE_MTK_FLAGS(_id, _name, _parent, &infra0_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_setclr, _flags)
+
 #define GATE_ICG1(_id, _name, _parent, _shift)				\
 	GATE_MTK(_id, _name, _parent, &infra1_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
 
@@ -500,7 +504,13 @@ static const struct mtk_gate infra_clks[] = {
 	GATE_ICG0(CLK_INFRA_PMIC_CONN, "infra_pmic_conn", "pmicspi_sel", 3),
 	GATE_ICG0(CLK_INFRA_SCP, "infra_scp", "scp_sel", 4),
 	GATE_ICG0(CLK_INFRA_SEJ, "infra_sej", "axi_sel", 5),
-	GATE_ICG0(CLK_INFRA_APXGPT, "infra_apxgpt", "axi_sel", 6),
+	/*
+	 * Register clock of the APXGPT block behind the mediatek,mt6577-timer
+	 * clockevent/clocksource. timer-mediatek only enables the timer's
+	 * counting clock, so nothing else can hold this one.
+	 */
+	GATE_ICG0_FLAGS(CLK_INFRA_APXGPT, "infra_apxgpt", "axi_sel", 6,
+			CLK_IS_CRITICAL),
 	GATE_ICG0(CLK_INFRA_SEJ_13M, "infra_sej_13m", "clk26m", 7),
 	GATE_ICG0(CLK_INFRA_ICUSB, "infra_icusb", "usb20_sel", 8),
 	GATE_ICG0(CLK_INFRA_GCE, "infra_gce", "axi_sel", 9),
