@@ -24,15 +24,16 @@
 	chosen {
 		/*
 		 * The framebuffer below is addressed via "memory-region", not
-		 * its "reg": a simple-framebuffer sits under /chosen, which has
-		 * no "ranges", so on arm64 of_translate_one() cannot translate a
-		 * reg here (the empty-ranges pass-through is PowerPC-only) and
-		 * of_address_to_resource() fails, leaving simpledrm with no
-		 * memory resource (-EINVAL). Pointing at the fb_reserved region
-		 * instead takes simpledrm's preferred reserved-memory path and
-		 * skips reg translation entirely. #address-cells/#size-cells and
-		 * an (empty) ranges keep the U-Boot-written reg well-formed and
-		 * translatable too, so no stale reg trips a warning.
+		 * its "reg": a simple-framebuffer sits under /chosen, and a
+		 * node whose parent has no "ranges" is a non-translatable
+		 * boundary on arm64 (of_translate_one()'s pass-through for an
+		 * absent "ranges" is PowerPC-only). of_address_to_resource()
+		 * then fails and simpledrm gets no memory resource (-EINVAL).
+		 * Pointing at the fb_reserved region takes simpledrm's preferred
+		 * reserved-memory path and skips reg translation entirely. The
+		 * explicit #address-cells/#size-cells and an empty "ranges"
+		 * (a 1:1 identity map) additionally make the U-Boot-written reg
+		 * well-formed and translatable, so a stale reg trips no warning.
 		 */
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -58,12 +59,30 @@
 		framebuffer {
 			compatible = "simple-framebuffer";
 			memory-region = <&fb_reserved>;
+			/*
+			 * Every clock LK leaves running for the live scanout, so
+			 * clk_disable_unused() cannot gate any of them from under
+			 * it before mediatek-drm binds. This is the full mt6797
+			 * main display path (mt6797_mtk_ddp_main): OVL0 -> OVL_2L0
+			 * -> OVL_2L1 -> COLOR0 -> CCORR -> AAL0 -> GAMMA -> OD0 ->
+			 * DITHER0 -> RDMA0 -> UFOE -> DSI0, plus the SMI common and
+			 * larb0 that carry its EMI traffic. Missing the post-OVL
+			 * stages (COLOR..UFOE) let clk_disable_unused() stop an
+			 * engine mid-scanout and wedge the MM/SMI fabric.
+			 */
 			clocks = <&mmsys CLK_MM_SMI_COMMON>,
 				 <&mmsys CLK_MM_SMI_LARB0>,
 				 <&mmsys CLK_MM_DISP_OVL0>,
 				 <&mmsys CLK_MM_DISP_OVL0_2L>,
 				 <&mmsys CLK_MM_DISP_OVL1_2L>,
+				 <&mmsys CLK_MM_DISP_COLOR>,
+				 <&mmsys CLK_MM_DISP_CCORR>,
+				 <&mmsys CLK_MM_DISP_AAL>,
+				 <&mmsys CLK_MM_DISP_GAMMA>,
+				 <&mmsys CLK_MM_DISP_OD>,
+				 <&mmsys CLK_MM_DISP_DITHER>,
 				 <&mmsys CLK_MM_DISP_RDMA0>,
+				 <&mmsys CLK_MM_DISP_UFOE>,
 				 <&mmsys CLK_MM_DSI0_MM_CLOCK>,
 				 <&mmsys CLK_MM_DSI0_INTERFACE_CLOCK>;
 			power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
@@ -296,8 +315,13 @@
 		 * the handoff. LK always places it at 0x7dfb0000 (32320 KiB, up
 		 * to 0x7ff3ffff); the retained MT6797 LK also re-adds this as a
 		 * runtime mblock reservation, which harmlessly overlaps this
-		 * no-map node. Referenced by /chosen/framebuffer's
-		 * memory-region so simpledrm can map the live scanout buffer.
+		 * no-map node (of_reserved_mem_lookup() matches by node name, so
+		 * the two distinct names coexist). Referenced by
+		 * /chosen/framebuffer's memory-region so simpledrm maps the live
+		 * scanout buffer. This base is fixed to LK's; it must match the
+		 * runtime base U-Boot also writes into the (now unused) reg. If
+		 * LK ever relocates the framebuffer, U-Boot must patch this
+		 * node's reg to match.
 		 */
 		fb_reserved: framebuffer@7dfb0000 {
 			reg = <0 0x7dfb0000 0 0x1f90000>;
