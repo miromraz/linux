@@ -445,6 +445,7 @@ struct mtk_mmc_compatible {
 	u8 stop_dly_sel;
 	u8 pop_en_cnt;
 	bool enhance_rx;
+	bool set_latch_sel; /* set PB2 resp/CRC-status latch per timing (mt6797) */
 	bool support_64g;
 	bool use_internal_cd;
 	bool support_new_tx;
@@ -590,6 +591,7 @@ static const struct mtk_mmc_compatible mt6797_compat = {
 	.busy_check = false,
 	.stop_clk_fix = false,
 	.enhance_rx = false,
+	.set_latch_sel = true,
 	.support_64g = false,
 };
 
@@ -1020,6 +1022,36 @@ static void msdc_new_tx_setting(struct msdc_host *host)
 	writel(val, host->top_base + LOOP_TEST_CONTROL);
 }
 
+/*
+ * MT6797 has neither RX enhance nor runtime latch auto-calibration, so the
+ * command-response and write-CRC status latch-enable selects in PATCH_BIT2
+ * must be set for the active timing, exactly as the vendor autok_init_hs200()
+ * / autok_init_hs400() do (AUTOK_{CMD,CRC}_LATCH_EN_HS200_PORT0_VALUE = 3,
+ * HS400 = 5; the HS default is 2). Without this the latch stays at the HS
+ * value 2 that msdc_init_hw() programs, which is too early for the HS200
+ * 192 MHz clock: multi-block transfers complete but the response/CRC-status
+ * is mis-latched, so mmc_blk requeues them one physical block at a time and
+ * throughput collapses. Legacy/HS and the SD timings keep value 2.
+ */
+static void msdc_set_latch_sel(struct msdc_host *host, unsigned char timing)
+{
+	u32 sel;
+
+	switch (timing) {
+	case MMC_TIMING_MMC_HS200:
+		sel = 3;
+		break;
+	case MMC_TIMING_MMC_HS400:
+		sel = 5;
+		break;
+	default:
+		sel = 2;
+		break;
+	}
+	sdr_set_field(host->base + MSDC_PATCH_BIT2, MSDC_PB2_RESPSTSENSEL, sel);
+	sdr_set_field(host->base + MSDC_PATCH_BIT2, MSDC_PB2_CRCSTSENSEL, sel);
+}
+
 static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
 {
 	struct mmc_host *mmc = mmc_from_priv(host);
@@ -1111,6 +1143,8 @@ static void msdc_set_mclk(struct msdc_host *host, unsigned char timing, u32 hz)
 	mmc->actual_clock = sclk;
 	host->mclk = hz;
 	host->timing = timing;
+	if (host->dev_comp->set_latch_sel)
+		msdc_set_latch_sel(host, timing);
 	/* need because clk changed. */
 	msdc_set_timeout(host, host->timeout_ns, host->timeout_clks);
 	sdr_set_bits(host->base + MSDC_INTEN, flags);
