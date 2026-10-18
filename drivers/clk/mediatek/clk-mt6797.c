@@ -541,7 +541,13 @@ static const struct mtk_gate infra_clks[] = {
 	GATE_ICG1(CLK_INFRA_DISP_PWM, "infra_disp_pwm", "pwm_sel", 17),
 	GATE_ICG1(CLK_INFRA_AP_DMA, "infra_ap_dma", "axi_sel", 18),
 	GATE_ICG1(CLK_INFRA_DEVICE_APC, "infra_device_apc", "axi_sel", 20),
-	GATE_ICG1(CLK_INFRA_L2C_SRAM, "infra_l2c_sram", "mm_sel", 22),
+	/*
+	 * infra_l2c_sram clocks the CPU cluster's L2 cache-as-SRAM (MCUSYS);
+	 * it has no Linux driver consumer, so without this flag
+	 * clk_disable_unused() gates it and the SoC wedges immediately.
+	 */
+	GATE_ICG1_FLAGS(CLK_INFRA_L2C_SRAM, "infra_l2c_sram", "mm_sel", 22,
+			CLK_IS_CRITICAL),
 	GATE_ICG1(CLK_INFRA_CCIF_AP, "infra_ccif_ap", "axi_sel", 23),
 	GATE_ICG1(CLK_INFRA_AUDIO, "infra_audio", "axi_sel", 25),
 	GATE_ICG1(CLK_INFRA_CCIF_MD, "infra_ccif_md", "axi_sel", 26),
