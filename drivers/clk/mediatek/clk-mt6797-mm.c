@@ -29,6 +29,10 @@ static const struct mtk_gate_regs mm1_cg_regs = {
 #define GATE_MM1(_id, _name, _parent, _shift)	\
 	GATE_MTK(_id, _name, _parent, &mm1_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
 
+#define GATE_MM1_FLAGS(_id, _name, _parent, _shift, _flags)		\
+	GATE_MTK_FLAGS(_id, _name, _parent, &mm1_cg_regs, _shift,	\
+		       &mtk_clk_gate_ops_setclr, _flags)
+
 static const struct mtk_gate mm_clks[] = {
 	GATE_DUMMY(CLK_DUMMY, "mm_dummy"),
 	GATE_MM0(CLK_MM_SMI_COMMON, "mm_smi_common", "mm_sel", 0),
@@ -68,10 +72,19 @@ static const struct mtk_gate mm_clks[] = {
 	GATE_MM1(CLK_MM_DPI_MM_CLOCK, "mm_dpi_mm_clock", "mm_sel", 4),
 	GATE_MM1(CLK_MM_DPI_INTERFACE_CLOCK, "mm_dpi_interface_clock",
 		 "dpi0_sel", 5),
-	GATE_MM1(CLK_MM_LARB4_AXI_ASIF_MM_CLOCK, "mm_larb4_axi_asif_mm_clock",
-		 "mm_sel", 6),
-	GATE_MM1(CLK_MM_LARB4_AXI_ASIF_MJC_CLOCK, "mm_larb4_axi_asif_mjc_clock",
-		 "mjc_sel", 7),
+	/*
+	 * These two gates clock the larb4 AXI async bridge between the MM SMI
+	 * fabric and the MJC subsystem. The MJC power domain is kept off at
+	 * boot and has no mainline driver, so disabling the bridge drives an
+	 * AXI handshake into the powered-off MJC island and hangs the bus
+	 * (clk_disable_unused() wedges here with clk_ignore_unused dropped).
+	 * Leave them in the state the bootloader set; a future MJC driver that
+	 * powers the domain can still gate them.
+	 */
+	GATE_MM1_FLAGS(CLK_MM_LARB4_AXI_ASIF_MM_CLOCK, "mm_larb4_axi_asif_mm_clock",
+		       "mm_sel", 6, CLK_IGNORE_UNUSED),
+	GATE_MM1_FLAGS(CLK_MM_LARB4_AXI_ASIF_MJC_CLOCK, "mm_larb4_axi_asif_mjc_clock",
+		       "mjc_sel", 7, CLK_IGNORE_UNUSED),
 	GATE_MM1(CLK_MM_DISP_OVL0_MOUT_CLOCK, "mm_disp_ovl0_mout_clock",
 		 "mm_sel", 8),
 	GATE_MM1(CLK_MM_FAKE_ENG2, "mm_fake_eng2", "mm_sel", 9),
