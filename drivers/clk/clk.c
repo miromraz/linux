@@ -10,6 +10,7 @@
 #include <linux/clkdev.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
+#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/hashtable.h>
@@ -1523,6 +1524,29 @@ static int __init clk_ignore_unused_setup(char *__unused)
 }
 __setup("clk_ignore_unused", clk_ignore_unused_setup);
 
+/*
+ * TEST-ONLY (drop before mainline): walk the exact same post-order as the
+ * disable sweep and print every clock that will be disabled, BEFORE any HW
+ * disable runs. The first clock whose disable wedges the SoC is then the
+ * first name in this list, which is persisted to the non-cached ramoops
+ * console (readable from /sys/fs/pstore after the deadman reset) even though
+ * the wedge happens before the dcache for __log_buf is written back.
+ */
+static void __init clk_dbg_dump_unused_subtree(struct clk_core *core)
+{
+	struct clk_core *child;
+
+	hlist_for_each_entry(child, &core->children, child_node)
+		clk_dbg_dump_unused_subtree(child);
+
+	if (core->enable_count)
+		return;
+	if (core->flags & CLK_IGNORE_UNUSED)
+		return;
+	if (clk_core_is_enabled(core))
+		pr_emerg("CLKDBG order: %s\n", core->name);
+}
+
 static int __init clk_disable_unused(void)
 {
 	struct clk_core *core;
@@ -1543,6 +1567,15 @@ static int __init clk_disable_unused(void)
 	 * over clks.
 	 */
 	clk_prepare_lock();
+
+	/* TEST-ONLY: persist the full ordered candidate list first. */
+	pr_emerg("CLKDBG: ---- disable-unused order begins ----\n");
+	hlist_for_each_entry(core, &clk_root_list, child_node)
+		clk_dbg_dump_unused_subtree(core);
+	hlist_for_each_entry(core, &clk_orphan_list, child_node)
+		clk_dbg_dump_unused_subtree(core);
+	pr_emerg("CLKDBG: ---- disable-unused order ends ----\n");
+	mdelay(100);
 
 	hlist_for_each_entry(core, &clk_root_list, child_node)
 		clk_disable_unused_subtree(core);
