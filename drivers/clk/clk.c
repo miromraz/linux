@@ -1494,6 +1494,13 @@ static void __init clk_disable_unused_subtree(struct clk_core *core)
 	 * back to .disable
 	 */
 	if (clk_core_is_enabled(core)) {
+		/*
+		 * TEST-ONLY (drop before mainline): name each clock in the
+		 * printk ring (synchronous to __log_buf) right before its HW
+		 * disable, so the one whose disable wedges the SoC is recorded
+		 * even though its trace_clk_disable_complete never fires.
+		 */
+		pr_emerg("CLKDBG disable-unused: %s\n", core->name);
 		trace_clk_disable(core);
 		if (core->ops->disable_unused)
 			core->ops->disable_unused(core->hw);
