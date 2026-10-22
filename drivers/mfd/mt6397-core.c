@@ -145,6 +145,10 @@ static const struct resource mt6323_pwrc_resources[] = {
 	DEFINE_RES_MEM(MT6323_PWRC_BASE, MT6323_PWRC_SIZE),
 };
 
+static const struct resource mt6351_pwrc_resources[] = {
+	DEFINE_RES_MEM(MT6351_RTC_BASE, MT6351_RTC_SIZE),
+};
+
 static const struct mfd_cell mt6323_devs[] = {
 	{
 		.name = "mt6323-rtc",
@@ -259,6 +263,11 @@ static const struct mfd_cell mt6351_devs[] = {
 	}, {
 		.name = "mt6351-fuel-gauge",
 		.of_compatible = "mediatek,mt6351-fuel-gauge",
+	}, {
+		.name = "mt6351-pwrc",
+		.num_resources = ARRAY_SIZE(mt6351_pwrc_resources),
+		.resources = mt6351_pwrc_resources,
+		.of_compatible = "mediatek,mt6351-pwrc",
 	},
 };
 
