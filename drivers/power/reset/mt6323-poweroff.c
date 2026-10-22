@@ -20,6 +20,7 @@ struct mt6323_pwrc {
 	struct device *dev;
 	struct regmap *regmap;
 	u32 base;
+	u32 bbpu;
 };
 
 static int mt6323_do_pwroff(struct sys_off_data *data)
@@ -28,7 +29,7 @@ static int mt6323_do_pwroff(struct sys_off_data *data)
 	unsigned int val;
 	int ret;
 
-	regmap_write(pwrc->regmap, pwrc->base + RTC_BBPU, RTC_BBPU_KEY);
+	regmap_write(pwrc->regmap, pwrc->base + RTC_BBPU, pwrc->bbpu);
 	regmap_write(pwrc->regmap, pwrc->base + RTC_WRTGR_MT6323, 1);
 
 	ret = regmap_read_poll_timeout(pwrc->regmap,
@@ -65,6 +66,7 @@ static int mt6323_pwrc_probe(struct platform_device *pdev)
 	pwrc->base = res->start;
 	pwrc->regmap = mt6397_chip->regmap;
 	pwrc->dev = &pdev->dev;
+	pwrc->bbpu = (uintptr_t)of_device_get_match_data(&pdev->dev);
 
 	ret = devm_register_sys_off_handler(pwrc->dev,
 					    SYS_OFF_MODE_POWER_OFF,
@@ -78,7 +80,15 @@ static int mt6323_pwrc_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id mt6323_pwrc_dt_match[] = {
-	{ .compatible = "mediatek,mt6323-pwrc" },
+	{ .compatible = "mediatek,mt6323-pwrc", .data = (void *)RTC_BBPU_KEY },
+	/*
+	 * PWREN lets an armed RTC alarm raise BBPU and power the system back
+	 * on; AUTO is set along with it as the MT6351 vendor code does.
+	 */
+	{
+		.compatible = "mediatek,mt6351-pwrc",
+		.data = (void *)(RTC_BBPU_KEY | RTC_BBPU_AUTO | RTC_BBPU_PWREN),
+	},
 	{},
 };
 MODULE_DEVICE_TABLE(of, mt6323_pwrc_dt_match);
