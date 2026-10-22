@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/mediatek,mt6797-mcumixed.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6797 MCUMIXED clock controller
+
+maintainers:
+  - Miroslav Mraz <miroslav.mraz@techmania.cz>
+
+description:
+  The MCUMIXED block on the MediaTek MT6797 provides the per-cluster CPU
+  PLLs (ARMPLL for the little and big Cortex-A53 clusters and the CCI PLL)
+  together with the muxes that select each cluster's clock source between
+  the 26 MHz oscillator and its ARMPLL.
+
+  The Cortex-A72 ("big") cluster ARMPLL is also exposed here, even though it
+  is not in the MCUMIXED register map (it lives inside the iDVFS block and is
+  reachable only through secure-firmware SMC calls). Its clock mux, however,
+  is the B-cluster field of the same shared ARMPLLDIV register this block
+  owns, so modelling both in one controller keeps the read-modify-write of
+  that register serialised with the Cortex-A53 muxes and needs no extra reg
+  or phandle.
+
+  Scaling the Cortex-A72 ARMPLL therefore depends on the platform secure
+  firmware (ARM Trusted Firmware) implementing the MediaTek iDVFS SIP
+  calls. On an MT6797 whose firmware does not provide them the A72 ARMPLL
+  cannot be driven; the register-mapped Cortex-A53 and CCI clocks do not
+  need any firmware support.
+
+  The clock indices are defined in
+  include/dt-bindings/clock/mt6797-clk.h.
+
+properties:
+  compatible:
+    const: mediatek,mt6797-mcumixed
+
+  reg:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: 26 MHz crystal oscillator (clk26m)
+
+  clock-names:
+    items:
+      - const: clk26m
+
+  '#clock-cells':
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - clock-names
+  - '#clock-cells'
+
+additionalProperties: false
+
+examples:
+  - |
+    clock-controller@1001a000 {
+        compatible = "mediatek,mt6797-mcumixed";
+        reg = <0x1001a000 0x1000>;
+        clocks = <&clk26m>;
+        clock-names = "clk26m";
+        #clock-cells = <1>;
+    };
