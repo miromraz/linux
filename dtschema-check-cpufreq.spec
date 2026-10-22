@@ -32,12 +32,19 @@ log tail is visible in the build log and the full log ships in the package.
 set -o pipefail
 echo "=== dtschema version ==="
 dt-validate --version 2>&1 || true
-dt-doc-validate --help >/dev/null 2>&1 && echo "dt-doc-validate present"
 : > dtcheck.log
 rc=0
-for f in "%{SOURCE0}" "%{SOURCE1}" "%{SOURCE2}"; do
-    echo "########## dt-doc-validate $(basename "$f") ##########" | tee -a dtcheck.log
-    if ! dt-doc-validate "$f" >>dtcheck.log 2>&1; then
+# dt-doc-validate derives the schema base path from each file's $id, so the
+# file must live at a path whose tail matches the $id (schemas/<subdir>/<name>).
+mkdir -p clock interconnect regulator
+cp "%{SOURCE0}" clock/
+cp "%{SOURCE1}" interconnect/
+cp "%{SOURCE2}" regulator/
+for rel in "clock/mediatek,mt6797-mcumixed.yaml" \
+           "interconnect/mediatek,cci.yaml" \
+           "regulator/mediatek,mt6797-cpu-sram.yaml"; do
+    echo "########## dt-doc-validate $rel ##########" | tee -a dtcheck.log
+    if ! dt-doc-validate "$rel" >>dtcheck.log 2>&1; then
         rc=1
     fi
 done
@@ -61,5 +68,5 @@ install -D -m0644 dtcheck.log %{buildroot}%{_docdir}/%{name}/dtcheck.log
 %{_docdir}/%{name}/dtcheck.log
 
 %changelog
-* Thu Oct 23 2026 Miroslav Mraz <mraz.miro@seznam.cz> - 1-0
+* Fri Oct 23 2026 Miroslav Mraz <mraz.miro@seznam.cz> - 1-0
 - dt-doc-validate CI for the MT6797 cpufreq-series DT bindings.
