@@ -71,6 +71,7 @@ echo "### dt-doc-validate clean for all three series bindings"
 install -D -m0644 dtcheck.log %{buildroot}%{_docdir}/%{name}/dtcheck.log
 
 %files
+%dir %{_docdir}/%{name}
 %{_docdir}/%{name}/dtcheck.log
 
 %changelog
