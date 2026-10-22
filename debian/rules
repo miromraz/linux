@@ -1,0 +1,42 @@
+#!/usr/bin/make -f
+# SPDX-License-Identifier: GPL-2.0-only
+export DEB_RULES_REQUIRES_ROOT := no
+
+# pipefail so a failing make inside the | tee pipeline fails the build
+SHELL := /bin/bash
+.SHELLFLAGS := -o pipefail -ec
+
+# The three DT schema files the MT6797 cpufreq series touches.
+SCHEMA_FILES := Documentation/devicetree/bindings/clock/mediatek,mt6797-mcumixed.yaml \
+ Documentation/devicetree/bindings/interconnect/mediatek,cci.yaml \
+ Documentation/devicetree/bindings/regulator/mediatek,mt6797-cpu-sram.yaml
+
+%:
+	dh $@
+
+# dt_binding_check needs no kernel .config and no target toolchain.
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	@echo "=== tool versions ==="
+	-dtc --version
+	-yamllint --version
+	-python3 -c 'import dtschema, jsonschema; print("dtschema", dtschema.version.__version__)'
+	$(MAKE) ARCH=arm64 dt_binding_check \
+		DT_SCHEMA_FILES="$(SCHEMA_FILES)" 2>&1 | tee debian/dtcheck.log
+	@echo "=================== dt_binding_check log tail ==================="
+	@tail -n 80 debian/dtcheck.log
+	@echo "================================================================"
+	@if grep -Eiq "warning:|[^a-z]error[^a-z]|traceback|does not match|is not valid|not documented|undocumented|required property|not allowed|unevaluated|additional propert|is not one of|is too|does not conform" debian/dtcheck.log; then \
+		echo "### dt_binding_check reported issues on the series bindings -- failing build"; \
+		exit 1; \
+	fi
+	@echo "### dt_binding_check clean for the three series bindings"
+
+override_dh_auto_test:
+
+override_dh_auto_clean:
+
+override_dh_auto_install:
+	install -D -m0644 debian/dtcheck.log \
+		debian/dtschema-check-cpufreq-log/usr/share/doc/dtschema-check-cpufreq/dtcheck.log

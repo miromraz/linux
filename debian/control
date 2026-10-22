@@ -1,0 +1,20 @@
+Source: dtschema-check-cpufreq
+Section: devel
+Priority: optional
+Maintainer: Miroslav Mraz <mraz.miro@seznam.cz>
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 12),
+ bc, bison, flex, python3:native, rsync,
+ device-tree-compiler, yamllint,
+ python3-dtschema, python3-jsonschema, python3-ruamel.yaml,
+ swig, libyaml-dev, pkg-config
+Homepage: https://www.kernel.org/
+
+Package: dtschema-check-cpufreq-log
+Architecture: all
+Depends: ${misc:Depends}
+Description: dt_binding_check result for the MT6797 cpufreq-series DT bindings
+ Runs, at build time, dt_binding_check over the three DT schema files the
+ MT6797 cpufreq series touches (mediatek,mt6797-mcumixed, mediatek,cci,
+ mediatek,mt6797-cpu-sram) and fails the build if the checker reports any
+ issue. The captured checker log is shipped in this package.
