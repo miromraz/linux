@@ -52,8 +52,19 @@ static irqreturn_t mtk_rtc_irq_handler_thread(int irq, void *data)
 		irqen = irqsta & ~RTC_IRQ_EN_AL;
 		mutex_lock(&rtc->lock);
 		if (regmap_write(rtc->regmap, rtc->addr_base + RTC_IRQ_EN,
-				 irqen) == 0)
+				 irqen) == 0) {
+			/*
+			 * If the alarm fired while Linux is running, disarm the
+			 * boot loader's power-on time so it does not re-power the
+			 * device at the next poweroff (as the vendor IRQ handler
+			 * does). PWRON_ALARM is left for the boot loader.
+			 */
+			if (rtc->data->pwron_alarm)
+				regmap_update_bits(rtc->regmap,
+						   rtc->addr_base + RTC_PDN1,
+						   RTC_PDN1_PWRON_TIME, 0);
 			mtk_rtc_write_trigger(rtc);
+		}
 		mutex_unlock(&rtc->lock);
 
 		return IRQ_HANDLED;
@@ -178,6 +189,71 @@ err_exit:
 	return ret;
 }
 
+/*
+ * Power-on-from-off is not driven by the AL_* alarm the IRQ path uses: the
+ * boot loader (LK) reads a separate PWRON register bank at boot (PDN2
+ * YEA/MTH, SPAR0 SEC, SPAR1 MIN/HOU/DOM) and powers the device on when that
+ * time is reached. Arming means programming those fields and setting the
+ * RTC_PDN1_PWRON_TIME enable; disarming clears only that enable.
+ * RTC_PDN2_PWRON_ALARM is a "power-on alarm fired" status bit that LK sets
+ * at power-on (and mtk_rtc_read_alarm() reports as alm->pending), so it is
+ * never written here. Only chip variants whose data sets pwron_alarm share
+ * this register layout. The caller holds rtc->lock and issues
+ * mtk_rtc_write_trigger() to commit these writes.
+ */
+static int mtk_rtc_set_pwron_alarm(struct mt6397_rtc *rtc,
+				   struct rtc_time *tm, bool enable)
+{
+	u32 pdn1, pdn2, spar0, spar1;
+	int ret;
+
+	ret = regmap_read(rtc->regmap, rtc->addr_base + RTC_PDN1, &pdn1);
+	if (ret < 0)
+		return ret;
+
+	if (!enable) {
+		pdn1 &= ~RTC_PDN1_PWRON_TIME;
+		return regmap_write(rtc->regmap, rtc->addr_base + RTC_PDN1, pdn1);
+	}
+
+	ret = regmap_read(rtc->regmap, rtc->addr_base + RTC_PDN2, &pdn2);
+	if (ret < 0)
+		return ret;
+	ret = regmap_read(rtc->regmap, rtc->addr_base + RTC_SPAR0, &spar0);
+	if (ret < 0)
+		return ret;
+	ret = regmap_read(rtc->regmap, rtc->addr_base + RTC_SPAR1, &spar1);
+	if (ret < 0)
+		return ret;
+
+	pdn2 &= ~(RTC_PDN2_PWRON_YEA_MASK | RTC_PDN2_PWRON_MTH_MASK);
+	pdn2 |= (tm->tm_year << RTC_PDN2_PWRON_YEA_SHIFT) & RTC_PDN2_PWRON_YEA_MASK;
+	pdn2 |= (tm->tm_mon << RTC_PDN2_PWRON_MTH_SHIFT) & RTC_PDN2_PWRON_MTH_MASK;
+
+	spar0 &= ~RTC_SPAR0_PWRON_SEC_MASK;
+	spar0 |= (tm->tm_sec << RTC_SPAR0_PWRON_SEC_SHIFT) & RTC_SPAR0_PWRON_SEC_MASK;
+
+	spar1 &= ~(RTC_SPAR1_PWRON_MIN_MASK | RTC_SPAR1_PWRON_HOU_MASK |
+		   RTC_SPAR1_PWRON_DOM_MASK);
+	spar1 |= (tm->tm_min << RTC_SPAR1_PWRON_MIN_SHIFT) & RTC_SPAR1_PWRON_MIN_MASK;
+	spar1 |= (tm->tm_hour << RTC_SPAR1_PWRON_HOU_SHIFT) & RTC_SPAR1_PWRON_HOU_MASK;
+	spar1 |= (tm->tm_mday << RTC_SPAR1_PWRON_DOM_SHIFT) & RTC_SPAR1_PWRON_DOM_MASK;
+
+	pdn1 |= RTC_PDN1_PWRON_TIME;
+
+	ret = regmap_write(rtc->regmap, rtc->addr_base + RTC_PDN2, pdn2);
+	if (ret < 0)
+		return ret;
+	ret = regmap_write(rtc->regmap, rtc->addr_base + RTC_SPAR0, spar0);
+	if (ret < 0)
+		return ret;
+	ret = regmap_write(rtc->regmap, rtc->addr_base + RTC_SPAR1, spar1);
+	if (ret < 0)
+		return ret;
+
+	return regmap_write(rtc->regmap, rtc->addr_base + RTC_PDN1, pdn1);
+}
+
 static int mtk_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 {
 	struct rtc_time *tm = &alm->time;
@@ -226,6 +302,13 @@ static int mtk_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alm)
 		ret = regmap_update_bits(rtc->regmap,
 					 rtc->addr_base + RTC_IRQ_EN,
 					 RTC_IRQ_EN_ONESHOT_AL, 0);
+		if (ret < 0)
+			goto exit;
+	}
+
+	/* Mirror the alarm into the PWRON bank so it also wakes from off. */
+	if (rtc->data->pwron_alarm) {
+		ret = mtk_rtc_set_pwron_alarm(rtc, tm, alm->enabled);
 		if (ret < 0)
 			goto exit;
 	}
@@ -389,6 +472,7 @@ static const struct mtk_rtc_data mt6358_rtc_data = {
 
 static const struct mtk_rtc_data mt6397_rtc_data = {
 	.wrtgr = RTC_WRTGR_MT6397,
+	.pwron_alarm = true,
 };
 
 static const struct of_device_id mt6397_rtc_of_match[] = {

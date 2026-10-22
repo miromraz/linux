@@ -61,16 +61,40 @@
 #define RTC_PDN1               0x002c
 /* Boot-mode spare bits read by the boot loader (LK) after a warm reset. */
 #define RTC_PDN1_RECOVERY_MASK 0x0030
+#define RTC_PDN1_PWRON_TIME    BIT(7)
 #define RTC_PDN1_FASTBOOT      BIT(13)
 
 #define RTC_PDN2               0x002e
-#define RTC_PDN2_PWRON_ALARM   BIT(4)
+#define RTC_PDN2_PWRON_MTH_MASK        0x000f
+#define RTC_PDN2_PWRON_MTH_SHIFT       0
+#define RTC_PDN2_PWRON_ALARM           BIT(4)
+#define RTC_PDN2_PWRON_YEA_MASK        0x7f00
+#define RTC_PDN2_PWRON_YEA_SHIFT       8
+
+/*
+ * Power-on-from-off time lives in a spare register bank separate from the
+ * AL_* alarm the IRQ path uses: PDN2 holds YEA/MTH, SPAR0 the seconds and
+ * SPAR1 the MIN/HOU/DOM, committed via WRTGR like the time registers.
+ */
+#define RTC_SPAR0              0x0030
+#define RTC_SPAR0_PWRON_SEC_MASK       0x003f
+#define RTC_SPAR0_PWRON_SEC_SHIFT      0
+
+#define RTC_SPAR1              0x0032
+#define RTC_SPAR1_PWRON_MIN_MASK       0x003f
+#define RTC_SPAR1_PWRON_MIN_SHIFT      0
+#define RTC_SPAR1_PWRON_HOU_MASK       0x07c0
+#define RTC_SPAR1_PWRON_HOU_SHIFT      6
+#define RTC_SPAR1_PWRON_DOM_MASK       0xf800
+#define RTC_SPAR1_PWRON_DOM_SHIFT      11
 
 #define MTK_RTC_POLL_DELAY_US  10
 #define MTK_RTC_POLL_TIMEOUT   (jiffies_to_usecs(HZ))
 
 struct mtk_rtc_data {
 	u32                     wrtgr;
+	/* Program the PWRON bank so an alarm powers the device on from off. */
+	bool                    pwron_alarm;
 };
 
 struct mt6397_rtc {
