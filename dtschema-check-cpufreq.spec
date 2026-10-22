@@ -19,6 +19,9 @@ BuildRequires:  dtc
 Source0:        mediatek,mt6797-mcumixed.yaml
 Source1:        mediatek,cci.yaml
 Source2:        mediatek,mt6797-cpu-sram.yaml
+# The kernel's regulator core schema, only so mt6797-cpu-sram's
+# "$ref: regulator.yaml#" resolves in this standalone harness.
+Source3:        regulator.core.yaml
 
 %description
 Build-time dt-doc-validate of the three DT schema files touched by the MT6797
@@ -35,16 +38,19 @@ dt-validate --version 2>&1 || true
 : > dtcheck.log
 rc=0
 # dt-doc-validate derives the schema base path from each file's $id, so the
-# file must live at a path whose tail matches the $id (schemas/<subdir>/<name>).
-mkdir -p clock interconnect regulator
-cp "%{SOURCE0}" clock/
-cp "%{SOURCE1}" interconnect/
-cp "%{SOURCE2}" regulator/
+# files live under a bindings/ tree whose layout matches the $id
+# (schemas/<subdir>/<name>), and -u maps the schemas URL prefix to it so
+# "$ref: regulator.yaml#" resolves to the kernel core schema shipped here.
+mkdir -p bindings/clock bindings/interconnect bindings/regulator
+cp "%{SOURCE0}" bindings/clock/
+cp "%{SOURCE1}" bindings/interconnect/
+cp "%{SOURCE2}" bindings/regulator/
+cp "%{SOURCE3}" bindings/regulator/regulator.yaml
 for rel in "clock/mediatek,mt6797-mcumixed.yaml" \
            "interconnect/mediatek,cci.yaml" \
            "regulator/mediatek,mt6797-cpu-sram.yaml"; do
     echo "########## dt-doc-validate $rel ##########" | tee -a dtcheck.log
-    if ! dt-doc-validate "$rel" >>dtcheck.log 2>&1; then
+    if ! dt-doc-validate -u bindings "bindings/$rel" >>dtcheck.log 2>&1; then
         rc=1
     fi
 done
