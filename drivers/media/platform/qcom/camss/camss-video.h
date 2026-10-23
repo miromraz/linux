@@ -48,6 +48,8 @@ struct camss_video {
 	unsigned int line_based;
 	/* Full range BT.601 YCbCr from uncalibrated sensor RGB, linear */
 	bool raw_full_range_yuv;
+	/* Filled by the CPU (vb2-vmalloc), never a DMA target */
+	bool cpu_sink;
 	const struct camss_format_info *formats;
 	unsigned int nformats;
 };

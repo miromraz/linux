@@ -12,6 +12,9 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
+#include <linux/dma-buf.h>
+
+#include <kunit/static_stub.h>
 
 #include "camss.h"
 #include "camss-vfe.h"
@@ -276,6 +279,7 @@
 #define VFE_PIX_WM_C			4
 #define VFE_PIX_COMP_GRP		0
 #define		WM_CFG_LINE_MODE_EN	(1 << WM_CFG_EN)
+
 #define		PACKER_FMT_PLAIN_8_LSB_MSB_10	(0xe)
 #define VFE_BUS_WM_BURST_LIMIT(n)		(0x225c + (n) * 0x100)
 
@@ -624,7 +628,7 @@ static void vfe_pix_config(struct vfe_device *vfe, const struct vfe_pix_bayer *b
 		       vfe->base + VFE_MODULE_ZOOM_EN);
 }
 
-static void vfe_pix_wm_start(struct vfe_device *vfe, u8 wm, u32 width,
+static void vfe_pix_wm_config(struct vfe_device *vfe, u8 wm, u32 width,
 			     u32 height, u32 stride)
 {
 	writel_relaxed(0xf, vfe->base + VFE_BUS_WM_BURST_LIMIT(wm));
@@ -639,66 +643,202 @@ static void vfe_pix_wm_start(struct vfe_device *vfe, u8 wm, u32 width,
 	writel_relaxed(1, vfe->base + VFE_BUS_WM_FRAMEDROP_PATTERN(wm));
 	writel_relaxed(0, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PERIOD(wm));
 	writel_relaxed(1, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PATTERN(wm));
-	writel_relaxed(WM_CFG_LINE_MODE_EN, vfe->base + VFE_BUS_WM_CFG(wm));
+}
+
+/* Program a frame's plane addresses into the next slot of both WMs */
+static void vfe_pix_queue_addr(struct vfe_device *vfe, struct vfe_pix_staging *st,
+			       u8 idx)
+{
+	dma_addr_t y = st->frame[idx].dma;
+
+	writel_relaxed(y, vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_Y));
+	writel_relaxed(y + st->c_offset, vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_C));
+}
+
+/* A free staging frame for the hardware, else the drop frame. Locked. */
+static u8 vfe_pix_take_frame(struct vfe_pix_staging *st)
+{
+	unsigned long idx = find_first_bit(&st->free, VFE_PIX_STAGING_NUM);
+
+	if (idx >= VFE_PIX_STAGING_NUM)
+		return VFE_PIX_DROP;
+
+	clear_bit(idx, &st->free);
+	return idx;
+}
+
+/* DMA frame lifetime, KUnit static stub points */
+static void *vfe_pix_frame_alloc(struct vfe_device *vfe, size_t size, dma_addr_t *dma)
+{
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_frame_alloc, vfe, size, dma);
+
+	return dma_alloc_noncoherent(vfe->camss->dev, size, dma, DMA_FROM_DEVICE,
+				     GFP_KERNEL);
+}
+
+static void vfe_pix_frame_free(struct vfe_device *vfe, size_t size,
+			       struct vfe_pix_frame *f)
+{
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_frame_free, vfe, size, f);
+
+	dma_free_noncoherent(vfe->camss->dev, size, f->cpu, f->dma, DMA_FROM_DEVICE);
 }
 
 /*
- * Queue the next frame's plane addresses. A NULL buffer targets the scratch
- * area, so the write masters never hold the address of a buffer that has
- * been, or will be, returned to vb2 before the hardware is done with it.
- * Called with output_lock held.
+ * vfe_pix_release_frames - Free the DMA frames, or abandon them
+ * @quarantine: the bus was not confirmed idle; the hardware may still
+ *              write to any of them, so none may ever be reused or freed
  */
-static void vfe_pix_queue_addr(struct vfe_device *vfe, struct vfe_line *line,
-			       struct camss_buffer *buf)
+static void vfe_pix_release_frames(struct vfe_device *vfe, struct vfe_pix_staging *st,
+				   bool quarantine)
 {
-	struct vfe_output *output = &line->output;
-	const struct v4l2_pix_format_mplane *pix = &line->video_out.active_fmt.fmt.pix_mp;
-	dma_addr_t y, c;
+	unsigned int i;
 
-	if (buf) {
-		y = buf->addr[0];
-		c = buf->addr[1];
-	} else {
-		y = output->scratch_dma;
-		c = y + pix->plane_fmt[0].bytesperline * pix->height;
+	for (i = 0; i < ARRAY_SIZE(st->frame); i++) {
+		if (!st->frame[i].cpu)
+			continue;
+		if (quarantine)
+			vfe->quarantined += st->size;
+		else
+			vfe_pix_frame_free(vfe, st->size, &st->frame[i]);
+		st->frame[i].cpu = NULL;
 	}
-
-	writel_relaxed(y, vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_Y));
-	writel_relaxed(c, vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_C));
 }
 
-static void vfe_pix_free_scratch(struct vfe_device *vfe, struct vfe_output *output)
+/*
+ * vfe_pix_copy - Copy a completed staging frame into a vb2 buffer
+ *
+ * The PIX video node uses vb2-vmalloc: its buffers are CPU memory with no
+ * device mapping. MMAP buffers need no cache maintenance; an imported
+ * DMA-BUF is written through its vmap inside the exporter's CPU write
+ * access window. The staging frame is synced for the CPU before reading.
+ */
+static int vfe_pix_copy(struct vfe_device *vfe, struct vfe_pix_staging *st,
+			struct vfe_pix_frame *f, struct camss_buffer *buf)
 {
-	if (!output->scratch_cpu)
-		return;
+	struct vb2_buffer *vb = &buf->vb.vb2_buf;
+	struct dma_buf *dbuf = NULL;
+	void *dst;
+	int ret;
 
-	dma_free_coherent(vfe->camss->dev, output->scratch_size,
-			  output->scratch_cpu, output->scratch_dma);
-	output->scratch_cpu = NULL;
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_copy, vfe, st, f, buf);
+
+	dma_sync_single_for_cpu(vfe->camss->dev, f->dma, st->size, DMA_FROM_DEVICE);
+
+	if (vb->memory == VB2_MEMORY_DMABUF) {
+		dbuf = vb->planes[0].dbuf;
+		ret = dma_buf_begin_cpu_access(dbuf, DMA_TO_DEVICE);
+		if (ret)
+			return ret;
+	}
+
+	dst = vb2_plane_vaddr(vb, 0);
+	if (dst)
+		memcpy(dst, f->cpu, st->size);
+
+	if (dbuf) {
+		ret = dma_buf_end_cpu_access(dbuf, DMA_TO_DEVICE);
+		if (ret)
+			return ret;
+	}
+
+	return dst ? 0 : -ENOMEM;
+}
+
+/* Give a copied staging frame back to the device. A KUnit stub point. */
+static void vfe_pix_frame_to_device(struct vfe_device *vfe, struct vfe_pix_staging *st,
+				    struct vfe_pix_frame *f)
+{
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_frame_to_device, vfe, st, f);
+
+	dma_sync_single_for_device(vfe->camss->dev, f->dma, st->size, DMA_FROM_DEVICE);
+}
+
+/* vb2 completion, a KUnit static stub point */
+static void vfe_pix_return_buf(struct camss_buffer *buf, enum vb2_buffer_state state)
+{
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_return_buf, buf, state);
+
+	vb2_buffer_done(&buf->vb.vb2_buf, state);
+}
+
+/*
+ * vfe_pix_copy_work - Deliver completed frames, oldest first
+ *
+ * Each frame goes to the oldest queued vb2 buffer, or is dropped if none
+ * is queued. Only then does the staging frame become available to the
+ * hardware again.
+ */
+static void vfe_pix_copy_work(struct work_struct *work)
+{
+	struct vfe_pix_staging *st = container_of(work, struct vfe_pix_staging, copy_work);
+	struct vfe_output *output = container_of(st, struct vfe_output, pix);
+	struct vfe_line *line = container_of(output, struct vfe_line, output);
+	struct vfe_device *vfe = to_vfe(line);
+	struct camss_buffer *buf;
+	struct vfe_pix_frame *f;
+	unsigned long flags;
+	u8 idx;
+	int ret;
+
+	for (;;) {
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		if (output->state != VFE_OUTPUT_ON || !st->nready) {
+			spin_unlock_irqrestore(&vfe->output_lock, flags);
+			return;
+		}
+		idx = st->ready[0];
+		memmove(&st->ready[0], &st->ready[1], --st->nready);
+		buf = vfe_buf_get_pending(output);
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+		f = &st->frame[idx];
+		if (buf) {
+			ret = vfe_pix_copy(vfe, st, f, buf);
+			buf->vb.vb2_buf.timestamp = f->timestamp;
+			buf->vb.sequence = f->sequence;
+			vfe_pix_return_buf(buf, ret || f->error ? VB2_BUF_STATE_ERROR :
+							   VB2_BUF_STATE_DONE);
+		} else {
+			dev_dbg_ratelimited(vfe->camss->dev,
+					    "VFE%u PIX: frame %u had no buffer\n",
+					    vfe->id, f->sequence);
+		}
+
+		vfe_pix_frame_to_device(vfe, st, f);
+
+		spin_lock_irqsave(&vfe->output_lock, flags);
+		set_bit(idx, &st->free);
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+	}
 }
 
 /*
  * vfe_pix_enable - Configure and arm the PIX path
  *
  * Runs before the CSID IPP and the sensor start (the video node starts the
- * pipeline from the VFE upstream), so all writes land before the first SOF.
+ * pipeline from the VFE upstream); CSID port 3 and VFE line exclusivity keep
+ * the IPP of this pipeline the only pixel source, so all writes land before
+ * the first SOF.
  */
 static int vfe_pix_enable(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
 	struct vfe_output *output = &line->output;
+	struct vfe_pix_staging *st = &output->pix;
 	const struct v4l2_pix_format_mplane *pix = &line->video_out.active_fmt.fmt.pix_mp;
 	const struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
 	const struct v4l2_mbus_framefmt *src = &line->fmt[MSM_VFE_PAD_SRC];
 	const struct vfe_pix_bayer *bayer = vfe_pix_find_bayer(sink->code);
+	struct vfe_pix_frame frame[VFE_PIX_STAGING_NUM + 1] = {};
 	u32 w = sink->width, h = sink->height;
 	u32 bpl = pix->plane_fmt[0].bytesperline;
 	unsigned long flags;
 	unsigned int i;
-	void *cpu;
+	size_t size;
 	int ret;
 
-	/* Everything the write masters touch must fit the vb2 plane */
+	/* The copy fills exactly this much of the vb2 plane */
 	if (!bayer || src->width != w || src->height != h ||
 	    pix->pixelformat != V4L2_PIX_FMT_NV12 || pix->num_planes != 1 ||
 	    pix->width != w || pix->height != h || w % 16 || h % 2 ||
@@ -710,11 +850,16 @@ static int vfe_pix_enable(struct vfe_line *line)
 		return -EINVAL;
 	}
 
-	output->scratch_size = (size_t)bpl * h * 3 / 2;
-	cpu = dma_alloc_coherent(vfe->camss->dev, output->scratch_size,
-				 &output->scratch_dma, GFP_KERNEL);
-	if (!cpu)
-		return -ENOMEM;
+	size = (size_t)bpl * h * 3 / 2;
+	for (i = 0; i < ARRAY_SIZE(frame); i++) {
+		frame[i].cpu = vfe_pix_frame_alloc(vfe, size, &frame[i].dma);
+		if (!frame[i].cpu) {
+			ret = -ENOMEM;
+			goto error_free;
+		}
+	}
+
+	INIT_WORK(&st->copy_work, vfe_pix_copy_work);
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
@@ -727,7 +872,12 @@ static int vfe_pix_enable(struct vfe_line *line)
 		goto error_free;
 	}
 
-	output->scratch_cpu = cpu;
+	memcpy(st->frame, frame, sizeof(frame));
+	st->size = size;
+	st->c_offset = bpl * h;
+	st->free = GENMASK(VFE_PIX_STAGING_NUM - 1, 0);
+	st->nready = 0;
+	st->frame_error = false;
 	output->wm_num = 2;
 	output->wm_idx[0] = VFE_PIX_WM_Y;
 	output->wm_idx[1] = VFE_PIX_WM_C;
@@ -735,22 +885,26 @@ static int vfe_pix_enable(struct vfe_line *line)
 	vfe->wm_output_map[VFE_PIX_WM_C] = line->id;
 	output->state = VFE_OUTPUT_ON;
 	output->sequence = 0;
-	output->frame_error = false;
 	output->wait_reg_update = 0;
 
 	vfe_pix_config(vfe, bayer, w, h);
 
 	vfe_bus_common_init(vfe);
-	vfe_pix_wm_start(vfe, VFE_PIX_WM_Y, w, h, bpl);
-	vfe_pix_wm_start(vfe, VFE_PIX_WM_C, w, h / 2, bpl);
+	vfe_pix_wm_config(vfe, VFE_PIX_WM_Y, w, h, bpl);
+	vfe_pix_wm_config(vfe, VFE_PIX_WM_C, w, h / 2, bpl);
+
+	/* Two frames' addresses in flight, both driver owned */
+	for (i = 0; i < 2; i++) {
+		st->hw[i] = vfe_pix_take_frame(st);
+		vfe_pix_queue_addr(vfe, st, st->hw[i]);
+	}
+
+	/* Arm only once both address slots of both planes are valid */
 	writel_relaxed(BIT(VFE_PIX_WM_Y) | BIT(VFE_PIX_WM_C),
 		       vfe->base + VFE_BUS_COMP_MASK(VFE_PIX_COMP_GRP));
-
-	/* Two frames' addresses in flight; scratch where nothing is queued */
-	for (i = 0; i < 2; i++) {
-		output->buf[i] = vfe_buf_get_pending(output);
-		vfe_pix_queue_addr(vfe, line, output->buf[i]);
-	}
+	wmb();
+	writel_relaxed(WM_CFG_LINE_MODE_EN, vfe->base + VFE_BUS_WM_CFG(VFE_PIX_WM_Y));
+	writel_relaxed(WM_CFG_LINE_MODE_EN, vfe->base + VFE_BUS_WM_CFG(VFE_PIX_WM_C));
 
 	vfe_reg_update(vfe, line->id);
 
@@ -759,54 +913,53 @@ static int vfe_pix_enable(struct vfe_line *line)
 	return 0;
 
 error_free:
-	dma_free_coherent(vfe->camss->dev, output->scratch_size, cpu,
-			  output->scratch_dma);
+	/* never handed to the hardware */
+	while (i--)
+		vfe_pix_frame_free(vfe, size, &frame[i]);
 	return ret;
 }
 
 /*
  * vfe_pix_buf_done - Composite done: both planes of the head frame landed
  *
- * Exactly one completion per frame. A frame that went to scratch is
- * counted in the sequence but returns nothing.
+ * Exactly one completion per frame. A staging frame goes to the copy
+ * worker; the drop frame is only counted. The next slot gets a free staging
+ * frame, or the drop frame while stopping or when all are being copied.
  */
 static void vfe_pix_buf_done(struct vfe_device *vfe)
 {
-	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
-	struct vfe_output *output = &line->output;
-	enum vb2_buffer_state state;
-	struct camss_buffer *done;
+	struct vfe_output *output = &vfe->line[VFE_LINE_PIX].output;
+	struct vfe_pix_staging *st = &output->pix;
 	unsigned long flags;
 	u64 ts = ktime_get_ns();
-	u32 seq;
+	u8 head;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
-	if (output->state != VFE_OUTPUT_ON) {
+	if (output->state != VFE_OUTPUT_ON &&
+	    output->state != VFE_OUTPUT_STOPPING) {
 		spin_unlock_irqrestore(&vfe->output_lock, flags);
 		return;
 	}
 
-	done = output->buf[0];
-	state = output->frame_error ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE;
-	output->frame_error = false;
-	seq = output->sequence++;
+	head = st->hw[0];
+	if (head != VFE_PIX_DROP && output->state == VFE_OUTPUT_ON) {
+		st->frame[head].sequence = output->sequence;
+		st->frame[head].timestamp = ts;
+		st->frame[head].error = st->frame_error;
+		st->ready[st->nready++] = head;
+		/* under the lock: vfe_pix_disable() cancels after STOPPING */
+		queue_work(system_highpri_wq, &st->copy_work);
+	}
+	st->frame_error = false;
+	output->sequence++;
 
-	output->buf[0] = output->buf[1];
-	output->buf[1] = vfe_buf_get_pending(output);
-	vfe_pix_queue_addr(vfe, line, output->buf[1]);
+	st->hw[0] = st->hw[1];
+	st->hw[1] = output->state == VFE_OUTPUT_ON ? vfe_pix_take_frame(st) :
+						     VFE_PIX_DROP;
+	vfe_pix_queue_addr(vfe, st, st->hw[1]);
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
-
-	if (!done) {
-		dev_dbg_ratelimited(vfe->camss->dev,
-				    "VFE%u PIX: frame %u had no buffer\n", vfe->id, seq);
-		return;
-	}
-
-	done->vb.vb2_buf.timestamp = ts;
-	done->vb.sequence = seq;
-	vb2_buffer_done(&done->vb.vb2_buf, state);
 }
 
 static void vfe_pix_error(struct vfe_device *vfe, u32 status1, u32 bus_status0)
@@ -816,7 +969,7 @@ static void vfe_pix_error(struct vfe_device *vfe, u32 status1, u32 bus_status0)
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	if (output->state == VFE_OUTPUT_ON)
-		output->frame_error = true;
+		output->pix.frame_error = true;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	dev_err_ratelimited(vfe->camss->dev,
@@ -964,6 +1117,28 @@ static int vfe_enable(struct vfe_line *line)
 
 	mutex_lock(&vfe->stream_lock);
 
+	/*
+	 * A global reset is the only stop this backend has and it takes down
+	 * every line, so with the pixel path enabled PIX owns the VFE alone.
+	 * Reserved here, under stream_lock, in either start order.
+	 */
+	if (vfe_line_is_pix(&vfe->line[VFE_LINE_PIX])) {
+		ret = 0;
+		if (vfe->wedged)
+			ret = -EIO;
+		else if (vfe_line_is_pix(line) ? vfe->stream_count : vfe->pix_active)
+			ret = -EBUSY;
+		if (ret) {
+			mutex_unlock(&vfe->stream_lock);
+			dev_err(vfe->camss->dev, "VFE%u: %s\n", vfe->id,
+				ret == -EIO ? "wedged, power cycle required" :
+				"PIX and RDI cannot stream together");
+			return ret;
+		}
+		if (vfe_line_is_pix(line))
+			vfe->pix_active = true;
+	}
+
 	if (!vfe->stream_count)
 		vfe_enable_irq_common(vfe);
 
@@ -973,8 +1148,13 @@ static int vfe_enable(struct vfe_line *line)
 
 	if (vfe_line_is_pix(line)) {
 		ret = vfe_pix_enable(line);
-		if (ret < 0)
-			goto error_get_output;
+		if (ret < 0) {
+			mutex_lock(&vfe->stream_lock);
+			vfe->pix_active = false;
+			vfe->stream_count--;
+			mutex_unlock(&vfe->stream_lock);
+			return ret;
+		}
 
 		vfe->was_streaming = 1;
 
@@ -1095,41 +1275,99 @@ out_unlock:
 }
 
 /*
- * vfe_disable_170 - Disable streaming on a VFE line
+ * vfe_pix_reset - Global reset, the only stop this backend has
  *
- * For PIX, stop programming addresses first; vfe_disable() then disarms the
- * write masters and resets the VFE. The scratch target is only released once
- * that reset confirmed the bus is idle.
+ * The reset acknowledge normally arrives as an IRQ. If it times out, take
+ * the status away from the ISR and look again: a fresh RESET_ACK in
+ * STATUS_0 means the IRQ was lost, not the reset. Anything else is an
+ * unconfirmed reset.
  */
-static int vfe_disable_170(struct vfe_line *line)
+static int vfe_pix_reset(struct vfe_device *vfe)
+{
+	int ret;
+
+	/* no stale acknowledge may stand in for this reset */
+	writel_relaxed(STATUS_0_RESET_ACK, vfe->base + VFE_IRQ_CLEAR_0);
+	writel(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
+
+	ret = vfe_reset(vfe);
+	if (!ret)
+		return 0;
+
+	disable_irq(vfe->irq);
+	if (completion_done(&vfe->reset_complete) ||
+	    readl(vfe->base + VFE_IRQ_STATUS_0) & STATUS_0_RESET_ACK) {
+		writel_relaxed(STATUS_0_RESET_ACK, vfe->base + VFE_IRQ_CLEAR_0);
+		writel(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
+		dev_warn(vfe->camss->dev, "VFE%u: reset acknowledged without IRQ\n",
+			 vfe->id);
+		ret = 0;
+	}
+	enable_irq(vfe->irq);
+
+	return ret;
+}
+
+/*
+ * vfe_pix_disable - Stop the PIX line
+ *
+ * Once STOPPING is set under output_lock no IRQ queues copy work, so the
+ * cancel below leaves none behind. vb2 buffers are never DMA targets (the
+ * node uses vb2-vmalloc), so they can always be returned. The
+ * driver frames can be freed only once a reset confirmed the bus idle;
+ * otherwise they are abandoned for good and the VFE refuses to stream until
+ * a power-up reset is acknowledged.
+ */
+static int vfe_pix_disable(struct vfe_line *line)
 {
 	struct vfe_device *vfe = to_vfe(line);
 	struct vfe_output *output = &line->output;
+	struct vfe_pix_staging *st = &output->pix;
 	unsigned long flags;
 	int ret;
-
-	if (!vfe_line_is_pix(line))
-		return vfe_disable(line);
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	output->state = VFE_OUTPUT_STOPPING;
 	writel_relaxed(0, vfe->base + VFE_BUS_COMP_MASK(VFE_PIX_COMP_GRP));
 	writel_relaxed(0, vfe->base + VFE_CAMIF_CFG);
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_PIX_WM_Y));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_PIX_WM_C));
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
-	ret = vfe_disable(line);
-	if (ret) {
-		/* ponytail: leaked on purpose, the bus may still write to it */
-		dev_err(vfe->camss->dev,
-			"VFE%u PIX: reset failed, keeping %zu byte scratch buffer\n",
-			vfe->id, output->scratch_size);
-		output->scratch_cpu = NULL;
-		return ret;
-	}
+	/* a copy in progress completes its vb2 buffer; no new ones start */
+	cancel_work_sync(&st->copy_work);
 
-	vfe_pix_free_scratch(vfe, output);
+	ret = vfe_pix_reset(vfe);
 
-	return 0;
+	spin_lock_irqsave(&vfe->output_lock, flags);
+	output->state = VFE_OUTPUT_IDLE;
+	st->nready = 0;
+	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	vfe_pix_release_frames(vfe, st, ret);
+	vfe_put_output(line);
+
+	mutex_lock(&vfe->stream_lock);
+	if (ret)
+		vfe->wedged = true;
+	vfe->pix_active = false;
+	vfe->stream_count--;
+	mutex_unlock(&vfe->stream_lock);
+
+	if (ret)
+		dev_crit(vfe->camss->dev,
+			 "VFE%u PIX: reset not confirmed, %zu bytes of DMA frames abandoned, VFE disabled until power cycle\n",
+			 vfe->id, vfe->quarantined);
+
+	return ret;
+}
+
+static int vfe_disable_170(struct vfe_line *line)
+{
+	if (vfe_line_is_pix(line))
+		return vfe_pix_disable(line);
+
+	return vfe_disable(line);
 }
 
 static const struct vfe_isr_ops vfe_isr_ops_170 = {
@@ -1170,3 +1408,7 @@ const struct vfe_hw_ops vfe_ops_170 = {
 	.vfe_wm_stop = vfe_wm_stop,
 	.vfe_wm_update = vfe_wm_update,
 };
+
+#if IS_ENABLED(CONFIG_VIDEO_QCOM_CAMSS_KUNIT_TEST)
+#include "camss-vfe-17x-test.c"
+#endif

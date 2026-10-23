@@ -6,4 +6,13 @@ config VIDEO_QCOM_CAMSS
 	select MEDIA_CONTROLLER
 	select VIDEO_V4L2_SUBDEV_API
 	select VIDEOBUF2_DMA_SG
+	select VIDEOBUF2_VMALLOC
 	select V4L2_FWNODE
+
+config VIDEO_QCOM_CAMSS_KUNIT_TEST
+	bool "KUnit tests for the Qualcomm CAMSS lifecycle" if !KUNIT_ALL_TESTS
+	depends on VIDEO_QCOM_CAMSS=y && KUNIT=y
+	default KUNIT_ALL_TESTS
+	help
+	  Tests for the Titan 170 pixel path lifecycle and the video node
+	  format and start unwind helpers, against faked hardware.

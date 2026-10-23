@@ -14,6 +14,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mc.h>
 #include <media/videobuf2-dma-sg.h>
+#include <media/videobuf2-vmalloc.h>
 
 #include "camss-video.h"
 #include "camss.h"
@@ -23,6 +24,9 @@
 #define CAMSS_FRAME_MIN_HEIGHT		1
 #define CAMSS_FRAME_MAX_HEIGHT_RDI	8191
 #define CAMSS_FRAME_MAX_HEIGHT_PIX	4096
+
+/* VFE line, CSID, CSIPHY, then at most a bridge or mux chain to the sensor */
+#define CAMSS_VIDEO_MAX_SUBDEVS		8
 
 /* -----------------------------------------------------------------------------
  * Helper functions
@@ -157,6 +161,10 @@ static int video_buf_init(struct vb2_buffer *vb)
 	struct sg_table *sgt;
 	unsigned int i;
 
+	/* CPU-only buffers have no device address */
+	if (video->cpu_sink)
+		return 0;
+
 	for (i = 0; i < format->num_planes; i++) {
 		sgt = vb2_dma_sg_plane_desc(vb, i);
 		if (!sgt)
@@ -249,13 +257,46 @@ static int video_prepare_streaming(struct vb2_queue *q)
 	return ret;
 }
 
+/*
+ * camss_video_start_subdevs - Start a pipeline, unwinding on failure
+ * @sd: subdevs from the video node upstream
+ * @n: number of subdevs
+ *
+ * Start downstream first. If one fails, stop the ones already started,
+ * upstream first, so that each releases its hardware (and, for the VFE,
+ * its DMA targets) before the caller returns the buffers.
+ *
+ * Return 0 on success or the error of the failing subdev
+ */
+static int camss_video_start_subdevs(struct v4l2_subdev **sd, unsigned int n)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < n; i++) {
+		ret = v4l2_subdev_call(sd[i], video, s_stream, 1);
+		if (ret < 0 && ret != -ENOIOCTLCMD)
+			goto unwind;
+	}
+
+	return 0;
+
+unwind:
+	while (i--)
+		v4l2_subdev_call(sd[i], video, s_stream, 0);
+
+	return ret;
+}
+
 static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct camss_video *video = vb2_get_drv_priv(q);
+	struct v4l2_subdev *sd[CAMSS_VIDEO_MAX_SUBDEVS];
 	struct video_device *vdev = &video->vdev;
 	struct media_entity *entity;
 	struct media_pad *pad;
 	struct v4l2_subdev *subdev;
+	unsigned int n = 0;
 	int ret;
 
 	ret = video_device_pipeline_alloc_start(vdev);
@@ -281,9 +322,11 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 		entity = pad->entity;
 		subdev = media_entity_to_v4l2_subdev(entity);
 
-		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
-		if (ret < 0 && ret != -ENOIOCTLCMD)
+		if (n == ARRAY_SIZE(sd)) {
+			ret = -EPIPE;
 			goto error;
+		}
+		sd[n++] = subdev;
 
 		/*
 		 * Stop at the first external subdev: it starts its own
@@ -292,6 +335,10 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 		if (!camss_is_own_subdev(video->camss, subdev))
 			break;
 	}
+
+	ret = camss_video_start_subdevs(sd, n);
+	if (ret < 0)
+		goto error;
 
 	return 0;
 
@@ -479,6 +526,13 @@ static int video_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
 	return 0;
 }
 
+/* Memory lines of plane @i for an image of CAMSS_FRAME_MAX_HEIGHT_PIX lines */
+static u32 video_max_plane_lines(const struct camss_format_info *fi, unsigned int i)
+{
+	return CAMSS_FRAME_MAX_HEIGHT_PIX / fi->vsub[i].numerator *
+	       fi->vsub[i].denominator;
+}
+
 static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 {
 	unsigned int alignment = video->bpl_alignment;
@@ -493,16 +547,6 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 
 	pix_mp = &f->fmt.pix_mp;
 
-	if (video->line_based)
-		for (i = 0; i < pix_mp->num_planes && i < 3; i++) {
-			p = &pix_mp->plane_fmt[i];
-			bytesperline[i] = clamp_t(u32, p->bytesperline,
-						  1, 65528);
-			sizeimage[i] = clamp_t(u32, p->sizeimage,
-					       bytesperline[i],
-					       bytesperline[i] * CAMSS_FRAME_MAX_HEIGHT_PIX);
-		}
-
 	for (j = 0; j < video->nformats; j++)
 		if (pix_mp->pixelformat == video->formats[j].pixelformat)
 			break;
@@ -511,6 +555,22 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 		j = 0; /* default format */
 
 	fi = &video->formats[j];
+
+	/*
+	 * Line based outputs are limited in image height; a plane holds
+	 * that many lines scaled by its vertical subsampling (NV12: 3/2).
+	 */
+	if (video->line_based)
+		for (i = 0; i < pix_mp->num_planes && i < 3; i++) {
+			p = &pix_mp->plane_fmt[i];
+			bytesperline[i] = clamp_t(u32, p->bytesperline,
+						  1, 65528);
+			sizeimage[i] = clamp_t(u32, p->sizeimage,
+					       bytesperline[i],
+					       bytesperline[i] *
+					       video_max_plane_lines(fi, i));
+		}
+
 	width = pix_mp->width;
 	height = pix_mp->height;
 
@@ -521,7 +581,9 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 
 	pix_mp->pixelformat = fi->pixelformat;
 	pix_mp->width = clamp_t(u32, width, 1, CAMSS_FRAME_MAX_WIDTH);
-	pix_mp->height = clamp_t(u32, height, 1, CAMSS_FRAME_MAX_HEIGHT_RDI);
+	pix_mp->height = clamp_t(u32, height, 1, video->line_based ?
+				 CAMSS_FRAME_MAX_HEIGHT_PIX :
+				 CAMSS_FRAME_MAX_HEIGHT_RDI);
 	pix_mp->num_planes = fi->planes;
 	for (i = 0; i < pix_mp->num_planes; i++) {
 		bpl = pix_mp->width / fi->hsub[i].numerator *
@@ -554,7 +616,8 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 						  1, 65528);
 			p->sizeimage = clamp_t(u32, p->sizeimage,
 					       p->bytesperline,
-					       p->bytesperline * CAMSS_FRAME_MAX_HEIGHT_PIX);
+					       p->bytesperline *
+					       video_max_plane_lines(fi, i));
 			lines = p->sizeimage / p->bytesperline;
 
 			if (p->bytesperline < bytesperline[i])
@@ -725,7 +788,7 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 
 	q = &video->vb2_q;
 	q->drv_priv = video;
-	q->mem_ops = &vb2_dma_sg_memops;
+	q->mem_ops = video->cpu_sink ? &vb2_vmalloc_memops : &vb2_dma_sg_memops;
 	q->ops = &msm_video_vb2_q_ops;
 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	q->io_modes = VB2_DMABUF | VB2_MMAP | VB2_READ;
@@ -798,3 +861,7 @@ void msm_video_unregister(struct camss_video *video)
 	vb2_video_unregister_device(&video->vdev);
 	atomic_dec(&video->camss->ref_count);
 }
+
+#if IS_ENABLED(CONFIG_VIDEO_QCOM_CAMSS_KUNIT_TEST)
+#include "camss-video-test.c"
+#endif

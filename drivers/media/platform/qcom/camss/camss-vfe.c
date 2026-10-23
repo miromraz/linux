@@ -651,8 +651,8 @@ int vfe_queue_buffer_v2(struct camss_video *vid,
 
 	if (vfe_line_is_pix(line)) {
 		/*
-		 * Both PIX address slots are always programmed (scratch when
-		 * empty); new buffers enter at the next frame boundary.
+		 * PIX buffers are never DMA targets; the copy worker fills
+		 * them from staging frames in queue order.
 		 */
 		vfe_buf_add_pending(output, buf);
 	} else if (output->state == VFE_OUTPUT_ON &&
@@ -1225,6 +1225,18 @@ int vfe_get(struct vfe_device *vfe)
 		vfe_reset_output_maps(vfe);
 
 		vfe_init_outputs(vfe);
+
+		/*
+		 * Nothing streams on an unpowered VFE: drop counts a failed
+		 * start or stop left behind, so the next enable restores the
+		 * IRQ masks the reset cleared. A wedged VFE is usable again
+		 * once this power-up reset was acknowledged.
+		 */
+		mutex_lock(&vfe->stream_lock);
+		vfe->stream_count = 0;
+		vfe->pix_active = false;
+		vfe->wedged = false;
+		mutex_unlock(&vfe->stream_lock);
 
 		vfe->res->hw_ops->hw_version(vfe);
 	} else {
@@ -2322,6 +2334,7 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		video_out->nformats = vfe->line[i].nformats;
 		video_out->formats = vfe->line[i].formats;
 		video_out->raw_full_range_yuv = vfe_line_is_pix(&vfe->line[i]);
+		video_out->cpu_sink = vfe_line_is_pix(&vfe->line[i]);
 
 		snprintf(name, ARRAY_SIZE(name), "%s%d_%s%d",
 			 MSM_VFE_NAME, vfe->id, "video", i);

@@ -806,6 +806,17 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 		}
 	}
 
+	/*
+	 * A PIX stop or start unwind must halt the IPP; configure again on
+	 * the next start.
+	 */
+	if (!enable && csid->res->has_ipp && camss_titan170_pix &&
+	    (csid->phy.en_vc & BIT(3))) {
+		csid->res->hw_ops->configure_stream(csid, 0);
+		csid->phy.need_vc_update = true;
+		return 0;
+	}
+
 	if (csid->phy.need_vc_update) {
 		csid->res->hw_ops->configure_stream(csid, enable);
 		csid->phy.need_vc_update = false;
@@ -1335,11 +1346,22 @@ static int csid_link_setup(struct media_entity *entity,
 		struct csid_device *csid = v4l2_get_subdevdata(sd);
 		struct device *dev = csid->camss->dev;
 
-		/* With the pixel path enabled, port 3 is the IPP feeding VFEn PIX */
+		/*
+		 * With the pixel path enabled, port 3 is the IPP feeding VFEn
+		 * PIX, and it is exclusive: configure_stream() starts every
+		 * linked port, and PIX must own its VFE alone.
+		 */
 		if ((flags & MEDIA_LNK_FL_ENABLED) && csid->res->has_ipp &&
-		    camss_titan170_pix && local->index - 1 == 3 &&
-		    remote->entity != &csid->camss->vfe[csid->id].line[VFE_LINE_PIX].subdev.entity)
-			return -EINVAL;
+		    camss_titan170_pix) {
+			u32 port = BIT(local->index - 1);
+			u32 ipp = BIT(3);
+
+			if (port == ipp &&
+			    remote->entity != &csid->camss->vfe[csid->id].line[VFE_LINE_PIX].subdev.entity)
+				return -EINVAL;
+			if (csid->phy.en_vc & ~port & (port == ipp ? ~0u : ipp))
+				return -EBUSY;
+		}
 
 		if (flags & MEDIA_LNK_FL_ENABLED)
 			csid->phy.en_vc |= BIT(local->index - 1);
