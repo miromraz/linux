@@ -42,6 +42,8 @@ struct pix_test {
 	unsigned int handoff_unpublished;
 	dma_addr_t handoff[VFE_PIX_STAGING_NUM + 1];
 	unsigned int faults;
+	/* Independent fake sensor phase; no relation to the driver's sequence. */
+	u8 camif_count;
 
 	struct camss_buffer *returned[PIX_TEST_NBUF * 4];
 	enum vb2_buffer_state state[PIX_TEST_NBUF * 4];
@@ -323,8 +325,10 @@ static int pix_start(struct pix_test *t, struct vfe_line *line)
 
 	line->output.state = VFE_OUTPUT_RESERVED;
 	ret = t->vfe.res->hw_ops->vfe_enable(line);
-	if (!ret && vfe_line_is_pix(line))
+	if (!ret && vfe_line_is_pix(line)) {
 		line->output.pix.copy_work.func = pix_test_copy_work;
+		t->camif_count = 0;
+	}
 
 	return ret;
 }
@@ -334,10 +338,25 @@ static int pix_stop(struct pix_test *t, struct vfe_line *line)
 	return t->vfe.res->hw_ops->vfe_disable(line);
 }
 
-/* One IRQ snapshot with PIX SOF and/or image composite done */
+/* Explicit register sample, including anomalous phase and absent IRQs. */
+static void pix_snap_raw(struct pix_test *t, bool sof, bool done, u64 ts, u32 count)
+{
+	writel_relaxed(count, t->vfe.base + VFE_DIAG_SENSOR_FRM_CNT_STATUS);
+	vfe_pix_frame_irq(&t->vfe, sof, done, ts);
+}
+
+/* Fake hardware progression only; a caller may omit its corresponding IRQ. */
+static void pix_counter_advance(struct pix_test *t)
+{
+	t->camif_count = t->camif_count == 255 ? 1 : t->camif_count + 1;
+}
+
+/* One ordinary IRQ snapshot; real hardware phase is not modeled by KUnit. */
 static void pix_snap(struct pix_test *t, bool sof, bool done, u64 ts)
 {
-	vfe_pix_frame_irq(&t->vfe, sof, done, ts);
+	if (sof)
+		pix_counter_advance(t);
+	pix_snap_raw(t, sof, done, ts, t->camif_count);
 }
 
 static void pix_sof(struct pix_test *t)
@@ -728,6 +747,7 @@ static void pix_test_bus_fault_fails_closed(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 	pix_frame(t);			/* frame 0 delivered */
 	KUNIT_ASSERT_EQ(test, t->nreturned, 1);
+	pix_sof(t);			/* valid frame 1 token before bus fault */
 
 	writel_relaxed(BIT(9), t->vfe.base + VFE_IRQ_STATUS_0);
 	writel_relaxed(STATUS0_OVERFLOW | STATUS0_COMP_BUF_DONE(VFE_PIX_COMP_GRP),
@@ -933,6 +953,7 @@ static void pix_test_missed_sof(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 
 	pix_frame(t);		/* frame 0 delivered */
+	pix_counter_advance(t);	/* frame 1 starts, its SOF IRQ is lost */
 	pix_done(t);		/* frame 1 completes, its SOF was never seen */
 	flush_work(&pix_st(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
@@ -942,13 +963,11 @@ static void pix_test_missed_sof(struct kunit *test)
 }
 
 /*
- * Known undetected case, recorded rather than claimed safe: a lost done
- * followed by the next frame's lost SOF looks like one normal frame. The
- * model delivers without a fault; physically the slot retired at the
- * second done held the lost frame's data, so that delivery can carry a
- * neighbouring frame's data under its token. This pins the model only.
+ * B/C accepted this paired loss. Hardware count changes without a SOF IRQ:
+ * the later done must not queue a copy under the old token. This is a
+ * synthetic register/IRQ schedule, not physical IRQ-loss or DMA evidence.
  */
-static void pix_test_lost_done_and_sof_undetected(struct kunit *test)
+static void pix_test_lost_done_and_sof_fails_closed(struct kunit *test)
 {
 	struct pix_test *t = test->priv;
 	unsigned int i;
@@ -959,15 +978,235 @@ static void pix_test_lost_done_and_sof_undetected(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 
 	pix_sof(t);			/* frame 0; its done is lost */
-					/* frame 1's SOF is lost */
-	pix_done(t);			/* frame 1 done, taken for frame 0 */
+	pix_counter_advance(t);		/* frame 1's SOF IRQ is lost */
+	pix_done(t);			/* frame 1 done, old token: reject */
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
+	KUNIT_EXPECT_EQ(test, t->ncopied, 0);
+	KUNIT_EXPECT_EQ(test, pix_st(t)->nready, 0);
 	pix_frame(t);			/* frame 2 */
 	flush_work(&pix_st(t)->copy_work);
 
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
+	KUNIT_EXPECT_EQ(test, t->ncopied, 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* An unexpected first count is never accepted as a new seed, even at 0. */
+static void pix_test_counter_first_phase(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	const u8 bad[] = { 0, 2, 255 };
+	unsigned int i;
+
+	t->ack_reset = true;
+	for (i = 0; i < ARRAY_SIZE(bad); i++) {
+		pix_queue(t, 0);
+		KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+		pix_snap_raw(t, true, false, 0, bad[i]);
+		pix_snap_raw(t, false, true, 0, bad[i]);
+		flush_work(&pix_st(t)->copy_work);
+		KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
+		KUNIT_EXPECT_EQ(test, t->faults, i + 1);
+		KUNIT_EXPECT_EQ(test, t->ncopied, 0);
+		KUNIT_EXPECT_EQ(test, t->nreturned, 0);
+		KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+		/* Model the caller returning the still-pending CPU buffer. */
+		KUNIT_EXPECT_PTR_EQ(test, vfe_buf_get_pending(&pix_line(t)->output),
+				    &t->buf[0]);
+	}
+}
+
+/* Reset to zero, a stuck previous count, or a jump at SOF: no next copy. */
+static void pix_test_counter_sof_faults(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	const u8 bad[] = { 0, 1, 3 };
+	unsigned int i;
+
+	t->ack_reset = true;
+	for (i = 0; i < ARRAY_SIZE(bad); i++) {
+		pix_queue(t, 0);
+		pix_queue(t, 1);
+		KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+		pix_frame(t);	/* frame 0/count 1 delivered */
+		pix_snap_raw(t, true, false, 0, bad[i]); /* expected 2 */
+		pix_snap_raw(t, false, true, 0, 2); /* cannot repair SOF fault */
+		flush_work(&pix_st(t)->copy_work);
+		KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
+		KUNIT_EXPECT_EQ(test, t->faults, i + 1);
+		KUNIT_EXPECT_EQ(test, t->ncopied, i + 1);
+		KUNIT_EXPECT_EQ(test, t->nreturned, i + 1);
+		KUNIT_EXPECT_EQ(test, pix_st(t)->nready, 0);
+		KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+		KUNIT_EXPECT_PTR_EQ(test, vfe_buf_get_pending(&pix_line(t)->output),
+				    &t->buf[1]);
+	}
+}
+
+/* Valid SOF/token, but reset/stuck/jump at DONE: reject before copy queue. */
+static void pix_test_counter_done_faults(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	const u8 bad[] = { 0, 1, 3 };
+	unsigned int i;
+
+	t->ack_reset = true;
+	for (i = 0; i < ARRAY_SIZE(bad); i++) {
+		pix_queue(t, 0);
+		pix_queue(t, 1);
+		KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+		pix_frame(t);
+		pix_sof(t);	/* frame 1/count 2: token valid */
+		pix_snap_raw(t, false, true, 0, bad[i]);
+		flush_work(&pix_st(t)->copy_work);
+		KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
+		KUNIT_EXPECT_EQ(test, t->faults, i + 1);
+		KUNIT_EXPECT_EQ(test, t->ncopied, i + 1);
+		KUNIT_EXPECT_EQ(test, t->nreturned, i + 1);
+		KUNIT_EXPECT_EQ(test, pix_st(t)->nready, 0);
+		KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+		KUNIT_EXPECT_PTR_EQ(test, vfe_buf_get_pending(&pix_line(t)->output),
+				    &t->buf[1]);
+	}
+}
+
+/* Two fake 255->1 transitions; deliveries on both sides retain their IDs. */
+static void pix_test_counter_wrap(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	const u32 delivered[] = { 254, 255, 509, 510 };
+	unsigned int i, n = 0;
+
+	t->ack_reset = true;
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	for (i = 0; i < 512; i++) {
+		if (n < ARRAY_SIZE(delivered) && i == delivered[n])
+			pix_queue(t, n++);
+		pix_frame(t);
+		if (i == 254 || i == 509)
+			KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_DIAG_SENSOR_FRM_CNT_STATUS),
+					255);
+		if (i == 255 || i == 510)
+			KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_DIAG_SENSOR_FRM_CNT_STATUS),
+					1);
+	}
 	KUNIT_EXPECT_EQ(test, t->faults, 0);
+	KUNIT_ASSERT_EQ(test, t->nreturned, ARRAY_SIZE(delivered));
+	for (i = 0; i < ARRAY_SIZE(delivered); i++)
+		KUNIT_EXPECT_EQ(test, t->seq[i], delivered[i]);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* A new generation must start at 1, including after a rejected restart. */
+static void pix_test_counter_restart(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	pix_frame(t);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+
+	pix_queue(t, 1);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	pix_snap_raw(t, true, false, 0, 2); /* stale phase, no reseeding */
+	pix_snap_raw(t, false, true, 0, 2);
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+	KUNIT_EXPECT_PTR_EQ(test, vfe_buf_get_pending(&pix_line(t)->output), &t->buf[1]);
+
+	pix_queue(t, 2);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	pix_frame(t);
+	KUNIT_EXPECT_EQ(test, pix_st(t)->generation, 3);
+	KUNIT_EXPECT_FALSE(test, pix_st(t)->faulted);
 	KUNIT_ASSERT_EQ(test, t->nreturned, 2);
+	KUNIT_EXPECT_EQ(test, t->seq[1], 0);
+	KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_DIAG_SENSOR_FRM_CNT_STATUS), 1);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* Upper RDI bytes are retained raw, but are not the CAMIF counter. */
+static void pix_test_counter_upper_bytes(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	u32 raw = 0xa53ce701;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	pix_snap_raw(t, true, false, 0, raw);
+	pix_snap_raw(t, false, true, 0, raw);
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_DIAG_SENSOR_FRM_CNT_STATUS), raw);
+	KUNIT_EXPECT_EQ(test, t->faults, 0);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* Counter enforcement is independent of the diagnostic trace predicates. */
+static void pix_test_counter_trace_off(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	KUNIT_ASSERT_FALSE(test, trace_camss_pix_sof_enabled());
+	KUNIT_ASSERT_FALSE(test, trace_camss_pix_done_enabled());
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	pix_sof(t);
+	pix_snap_raw(t, false, true, 0, 2);
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_EQ(test, t->ncopied, 0);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* Pair loss across 255->1 must not be mistaken for the previous count 255. */
+static void pix_test_lost_done_and_sof_at_wrap(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	unsigned int i;
+
+	t->ack_reset = true;
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	for (i = 0; i < 254; i++)
+		pix_frame(t);
+	pix_queue(t, 0);
+	pix_sof(t);		/* frame 254/count 255, DONE lost */
+	pix_counter_advance(t);	/* frame 255/count 1, SOF lost */
+	pix_done(t);
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_EQ(test, t->ncopied, 0);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* Explicit limit: losing a full 255-frame cycle can still alias a token. */
+static void pix_test_counter_255_frame_alias(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	unsigned int i;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	pix_sof(t);		/* frame 0/count 1, DONE lost */
+	for (i = 0; i < 255; i++)
+		pix_counter_advance(t); /* no intervening IRQs in this model */
+	pix_done(t);
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->camif_count, 1);
+	KUNIT_EXPECT_EQ(test, t->faults, 0);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
 	KUNIT_EXPECT_EQ(test, t->seq[0], 0);
-	KUNIT_EXPECT_EQ(test, t->seq[1], 1);
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 }
 
@@ -1013,7 +1252,16 @@ static struct kunit_case pix_test_cases[] = {
 	KUNIT_CASE(pix_test_done_without_sof),
 	KUNIT_CASE(pix_test_unretired_at_sof_fails_closed),
 	KUNIT_CASE(pix_test_missed_sof),
-	KUNIT_CASE(pix_test_lost_done_and_sof_undetected),
+	KUNIT_CASE(pix_test_lost_done_and_sof_fails_closed),
+	KUNIT_CASE(pix_test_counter_first_phase),
+	KUNIT_CASE(pix_test_counter_sof_faults),
+	KUNIT_CASE(pix_test_counter_done_faults),
+	KUNIT_CASE(pix_test_counter_wrap),
+	KUNIT_CASE(pix_test_counter_restart),
+	KUNIT_CASE(pix_test_counter_upper_bytes),
+	KUNIT_CASE(pix_test_counter_trace_off),
+	KUNIT_CASE(pix_test_lost_done_and_sof_at_wrap),
+	KUNIT_CASE(pix_test_counter_255_frame_alias),
 	{}
 };
 

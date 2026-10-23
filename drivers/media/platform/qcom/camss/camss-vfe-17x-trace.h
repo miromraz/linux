@@ -50,8 +50,10 @@ TRACE_EVENT(camss_pix_irq,
  * STATUS_0 ("last consumed client address" in the register description),
  * read for observation only; their semantics are not relied on. diag_frm_cnt
  * is raw VFE_DIAG_SENSOR_FRM_CNT_STATUS (0xd58): CAMIF in bits 7:0,
- * RDI0/1/2 in bits 15:8/23:16/31:24. Phase/reset/wrap are unverified;
- * this sample is not an enforced frame identity or an atomic WM snapshot.
+ * RDI0/1/2 in bits 15:8/23:16/31:24. This is the exact single sample checked
+ * against the nonzero 1..255 cycle for the bounded experimental PIX mode,
+ * even with tracing disabled. A 255-frame loss can alias that check; these
+ * separate MMIO samples are not an atomic WM/counter snapshot or DMA drain.
  */
 TRACE_EVENT(camss_pix_sof,
 	TP_PROTO(u8 vfe, u32 generation, u32 sequence, bool unretired, u8 frame,
@@ -88,7 +90,7 @@ TRACE_EVENT(camss_pix_sof,
 
 /*
  * An image composite done: the retired slot's frame, its Y address and
- * token; last_y/last_c/diag_frm_cnt as for camss_pix_sof, observation only.
+ * token; last_y/last_c are observations, diag_frm_cnt the checked raw sample.
  */
 TRACE_EVENT(camss_pix_done,
 	TP_PROTO(u8 vfe, u32 generation, u32 sequence, bool valid, u8 frame,

@@ -179,7 +179,7 @@
 #define		GAMMA_LUT_ENTRIES		64
 #define		GAMMA_LUT_DELTA_SHIFT		10
 
-/* Titan 170 register facts; counter phase/reset/wrap are not yet measured. */
+/* Titan 170 register facts; counter behavior is bounded by the PIX trial. */
 #define VFE_DIAG_CFG				(0xc48)
 #define		DIAG_CFG_DIAG_EN			BIT(0)
 #define		DIAG_CFG_CAMIF_FRM_CNT_EN	BIT(4)
@@ -1017,10 +1017,20 @@ static u32 vfe_pix_wm_last(struct vfe_device *vfe, u8 wm)
 	return readl_relaxed(vfe->base + VFE_BUS_WM_STATUS0(wm));
 }
 
-/* Raw observation only, called with a live PIX output and tracing enabled. */
+/* Read once per SOF/DONE snapshot, with the powered output locked. */
 static u32 vfe_pix_diag_frame_count(struct vfe_device *vfe)
 {
 	return readl_relaxed(vfe->base + VFE_DIAG_SENSOR_FRM_CNT_STATUS);
+}
+
+/*
+ * Measured on A52 S5KGW1P 2000x1128 ~30 fps: first count 1, then 1..255,
+ * skipping zero at wrap. Do not infer modulo 256 from the register width.
+ * A whole 255-frame loss aliases this check; this is not a full frame ID.
+ */
+static u8 vfe_pix_expected_frame_count(u32 sequence)
+{
+	return sequence % 255 + 1;
 }
 
 /*
@@ -1032,7 +1042,7 @@ static u32 vfe_pix_diag_frame_count(struct vfe_device *vfe)
  * The composite done retires hw[0] with that token: the delivered buffer
  * gets the token's sequence and the done snapshot time as its timestamp
  * (the queue's default V4L2 end-of-frame meaning). The token's SOF time
- * stays internal; userspace has it as the FRAME_SYNC event's timestamp.
+ * stays internal; FRAME_SYNC gets a later host notification timestamp.
  *
  * Strict alternation, fail closed otherwise: at most one frame is started
  * and not retired. A SOF while the previous frame is unretired (its done
@@ -1046,10 +1056,15 @@ static u32 vfe_pix_diag_frame_count(struct vfe_device *vfe)
  * after SOF, at least 26 ms before the next SOF, never coalesced); a mode
  * whose done can legitimately follow the next SOF will fail closed here.
  *
- * Known undetected case: a lost done and the following frame's lost SOF
- * together look like one normal frame, after which deliveries can carry a
- * neighbouring frame's data. The camss_pix_* tracepoints record WM3/WM4
- * STATUS_0 to study such cases; nothing here relies on those registers.
+ * Sample the hardware CAMIF count once under the live-output lock, even
+ * with tracing disabled. At SOF require (sequence % 255) + 1, and at done
+ * require the same count for the valid token, before queueing any copy.
+ * This detects a lost done plus the next lost SOF when the counter advances.
+ * First count must be 1; never seed from an unexpected reset/enable phase.
+ * The measured nonzero cycle aliases after 255 frames: losses of that
+ * size, or other hardware behavior outside this fixed-mode evidence, are
+ * not proven safe. WM3/WM4 STATUS_0 remains trace-only, not a DMA drain or
+ * retirement guarantee. Both traces reuse the exact checked raw sample.
  */
 static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 ts)
 {
@@ -1058,6 +1073,7 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 	struct vfe_pix_staging *st = &output->pix;
 	bool fault = false, sync = false;
 	unsigned long flags;
+	u32 diag_frm_cnt;
 	u32 sequence = 0;
 	u8 head;
 
@@ -1069,6 +1085,13 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 		return;
 	}
 
+	if (!sof && !done) {
+		spin_unlock_irqrestore(&vfe->output_lock, flags);
+		return;
+	}
+
+	diag_frm_cnt = vfe_pix_diag_frame_count(vfe);
+
 	if (sof && done)
 		fault |= vfe_pix_fault_locked(output);
 
@@ -1076,7 +1099,8 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 		struct vfe_pix_token tok = st->tok;
 		bool deliver;
 
-		if (!tok.valid)
+		if (!tok.valid ||
+		    (u8)diag_frm_cnt != vfe_pix_expected_frame_count(tok.sequence))
 			fault |= vfe_pix_fault_locked(output);
 		st->tok.valid = false;
 
@@ -1097,7 +1121,7 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 					     deliver,
 					     vfe_pix_wm_last(vfe, VFE_PIX_WM_Y),
 					     vfe_pix_wm_last(vfe, VFE_PIX_WM_C),
-					     vfe_pix_diag_frame_count(vfe));
+					     diag_frm_cnt);
 		st->frame_error = false;
 
 		st->hw[0] = st->hw[1];
@@ -1115,8 +1139,9 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 					    st->frame[st->hw[0]].dma,
 					    vfe_pix_wm_last(vfe, VFE_PIX_WM_Y),
 					    vfe_pix_wm_last(vfe, VFE_PIX_WM_C),
-					    vfe_pix_diag_frame_count(vfe));
-		if (st->tok.valid)
+					    diag_frm_cnt);
+		if (st->tok.valid ||
+		    (u8)diag_frm_cnt != vfe_pix_expected_frame_count(sequence))
 			fault |= vfe_pix_fault_locked(output);
 		st->tok = (struct vfe_pix_token) {
 			.generation = st->generation,
@@ -1131,8 +1156,8 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 	if (fault) {
 		vfe_pix_signal_fault(line);
 		dev_err_ratelimited(vfe->camss->dev,
-				    "VFE%u PIX: SOF and completion out of step, capture stopped\n",
-				    vfe->id);
+				    "VFE%u PIX: frame identity out of step (counter 0x%08x), capture stopped\n",
+				    vfe->id, diag_frm_cnt);
 	}
 	if (sync)
 		vfe_pix_frame_sync(line, sequence);
