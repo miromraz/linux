@@ -1180,7 +1180,7 @@ int msm_csid_subdev_init(struct camss *camss, struct csid_device *csid,
 	snprintf(csid->irq_name, sizeof(csid->irq_name), "%s_%s%d",
 		 dev_name(dev), MSM_CSID_NAME, csid->id);
 	ret = devm_request_irq(dev, csid->irq, csid->res->hw_ops->isr,
-			       IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+			       IRQF_NO_AUTOEN,
 			       csid->irq_name, csid);
 	if (ret < 0) {
 		dev_err(dev, "request_irq failed: %d\n", ret);

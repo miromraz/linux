@@ -1168,12 +1168,12 @@ int msm_ispif_subdev_init(struct camss *camss,
 	if (camss->res->version == CAMSS_8x16 ||
 	    camss->res->version == CAMSS_8x39)
 		ret = devm_request_irq(dev, ispif->irq, ispif_isr_8x16,
-			       IRQF_TRIGGER_RISING, ispif->irq_name, ispif);
+			       0, ispif->irq_name, ispif);
 	else if (camss->res->version == CAMSS_8x96 ||
 		 camss->res->version == CAMSS_8x53 ||
 		 camss->res->version == CAMSS_660)
 		ret = devm_request_irq(dev, ispif->irq, ispif_isr_8x96,
-			       IRQF_TRIGGER_RISING, ispif->irq_name, ispif);
+			       0, ispif->irq_name, ispif);
 	else
 		ret = -EINVAL;
 

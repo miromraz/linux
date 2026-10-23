@@ -2059,7 +2059,7 @@ int msm_vfe_subdev_init(struct camss *camss, struct vfe_device *vfe,
 	snprintf(vfe->irq_name, sizeof(vfe->irq_name), "%s_%s%d",
 		 dev_name(dev), MSM_VFE_NAME, id);
 	ret = devm_request_irq(dev, vfe->irq, vfe->res->hw_ops->isr,
-			       IRQF_TRIGGER_RISING, vfe->irq_name, vfe);
+			       0, vfe->irq_name, vfe);
 	if (ret < 0) {
 		dev_err(dev, "request_irq failed: %d\n", ret);
 		return ret;
