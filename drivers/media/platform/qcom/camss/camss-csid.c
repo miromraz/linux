@@ -593,6 +593,15 @@ static int csid_set_clock_rates(struct csid_device *csid)
 				return ret;
 			}
 		} else if (clock->nfreqs) {
+			/*
+			 * The VFE is powered first and sizes its shared core
+			 * clock for its lines; the PIX pipeline takes a pixel
+			 * per clock and must not be pulled back to freq[0].
+			 */
+			if (csid->res->has_ipp && camss_titan170_pix &&
+			    clk_get_rate(clock->clk) >= clock->freq[0])
+				continue;
+
 			clk_set_rate(clock->clk, clock->freq[0]);
 		}
 	}
@@ -1325,6 +1334,12 @@ static int csid_link_setup(struct media_entity *entity,
 		struct v4l2_subdev *sd = media_entity_to_v4l2_subdev(entity);
 		struct csid_device *csid = v4l2_get_subdevdata(sd);
 		struct device *dev = csid->camss->dev;
+
+		/* With the pixel path enabled, port 3 is the IPP feeding VFEn PIX */
+		if ((flags & MEDIA_LNK_FL_ENABLED) && csid->res->has_ipp &&
+		    camss_titan170_pix && local->index - 1 == 3 &&
+		    remote->entity != &csid->camss->vfe[csid->id].line[VFE_LINE_PIX].subdev.entity)
+			return -EINVAL;
 
 		if (flags & MEDIA_LNK_FL_ENABLED)
 			csid->phy.en_vc |= BIT(local->index - 1);

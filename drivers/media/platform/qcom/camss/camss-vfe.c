@@ -277,6 +277,38 @@ const struct camss_formats vfe_formats_rdi_845 = {
 	.formats = formats_rdi_845
 };
 
+/*
+ * Titan 170 PIX output. The VFE converts Bayer to YUV 4:2:0 internally, the
+ * source pad code only describes the result: NV12 in one memory plane.
+ */
+static const struct camss_format_info formats_pix_170[] = {
+	{ MEDIA_BUS_FMT_YUYV8_1_5X8, 8, V4L2_PIX_FMT_NV12, 1,
+	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
+};
+
+static const struct camss_formats vfe_formats_pix_170 = {
+	.nformats = ARRAY_SIZE(formats_pix_170),
+	.formats = formats_pix_170
+};
+
+/* Sink codes the PIX pipeline decodes; the CSID IPP unpacks RAW10 */
+static const u32 vfe_pix_170_sink_codes[] = {
+	MEDIA_BUS_FMT_SGRBG10_1X10,
+	MEDIA_BUS_FMT_SRGGB10_1X10,
+	MEDIA_BUS_FMT_SBGGR10_1X10,
+	MEDIA_BUS_FMT_SGBRG10_1X10,
+};
+
+/* FULL output limit of the Titan 170 bus (cam_vfe170.h max_width/height) */
+#define VFE_PIX_170_MAX_WIDTH	4096
+#define VFE_PIX_170_MAX_HEIGHT	4096
+
+bool vfe_line_is_pix(struct vfe_line *line)
+{
+	return line->id == VFE_LINE_PIX && to_vfe(line)->res->has_pix &&
+	       camss_titan170_pix;
+}
+
 /* TODO: Replace with pix formats */
 const struct camss_formats vfe_formats_pix_845 = {
 	.nformats = ARRAY_SIZE(formats_rdi_845),
@@ -287,6 +319,9 @@ static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
 			    unsigned int index, u32 src_req_code)
 {
 	struct vfe_device *vfe = to_vfe(line);
+
+	if (vfe_line_is_pix(line))
+		return index ? 0 : MEDIA_BUS_FMT_YUYV8_1_5X8;
 
 	switch (vfe->camss->res->version) {
 	case CAMSS_8x16:
@@ -614,7 +649,13 @@ int vfe_queue_buffer_v2(struct camss_video *vid,
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
-	if (output->state == VFE_OUTPUT_ON &&
+	if (vfe_line_is_pix(line)) {
+		/*
+		 * Both PIX address slots are always programmed (scratch when
+		 * empty); new buffers enter at the next frame boundary.
+		 */
+		vfe_buf_add_pending(output, buf);
+	} else if (output->state == VFE_OUTPUT_ON &&
 	    output->gen2.active_num < 2) {
 		output->buf[output->gen2.active_num++] = buf;
 		ops->vfe_wm_update(vfe, output->wm_idx[0],
@@ -970,6 +1011,40 @@ static bool vfe_check_clock_levels(struct camss_clock *clock)
 }
 
 /*
+ * vfe_pix_clock - Clock needed by the Titan 170 PIX line
+ * @line: VFE PIX line
+ * @pixel_clock: sensor V4L2_CID_PIXEL_RATE
+ *
+ * The pipeline takes one pixel per clock. Only the active part of each line
+ * has to keep up with the sensor, so scale the VT pixel rate by the active
+ * share of the line length when the sensor reports its horizontal blanking.
+ * Without HBLANK fall back to the full pixel rate.
+ */
+static u64 vfe_pix_clock(struct vfe_line *line, u64 pixel_clock)
+{
+	u32 width = line->fmt[MSM_VFE_PAD_SINK].width;
+	struct media_pad *sensor_pad;
+	struct v4l2_subdev *sensor;
+	struct v4l2_ctrl *ctrl;
+	s64 hblank;
+
+	sensor_pad = camss_find_sensor_pad(&line->subdev.entity);
+	if (!sensor_pad)
+		return pixel_clock;
+
+	sensor = media_entity_to_v4l2_subdev(sensor_pad->entity);
+	ctrl = v4l2_ctrl_find(sensor->ctrl_handler, V4L2_CID_HBLANK);
+	if (!ctrl)
+		return pixel_clock;
+
+	hblank = v4l2_ctrl_g_ctrl(ctrl);
+	if (hblank <= 0)
+		return pixel_clock;
+
+	return div_u64(pixel_clock * width, width + hblank);
+}
+
+/*
  * vfe_set_clock_rates - Calculate and set clock rates on VFE module
  * @vfe: VFE device
  *
@@ -1000,7 +1075,10 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
 				u32 tmp;
 				u8 bpp;
 
-				if (j == VFE_LINE_PIX) {
+				if (vfe_line_is_pix(&vfe->line[j])) {
+					tmp = vfe_pix_clock(&vfe->line[j],
+							    pixel_clock[j]);
+				} else if (j == VFE_LINE_PIX) {
 					tmp = pixel_clock[j];
 				} else {
 					struct vfe_line *l = &vfe->line[j];
@@ -1081,7 +1159,10 @@ static int vfe_check_clock_rates(struct vfe_device *vfe)
 				u32 tmp;
 				u8 bpp;
 
-				if (j == VFE_LINE_PIX) {
+				if (vfe_line_is_pix(&vfe->line[j])) {
+					tmp = vfe_pix_clock(&vfe->line[j],
+							    pixel_clock[j]);
+				} else if (j == VFE_LINE_PIX) {
 					tmp = pixel_clock[j];
 				} else {
 					struct vfe_line *l = &vfe->line[j];
@@ -1364,6 +1445,48 @@ __vfe_get_crop(struct vfe_line *line,
 }
 
 /*
+ * vfe_pix_try_format - Try format on the Titan 170 PIX line
+ *
+ * Only 1:1 RAW10 Bayer to NV12 is programmed, so the source size always
+ * equals the sink size. Widths are multiples of 16 for the line based write
+ * masters, heights are even for 4:2:0.
+ */
+static void vfe_pix_try_format(struct vfe_line *line,
+			       struct v4l2_subdev_state *sd_state,
+			       unsigned int pad,
+			       struct v4l2_mbus_framefmt *fmt,
+			       enum v4l2_subdev_format_whence which)
+{
+	unsigned int i;
+
+	if (pad == MSM_VFE_PAD_SINK) {
+		for (i = 0; i < ARRAY_SIZE(vfe_pix_170_sink_codes); i++)
+			if (fmt->code == vfe_pix_170_sink_codes[i])
+				break;
+		if (i == ARRAY_SIZE(vfe_pix_170_sink_codes))
+			fmt->code = vfe_pix_170_sink_codes[0];
+
+		fmt->width = clamp_t(u32, fmt->width, 16,
+				     VFE_PIX_170_MAX_WIDTH) & ~0xf;
+		fmt->height = clamp_t(u32, fmt->height, 2,
+				      VFE_PIX_170_MAX_HEIGHT) & ~0x1;
+		fmt->field = V4L2_FIELD_NONE;
+		fmt->colorspace = V4L2_COLORSPACE_RAW;
+		fmt->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
+		fmt->quantization = V4L2_QUANTIZATION_DEFAULT;
+		fmt->xfer_func = V4L2_XFER_FUNC_NONE;
+		return;
+	}
+
+	*fmt = *__vfe_get_format(line, sd_state, MSM_VFE_PAD_SINK, which);
+	fmt->code = MEDIA_BUS_FMT_YUYV8_1_5X8;
+	fmt->colorspace = V4L2_COLORSPACE_RAW;
+	fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
+	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+	fmt->xfer_func = V4L2_XFER_FUNC_NONE;
+}
+
+/*
  * vfe_try_format - Handle try format by pad subdev method
  * @line: VFE line
  * @sd_state: V4L2 subdev state
@@ -1379,6 +1502,11 @@ static void vfe_try_format(struct vfe_line *line,
 {
 	unsigned int i;
 	u32 code;
+
+	if (vfe_line_is_pix(line)) {
+		vfe_pix_try_format(line, sd_state, pad, fmt, which);
+		return;
+	}
 
 	switch (pad) {
 	case MSM_VFE_PAD_SINK:
@@ -1440,6 +1568,15 @@ static void vfe_try_compose(struct vfe_line *line,
 
 	fmt = __vfe_get_format(line, sd_state, MSM_VFE_PAD_SINK, which);
 
+	/* ponytail: the PIX scaler is programmed 1:1 only; MNDS downscale is untested */
+	if (vfe_line_is_pix(line)) {
+		rect->left = 0;
+		rect->top = 0;
+		rect->width = fmt->width;
+		rect->height = fmt->height;
+		return;
+	}
+
 	if (rect->width > fmt->width)
 		rect->width = fmt->width;
 
@@ -1478,6 +1615,12 @@ static void vfe_try_crop(struct vfe_line *line,
 	struct v4l2_rect *compose;
 
 	compose = __vfe_get_compose(line, sd_state, which);
+
+	/* No output crop on the PIX line; see vfe_try_compose() */
+	if (vfe_line_is_pix(line)) {
+		*rect = *compose;
+		return;
+	}
 
 	if (rect->width > compose->width)
 		rect->width = compose->width;
@@ -1520,7 +1663,12 @@ static int vfe_enum_mbus_code(struct v4l2_subdev *sd,
 {
 	struct vfe_line *line = v4l2_get_subdevdata(sd);
 
-	if (code->pad == MSM_VFE_PAD_SINK) {
+	if (code->pad == MSM_VFE_PAD_SINK && vfe_line_is_pix(line)) {
+		if (code->index >= ARRAY_SIZE(vfe_pix_170_sink_codes))
+			return -EINVAL;
+
+		code->code = vfe_pix_170_sink_codes[code->index];
+	} else if (code->pad == MSM_VFE_PAD_SINK) {
 		if (code->index >= line->nformats)
 			return -EINVAL;
 
@@ -1959,7 +2107,10 @@ int msm_vfe_subdev_init(struct camss *camss, struct vfe_device *vfe,
 		init_completion(&l->output.sof);
 		init_completion(&l->output.reg_update);
 
-		if (i == VFE_LINE_PIX) {
+		if (vfe_line_is_pix(l)) {
+			l->nformats = vfe_formats_pix_170.nformats;
+			l->formats = vfe_formats_pix_170.formats;
+		} else if (i == VFE_LINE_PIX) {
 			l->nformats = res->vfe.formats_pix->nformats;
 			l->formats = res->vfe.formats_pix->formats;
 		} else {
@@ -2003,6 +2154,17 @@ static int vfe_link_setup(struct media_entity *entity,
 	if (flags & MEDIA_LNK_FL_ENABLED)
 		if (media_pad_remote_pad_first(local))
 			return -EBUSY;
+
+	/* The IPP of CSIDn is wired to VFEn; other CSID ports carry no pixels */
+	if ((flags & MEDIA_LNK_FL_ENABLED) && (local->flags & MEDIA_PAD_FL_SINK)) {
+		struct vfe_line *line =
+			v4l2_get_subdevdata(media_entity_to_v4l2_subdev(entity));
+		struct vfe_device *vfe = to_vfe(line);
+
+		if (vfe_line_is_pix(line) &&
+		    remote->entity != &vfe->camss->csid[vfe->id].subdev.entity)
+			return -EINVAL;
+	}
 
 	return 0;
 }
@@ -2159,6 +2321,7 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 
 		video_out->nformats = vfe->line[i].nformats;
 		video_out->formats = vfe->line[i].formats;
+		video_out->raw_full_range_yuv = vfe_line_is_pix(&vfe->line[i]);
 
 		snprintf(name, ARRAY_SIZE(name), "%s%d_%s%d",
 			 MSM_VFE_NAME, vfe->id, "video", i);

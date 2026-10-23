@@ -66,6 +66,17 @@ struct vfe_output {
 
 	unsigned int drop_update_idx;
 
+	/*
+	 * Titan 170 PIX: driver-owned DMA target written by the hardware for
+	 * frames that have no queued buffer, so the write masters never point
+	 * at a buffer that has been returned to userspace.
+	 */
+	void *scratch_cpu;
+	dma_addr_t scratch_dma;
+	size_t scratch_size;
+	/* A bus or CAMIF error hit the frame at the head of buf[] */
+	bool frame_error;
+
 	union {
 		struct {
 			int active_buf;
@@ -133,6 +144,8 @@ struct vfe_isr_ops {
 
 struct vfe_subdev_resources {
 	bool is_lite;
+	/* Line VFE_LINE_PIX is the real Bayer->YUV pipeline (Titan 170) */
+	bool has_pix;
 	u8 line_num;
 	bool has_pd;
 	char *pd_name;
@@ -262,6 +275,15 @@ void vfe_put(struct vfe_device *vfe);
  * Return whether VFE is VFE lite
  */
 bool vfe_is_lite(struct vfe_device *vfe);
+
+/*
+ * vfe_line_is_pix - Return if a line drives the hardware pixel pipeline
+ * @line: VFE line
+ *
+ * Only true for the PIX line of a VFE with has_pix while the experimental
+ * titan170_pix module parameter is set.
+ */
+bool vfe_line_is_pix(struct vfe_line *line);
 
 /*
  * vfe_hw_version - Process write master done interrupt

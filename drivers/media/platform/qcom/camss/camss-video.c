@@ -540,6 +540,13 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 					pix_mp->colorspace, pix_mp->ycbcr_enc);
 	pix_mp->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(pix_mp->colorspace);
 
+	if (video->raw_full_range_yuv) {
+		pix_mp->colorspace = V4L2_COLORSPACE_RAW;
+		pix_mp->ycbcr_enc = V4L2_YCBCR_ENC_601;
+		pix_mp->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+		pix_mp->xfer_func = V4L2_XFER_FUNC_NONE;
+	}
+
 	if (video->line_based)
 		for (i = 0; i < pix_mp->num_planes; i++) {
 			p = &pix_mp->plane_fmt[i];
