@@ -43,10 +43,14 @@ struct pix_test {
 	dma_addr_t handoff[VFE_PIX_STAGING_NUM + 1];
 	unsigned int faults;
 
-	struct camss_buffer *returned[PIX_TEST_NBUF * 2];
-	enum vb2_buffer_state state[PIX_TEST_NBUF * 2];
-	u32 seq[PIX_TEST_NBUF * 2];
+	struct camss_buffer *returned[PIX_TEST_NBUF * 4];
+	enum vb2_buffer_state state[PIX_TEST_NBUF * 4];
+	u32 seq[PIX_TEST_NBUF * 4];
+	u64 ts[PIX_TEST_NBUF * 4];
 	unsigned int nreturned;
+
+	u32 syncs[32];
+	unsigned int nsyncs;
 
 	/* copies: staging frame dma per copy; optionally block the first */
 	dma_addr_t copied[PIX_TEST_NBUF * 2];
@@ -151,8 +155,18 @@ static void pix_test_return_buf(struct camss_buffer *buf, enum vb2_buffer_state 
 		t->returned[t->nreturned] = buf;
 		t->state[t->nreturned] = state;
 		t->seq[t->nreturned] = buf->vb.sequence;
+		t->ts[t->nreturned] = buf->vb.vb2_buf.timestamp;
 	}
 	t->nreturned++;
+}
+
+static void pix_test_frame_sync(struct vfe_line *line, u32 sequence)
+{
+	struct pix_test *t = pix_test_ctx();
+
+	if (t->nsyncs < ARRAY_SIZE(t->syncs))
+		t->syncs[t->nsyncs] = sequence;
+	t->nsyncs++;
 }
 
 static u32 pix_reg(struct pix_test *t, u32 reg)
@@ -232,6 +246,7 @@ static int pix_test_init(struct kunit *test)
 	kunit_activate_static_stub(test, vfe_reset_ack_status, pix_test_ack_status);
 	kunit_activate_static_stub(test, vfe_reset_ack_clear, pix_test_ack_clear);
 	kunit_activate_static_stub(test, vfe_pix_signal_fault, pix_test_signal_fault);
+	kunit_activate_static_stub(test, vfe_pix_frame_sync, pix_test_frame_sync);
 
 	return 0;
 }
@@ -319,10 +334,27 @@ static int pix_stop(struct pix_test *t, struct vfe_line *line)
 	return t->vfe.res->hw_ops->vfe_disable(line);
 }
 
-/* A composite done IRQ, then let the copy worker run */
+/* One IRQ snapshot with PIX SOF and/or image composite done */
+static void pix_snap(struct pix_test *t, bool sof, bool done, u64 ts)
+{
+	vfe_pix_frame_irq(&t->vfe, sof, done, ts);
+}
+
+static void pix_sof(struct pix_test *t)
+{
+	pix_snap(t, true, false, 0);
+}
+
+static void pix_done(struct pix_test *t)
+{
+	pix_snap(t, false, true, 0);
+}
+
+/* A frame: SOF, then its composite done; then let the copy worker run */
 static void pix_frame(struct pix_test *t)
 {
-	vfe_pix_buf_done(&t->vfe);
+	pix_sof(t);
+	pix_done(t);
 	flush_work(&pix_st(t)->copy_work);
 }
 
@@ -507,11 +539,13 @@ static void pix_test_no_reuse_during_copy(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 
 	t->block_copy = true;
-	vfe_pix_buf_done(&t->vfe);	/* staging 0 -> copy, blocked */
+	pix_sof(t);
+	pix_done(t);			/* staging 0 -> copy, blocked */
 	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy_entered, HZ));
 
 	for (i = 0; i < 6; i++) {
-		vfe_pix_buf_done(&t->vfe);
+		pix_sof(t);
+		pix_done(t);
 		KUNIT_EXPECT_NE(test, st->hw[0], 0);
 		KUNIT_EXPECT_NE(test, st->hw[1], 0);
 		KUNIT_EXPECT_NE(test, pix_reg(t, VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_Y)),
@@ -552,9 +586,11 @@ static void pix_test_stop_during_copy(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 
 	t->block_copy = true;
-	vfe_pix_buf_done(&t->vfe);
+	pix_sof(t);
+	pix_done(t);
 	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy_entered, HZ));
-	vfe_pix_buf_done(&t->vfe);	/* second frame ready, queued behind */
+	pix_sof(t);
+	pix_done(t);			/* second frame ready, queued behind */
 
 	INIT_DELAYED_WORK(&t->release_work, pix_test_release_copy);
 	schedule_delayed_work(&t->release_work, msecs_to_jiffies(50));
@@ -564,7 +600,7 @@ static void pix_test_stop_during_copy(struct kunit *test)
 	/* the copy in flight finished; the ready one was not started */
 	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
 	KUNIT_EXPECT_EQ(test, t->ncopied, 1);
-	vfe_pix_buf_done(&t->vfe);	/* late IRQ */
+	pix_snap(t, true, true, 0);	/* late IRQ */
 	KUNIT_EXPECT_FALSE(test, work_pending(&pix_st(t)->copy_work));
 	pix_assert_released(test, t);
 	/* buf 1 never left the pending list: the caller's flush returns it */
@@ -756,6 +792,185 @@ static void pix_test_reset_unconfirmed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, t->vfe.stream_count, 0);
 }
 
+/*
+ * Each delivered buffer carries its own SOF sequence and the done time;
+ * the token keeps the SOF time. Each restart is a new generation counting
+ * from 0.
+ */
+static void pix_test_token_and_generation(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	unsigned int run, n;
+
+	t->ack_reset = true;
+	for (run = 0; run < 3; run++) {
+		t->nreturned = 0;
+		for (n = 0; n < 3; n++)
+			pix_queue(t, n);
+		KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+		KUNIT_EXPECT_EQ(test, pix_st(t)->generation, run + 1);
+
+		for (n = 0; n < 3; n++) {
+			pix_snap(t, true, false, 1000 + 100 * n);	/* SOF */
+			pix_snap(t, false, true, 1050 + 100 * n);	/* done */
+			flush_work(&pix_st(t)->copy_work);
+			KUNIT_EXPECT_EQ(test, pix_st(t)->frame[n].token.timestamp,
+					1000 + 100 * n);
+			KUNIT_EXPECT_EQ(test, pix_st(t)->frame[n].token.generation,
+					run + 1);
+		}
+
+		KUNIT_ASSERT_EQ(test, t->nreturned, 3);
+		for (n = 0; n < 3; n++) {
+			KUNIT_EXPECT_EQ(test, t->seq[n], n);
+			KUNIT_EXPECT_EQ(test, t->ts[n], 1050 + 100 * n);
+			KUNIT_EXPECT_EQ(test, t->state[n], VB2_BUF_STATE_DONE);
+		}
+		KUNIT_EXPECT_EQ(test, t->faults, 0);
+		KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+	}
+}
+
+/*
+ * SOF and done in one snapshot: done then SOF would be legal, SOF then
+ * done not, and the status cannot tell. Fail closed, deliver nothing.
+ */
+static void pix_test_same_snapshot_fails_closed(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue(t, 1);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+
+	pix_sof(t);
+	pix_snap(t, true, true, 0);
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
+	KUNIT_EXPECT_EQ(test, t->nsyncs, 2);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* Every SOF is a FRAME_SYNC with its sequence, with or without a buffer */
+static void pix_test_frame_sync_events(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	unsigned int i;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	for (i = 0; i < 4; i++)
+		pix_frame(t);
+	KUNIT_ASSERT_EQ(test, t->nsyncs, 4);
+	for (i = 0; i < 4; i++)
+		KUNIT_EXPECT_EQ(test, t->syncs[i], i);
+	/* one buffer: frame 0 delivered, 1..3 dropped but sequenced */
+	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* A completion with no started frame: fail closed */
+static void pix_test_done_without_sof(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue(t, 1);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+
+	pix_done(t);
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
+	pix_frame(t);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
+	KUNIT_EXPECT_EQ(test, pix_st(t)->hw[1], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/*
+ * The next frame starts while the previous one is unretired: its done is
+ * late, lost, or will arrive merged with a later one. Fail closed at that
+ * SOF, before the slot in doubt can be read; a done arriving afterwards
+ * delivers nothing.
+ */
+static void pix_test_unretired_at_sof_fails_closed(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	unsigned int i;
+
+	t->ack_reset = true;
+	for (i = 0; i < 3; i++)
+		pix_queue(t, i);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+
+	pix_frame(t);			/* frame 0 delivered */
+	pix_sof(t);			/* frame 1 */
+	KUNIT_EXPECT_EQ(test, t->faults, 0);
+	pix_sof(t);			/* frame 2, frame 1 not done */
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	pix_done(t);			/* late, or frames 1+2 merged */
+	pix_frame(t);
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
+	KUNIT_EXPECT_EQ(test, t->seq[0], 0);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* A lost SOF shows as a completion without a token: fail closed */
+static void pix_test_missed_sof(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue(t, 1);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+
+	pix_frame(t);		/* frame 0 delivered */
+	pix_done(t);		/* frame 1 completes, its SOF was never seen */
+	flush_work(&pix_st(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_ASSERT_EQ(test, t->nreturned, 1);
+	KUNIT_EXPECT_EQ(test, t->seq[0], 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/*
+ * Known undetected case, recorded rather than claimed safe: a lost done
+ * followed by the next frame's lost SOF looks like one normal frame. The
+ * model delivers without a fault; physically the slot retired at the
+ * second done held the lost frame's data, so that delivery can carry a
+ * neighbouring frame's data under its token. This pins the model only.
+ */
+static void pix_test_lost_done_and_sof_undetected(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	unsigned int i;
+
+	t->ack_reset = true;
+	for (i = 0; i < 3; i++)
+		pix_queue(t, i);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+
+	pix_sof(t);			/* frame 0; its done is lost */
+					/* frame 1's SOF is lost */
+	pix_done(t);			/* frame 1 done, taken for frame 0 */
+	pix_frame(t);			/* frame 2 */
+	flush_work(&pix_st(t)->copy_work);
+
+	KUNIT_EXPECT_EQ(test, t->faults, 0);
+	KUNIT_ASSERT_EQ(test, t->nreturned, 2);
+	KUNIT_EXPECT_EQ(test, t->seq[0], 0);
+	KUNIT_EXPECT_EQ(test, t->seq[1], 1);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
 static struct kunit_case pix_test_cases[] = {
 	KUNIT_CASE(pix_test_pix_then_rdi),
 	KUNIT_CASE(pix_test_rdi_then_pix),
@@ -772,6 +987,13 @@ static struct kunit_case pix_test_cases[] = {
 	KUNIT_CASE(pix_test_reset_stuck_ack),
 	KUNIT_CASE(pix_test_bus_fault_fails_closed),
 	KUNIT_CASE(pix_test_reset_unconfirmed),
+	KUNIT_CASE(pix_test_token_and_generation),
+	KUNIT_CASE(pix_test_same_snapshot_fails_closed),
+	KUNIT_CASE(pix_test_frame_sync_events),
+	KUNIT_CASE(pix_test_done_without_sof),
+	KUNIT_CASE(pix_test_unretired_at_sof_fails_closed),
+	KUNIT_CASE(pix_test_missed_sof),
+	KUNIT_CASE(pix_test_lost_done_and_sof_undetected),
 	{}
 };
 

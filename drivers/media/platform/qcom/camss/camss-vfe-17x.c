@@ -15,6 +15,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <media/v4l2-event.h>
 
 #include <kunit/static_stub.h>
 
@@ -834,14 +835,14 @@ static void vfe_pix_copy_work(struct work_struct *work)
 		f = &st->frame[idx];
 		if (buf) {
 			ret = vfe_pix_copy(vfe, st, f, buf);
-			buf->vb.vb2_buf.timestamp = f->timestamp;
-			buf->vb.sequence = f->sequence;
+			buf->vb.vb2_buf.timestamp = f->done_ts;
+			buf->vb.sequence = f->token.sequence;
 			vfe_pix_return_buf(buf, ret || f->error ? VB2_BUF_STATE_ERROR :
 							   VB2_BUF_STATE_DONE);
 		} else {
 			dev_dbg_ratelimited(vfe->camss->dev,
 					    "VFE%u PIX: frame %u had no buffer\n",
-					    vfe->id, f->sequence);
+					    vfe->id, f->token.sequence);
 		}
 
 		vfe_pix_frame_to_device(vfe, st->size, f);
@@ -920,6 +921,9 @@ static int vfe_pix_enable(struct vfe_line *line)
 	st->nready = 0;
 	st->frame_error = false;
 	st->faulted = false;
+	st->generation++;
+	st->sof_sequence = 0;
+	memset(&st->tok, 0, sizeof(st->tok));
 	output->wm_num = 2;
 	output->wm_idx[0] = VFE_PIX_WM_Y;
 	output->wm_idx[1] = VFE_PIX_WM_C;
@@ -961,19 +965,74 @@ error_free:
 	return ret;
 }
 
-/*
- * vfe_pix_buf_done - Composite done: both planes of the head frame landed
- *
- * Exactly one completion per frame. A staging frame goes to the copy
- * worker; the drop frame is only counted. The next slot gets a free staging
- * frame, or the drop frame while stopping or when all are being copied.
- */
-static void vfe_pix_buf_done(struct vfe_device *vfe)
+/* Fail closed, see vfe_pix_error(). Locked; true if this started the fault. */
+static bool vfe_pix_fault_locked(struct vfe_output *output)
 {
-	struct vfe_output *output = &vfe->line[VFE_LINE_PIX].output;
 	struct vfe_pix_staging *st = &output->pix;
+
+	if (output->state != VFE_OUTPUT_ON || st->faulted)
+		return false;
+
+	st->faulted = true;
+	st->nready = 0;
+	return true;
+}
+
+/* Standard frame start event on the PIX subdev, a KUnit static stub point */
+static void vfe_pix_frame_sync(struct vfe_line *line, u32 sequence)
+{
+	struct v4l2_event ev = {
+		.type = V4L2_EVENT_FRAME_SYNC,
+		.u.frame_sync.frame_sequence = sequence,
+	};
+
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_frame_sync, line, sequence);
+
+	v4l2_event_queue(line->subdev.devnode, &ev);
+}
+
+/* WM STATUS_0 of a PIX plane master, for tracing only */
+static u32 vfe_pix_wm_last(struct vfe_device *vfe, u8 wm)
+{
+	return readl_relaxed(vfe->base + VFE_BUS_WM_STATUS0(wm));
+}
+
+/*
+ * vfe_pix_frame_irq - PIX SOF and image composite done of one IRQ snapshot
+ * @ts: monotonic time the snapshot was taken
+ *
+ * Every SOF gets the next sequence of the stream generation and a
+ * FRAME_SYNC event, and its token goes to the frame starting in hw[0].
+ * The composite done retires hw[0] with that token: the delivered buffer
+ * gets the token's sequence and the done snapshot time as its timestamp
+ * (the queue's default V4L2 end-of-frame meaning). The token's SOF time
+ * stays internal; userspace has it as the FRAME_SYNC event's timestamp.
+ *
+ * Strict alternation, fail closed otherwise: at most one frame is started
+ * and not retired. A SOF while the previous frame is unretired (its done
+ * late, lost, or merged with a later one) and a done with no started frame
+ * (a SOF lost or extra done) stop delivery as a bus fault does, before the
+ * slot whose content is in doubt is read. A snapshot holding both a SOF
+ * and a done is ambiguous: done then SOF would be legal, SOF then done not,
+ * and the status cannot tell; it fails closed too.
+ *
+ * Grounded only by the 2000x1128 ~30 fps physical trace (done 3.8-7.1 ms
+ * after SOF, at least 26 ms before the next SOF, never coalesced); a mode
+ * whose done can legitimately follow the next SOF will fail closed here.
+ *
+ * Known undetected case: a lost done and the following frame's lost SOF
+ * together look like one normal frame, after which deliveries can carry a
+ * neighbouring frame's data. The camss_pix_* tracepoints record WM3/WM4
+ * STATUS_0 to study such cases; nothing here relies on those registers.
+ */
+static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 ts)
+{
+	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
+	struct vfe_output *output = &line->output;
+	struct vfe_pix_staging *st = &output->pix;
+	bool fault = false, sync = false;
 	unsigned long flags;
-	u64 ts = ktime_get_ns();
+	u32 sequence = 0;
 	u8 head;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
@@ -984,24 +1043,71 @@ static void vfe_pix_buf_done(struct vfe_device *vfe)
 		return;
 	}
 
-	head = st->hw[0];
-	if (head != VFE_PIX_DROP && output->state == VFE_OUTPUT_ON && !st->faulted) {
-		st->frame[head].sequence = output->sequence;
-		st->frame[head].timestamp = ts;
-		st->frame[head].error = st->frame_error;
-		st->ready[st->nready++] = head;
-		/* under the lock: vfe_pix_disable() cancels after STOPPING */
-		queue_work(system_highpri_wq, &st->copy_work);
-	}
-	st->frame_error = false;
-	output->sequence++;
+	if (sof && done)
+		fault |= vfe_pix_fault_locked(output);
 
-	st->hw[0] = st->hw[1];
-	st->hw[1] = output->state == VFE_OUTPUT_ON && !st->faulted ?
-		    vfe_pix_take_frame(st) : VFE_PIX_DROP;
-	vfe_pix_queue_addr(vfe, st, st->hw[1]);
+	if (done) {
+		struct vfe_pix_token tok = st->tok;
+		bool deliver;
+
+		if (!tok.valid)
+			fault |= vfe_pix_fault_locked(output);
+		st->tok.valid = false;
+
+		head = st->hw[0];
+		deliver = head != VFE_PIX_DROP && output->state == VFE_OUTPUT_ON &&
+			  !st->faulted;
+		if (deliver) {
+			st->frame[head].token = tok;
+			st->frame[head].done_ts = ts;
+			st->frame[head].error = st->frame_error;
+			st->ready[st->nready++] = head;
+			/* under the lock: vfe_pix_disable() cancels after STOPPING */
+			queue_work(system_highpri_wq, &st->copy_work);
+		}
+		if (trace_camss_pix_done_enabled())
+			trace_camss_pix_done(vfe->id, tok.generation, tok.sequence,
+					     tok.valid, head, st->frame[head].dma,
+					     deliver,
+					     vfe_pix_wm_last(vfe, VFE_PIX_WM_Y),
+					     vfe_pix_wm_last(vfe, VFE_PIX_WM_C));
+		st->frame_error = false;
+
+		st->hw[0] = st->hw[1];
+		st->hw[1] = output->state == VFE_OUTPUT_ON && !st->faulted ?
+			    vfe_pix_take_frame(st) : VFE_PIX_DROP;
+		vfe_pix_queue_addr(vfe, st, st->hw[1]);
+	}
+
+	if (sof) {
+		sequence = st->sof_sequence++;
+		sync = true;
+		if (trace_camss_pix_sof_enabled())
+			trace_camss_pix_sof(vfe->id, st->generation, sequence,
+					    st->tok.valid, st->hw[0],
+					    st->frame[st->hw[0]].dma,
+					    vfe_pix_wm_last(vfe, VFE_PIX_WM_Y),
+					    vfe_pix_wm_last(vfe, VFE_PIX_WM_C));
+		if (st->tok.valid)
+			fault |= vfe_pix_fault_locked(output);
+		st->tok = (struct vfe_pix_token) {
+			.generation = st->generation,
+			.sequence = sequence,
+			.timestamp = ts,
+			.valid = true,
+		};
+	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
+
+	if (fault) {
+		vfe_pix_signal_fault(line);
+		dev_err_ratelimited(vfe->camss->dev,
+				    "VFE%u PIX: SOF and completion out of step, capture stopped\n",
+				    vfe->id);
+	}
+	if (sync)
+		vfe_pix_frame_sync(line, sequence);
 }
 
 /* Bus errors after which completions may no longer match address slots */
@@ -1030,11 +1136,8 @@ static void vfe_pix_error(struct vfe_device *vfe, u32 status1, u32 bus_status0)
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	if (output->state == VFE_OUTPUT_ON) {
 		st->frame_error = true;
-		if ((bus_status0 & VFE_PIX_BUS_FAULT) && !st->faulted) {
-			st->faulted = true;
-			st->nready = 0;
-			fault = true;
-		}
+		if (bus_status0 & VFE_PIX_BUS_FAULT)
+			fault = vfe_pix_fault_locked(output);
 	}
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
@@ -1057,6 +1160,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 {
 	struct vfe_device *vfe = dev;
 	bool pix = vfe_line_is_pix(&vfe->line[VFE_LINE_PIX]);
+	u64 ts = ktime_get_ns();
 	u32 status0, status1, vfe_bus_status[VFE_BUS_IRQ_BANKS];
 	int i, wm, rdi_num;
 
@@ -1109,8 +1213,9 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 					  STATUS0_VIOLATION)))
 			vfe_pix_error(vfe, status1, vfe_bus_status[0]);
 
-		if (vfe_bus_status[0] & STATUS0_COMP_BUF_DONE(VFE_PIX_COMP_GRP))
-			vfe_pix_buf_done(vfe);
+		vfe_pix_frame_irq(vfe, status0 & STATUS_0_CAMIF_SOF,
+				  vfe_bus_status[0] & STATUS0_COMP_BUF_DONE(VFE_PIX_COMP_GRP),
+				  ts);
 	}
 
 	for (wm = 0; wm < MSM_VFE_IMAGE_MASTERS_NUM; wm++) {

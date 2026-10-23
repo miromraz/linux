@@ -20,6 +20,7 @@
 #include <linux/spinlock.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-subdev.h>
 
 #include "camss-vfe.h"
@@ -2188,8 +2189,22 @@ static int vfe_link_setup(struct media_entity *entity,
 	return 0;
 }
 
+/* FRAME_SYNC on the Titan 170 PIX line, sequence = PIX SOF sequence */
+static int vfe_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
+			       struct v4l2_event_subscription *sub)
+{
+	struct vfe_line *line = v4l2_get_subdevdata(sd);
+
+	if (!vfe_line_is_pix(line) || sub->type != V4L2_EVENT_FRAME_SYNC || sub->id)
+		return -EINVAL;
+
+	return v4l2_event_subscribe(fh, sub, 4, NULL);
+}
+
 static const struct v4l2_subdev_core_ops vfe_core_ops = {
 	.s_power = vfe_set_power,
+	.subscribe_event = vfe_subscribe_event,
+	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
 };
 
 static const struct v4l2_subdev_video_ops vfe_video_ops = {
@@ -2296,6 +2311,8 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 		v4l2_subdev_init(sd, &vfe_v4l2_ops);
 		sd->internal_ops = &vfe_v4l2_internal_ops;
 		sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+		if (vfe_line_is_pix(&vfe->line[i]))
+			sd->flags |= V4L2_SUBDEV_FL_HAS_EVENTS;
 		if (i == VFE_LINE_PIX && vfe->res->is_lite == false)
 			snprintf(sd->name, ARRAY_SIZE(sd->name), "%s%d_%s",
 				 MSM_VFE_NAME, vfe->id, "pix");

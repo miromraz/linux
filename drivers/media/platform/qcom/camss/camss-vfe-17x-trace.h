@@ -44,6 +44,79 @@ TRACE_EVENT(camss_pix_irq,
 		  !!(__entry->bus0 & BIT(5)), __entry->hw0, __entry->hw1)
 );
 
+/*
+ * A PIX SOF: its token, whether a frame was still unretired (a fault) and
+ * the slot the token went to (frame and its Y address). last_y/last_c are WM3/WM4
+ * STATUS_0 ("last consumed client address" in the register description),
+ * read for observation only; their semantics are not relied on.
+ */
+TRACE_EVENT(camss_pix_sof,
+	TP_PROTO(u8 vfe, u32 generation, u32 sequence, bool unretired, u8 frame,
+		 u32 addr, u32 last_y, u32 last_c),
+	TP_ARGS(vfe, generation, sequence, unretired, frame, addr, last_y, last_c),
+	TP_STRUCT__entry(
+		__field(u8, vfe)
+		__field(u32, generation)
+		__field(u32, sequence)
+		__field(bool, unretired)
+		__field(u8, frame)
+		__field(u32, addr)
+		__field(u32, last_y)
+		__field(u32, last_c)
+	),
+	TP_fast_assign(
+		__entry->vfe = vfe;
+		__entry->generation = generation;
+		__entry->sequence = sequence;
+		__entry->unretired = unretired;
+		__entry->frame = frame;
+		__entry->addr = addr;
+		__entry->last_y = last_y;
+		__entry->last_c = last_c;
+	),
+	TP_printk("vfe%u gen=%u seq=%u unretired=%u frame=%u addr=0x%08x last_y=0x%08x last_c=0x%08x",
+		  __entry->vfe, __entry->generation, __entry->sequence,
+		  __entry->unretired, __entry->frame, __entry->addr,
+		  __entry->last_y, __entry->last_c)
+);
+
+/*
+ * An image composite done: the retired slot's frame, its Y address and
+ * token; last_y/last_c as for camss_pix_sof, observation only.
+ */
+TRACE_EVENT(camss_pix_done,
+	TP_PROTO(u8 vfe, u32 generation, u32 sequence, bool valid, u8 frame,
+		 u32 addr, bool delivered, u32 last_y, u32 last_c),
+	TP_ARGS(vfe, generation, sequence, valid, frame, addr, delivered,
+		last_y, last_c),
+	TP_STRUCT__entry(
+		__field(u8, vfe)
+		__field(u32, generation)
+		__field(u32, sequence)
+		__field(bool, valid)
+		__field(u8, frame)
+		__field(u32, addr)
+		__field(bool, delivered)
+		__field(u32, last_y)
+		__field(u32, last_c)
+	),
+	TP_fast_assign(
+		__entry->vfe = vfe;
+		__entry->generation = generation;
+		__entry->sequence = sequence;
+		__entry->valid = valid;
+		__entry->frame = frame;
+		__entry->addr = addr;
+		__entry->delivered = delivered;
+		__entry->last_y = last_y;
+		__entry->last_c = last_c;
+	),
+	TP_printk("vfe%u gen=%u seq=%u valid=%u frame=%u addr=0x%08x delivered=%u last_y=0x%08x last_c=0x%08x",
+		  __entry->vfe, __entry->generation, __entry->sequence,
+		  __entry->valid, __entry->frame, __entry->addr,
+		  __entry->delivered, __entry->last_y, __entry->last_c)
+);
+
 #endif /* _CAMSS_VFE170_TRACE_H */
 
 #undef TRACE_INCLUDE_PATH
