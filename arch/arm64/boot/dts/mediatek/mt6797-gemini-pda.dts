@@ -805,7 +805,7 @@
 	 * polls. The port is sink-only here; DRP using the BQ25896 boost
 	 * (usb-otg-vbus) as vbus-supply is left for later.
 	 */
-	typec@25 {
+	left_typec: typec@25 {
 		compatible = "onnn,fusb301";
 		reg = <0x25>;
 
@@ -1125,6 +1125,13 @@
 		linux,skip-reset;
 
 		monitored-battery = <&battery>;
+
+		/*
+		 * PSEL is strapped high, so the BQ25896 reports USB SDP (500 mA)
+		 * for every source. Take the input current limit from the current
+		 * the left USB-C port's source advertises through its Rp resistor.
+		 */
+		power-supplies = <&left_typec>;
 
 		ti,battery-regulation-voltage = <4416000>;
 		ti,charge-current = <2048000>;
