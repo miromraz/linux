@@ -1054,6 +1054,7 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	bq->desc = bq25890_power_supply_desc;
 	bq->desc.name = bq->name;
 
+	psy_cfg.fwnode = dev_fwnode(bq->dev);
 	psy_cfg.supplied_to = bq25890_charger_supplied_to;
 	psy_cfg.num_supplicants = ARRAY_SIZE(bq25890_charger_supplied_to);
 
