@@ -63,11 +63,24 @@ enum vfe_line_id {
 #define VFE_PIX_STAGING_NUM	3
 #define VFE_PIX_DROP		VFE_PIX_STAGING_NUM
 
+/*
+ * Identity of a frame: stream generation, PIX SOF sequence and host SOF
+ * time. The SOF time is not an exposure start (rolling shutter, offset not
+ * calibrated) and is not the vb2 timestamp; userspace gets it from the
+ * FRAME_SYNC event of the same sequence.
+ */
+struct vfe_pix_token {
+	u32 generation;
+	u32 sequence;
+	u64 timestamp;
+	bool valid;
+};
+
 struct vfe_pix_frame {
 	void *cpu;
 	dma_addr_t dma;
-	u32 sequence;
-	u64 timestamp;
+	struct vfe_pix_token token;
+	u64 done_ts;		/* composite done: vb2 timestamp, V4L2 EOF meaning */
 	bool error;
 };
 
@@ -82,6 +95,9 @@ struct vfe_pix_staging {
 	size_t size;		/* NV12 bytes per frame */
 	u32 c_offset;		/* CbCr plane offset */
 	u8 hw[2];		/* frames in the two programmed address slots */
+	struct vfe_pix_token tok;	/* frame started in hw[0], not retired */
+	u32 generation;		/* stream starts, never reset */
+	u32 sof_sequence;	/* next PIX SOF sequence of this generation */
 	unsigned long free;	/* staging frames the hardware may get */
 	u8 ready[VFE_PIX_STAGING_NUM];	/* completed, in order, to copy */
 	u8 nready;
