@@ -12,22 +12,36 @@ static const struct camss_format_info video_test_formats[] = {
 	  PER_PLANE_DATA(0, 1, 1, 1, 1, 16) },
 	{ MEDIA_BUS_FMT_SGRBG10_1X10, 10, V4L2_PIX_FMT_SGRBG10P, 1,
 	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+	/* not offered by CAMSS today: exercises per-plane bounds */
+	{ MEDIA_BUS_FMT_YUYV8_1_5X8, 8, V4L2_PIX_FMT_NV12M, 2,
+	  PER_PLANE_DATA(0, 1, 1, 1, 1, 8), PER_PLANE_DATA(1, 1, 1, 2, 1, 8) },
 };
+
+static struct v4l2_pix_format_mplane *
+video_test_try_n(struct camss_video *video, u32 fourcc, u32 w, u32 h, u32 bpl,
+		 u32 size, unsigned int nplanes, struct v4l2_format *f)
+{
+	unsigned int i;
+
+	memset(f, 0, sizeof(*f));
+	f->fmt.pix_mp.pixelformat = fourcc;
+	f->fmt.pix_mp.width = w;
+	f->fmt.pix_mp.height = h;
+	f->fmt.pix_mp.num_planes = nplanes;
+	for (i = 0; i < VIDEO_MAX_PLANES; i++) {
+		f->fmt.pix_mp.plane_fmt[i].bytesperline = bpl;
+		f->fmt.pix_mp.plane_fmt[i].sizeimage = size;
+	}
+	__video_try_fmt(video, f);
+
+	return &f->fmt.pix_mp;
+}
 
 static struct v4l2_pix_format_mplane *
 video_test_try(struct camss_video *video, u32 fourcc, u32 w, u32 h, u32 bpl,
 	       u32 size, struct v4l2_format *f)
 {
-	memset(f, 0, sizeof(*f));
-	f->fmt.pix_mp.pixelformat = fourcc;
-	f->fmt.pix_mp.width = w;
-	f->fmt.pix_mp.height = h;
-	f->fmt.pix_mp.num_planes = 1;
-	f->fmt.pix_mp.plane_fmt[0].bytesperline = bpl;
-	f->fmt.pix_mp.plane_fmt[0].sizeimage = size;
-	__video_try_fmt(video, f);
-
-	return &f->fmt.pix_mp;
+	return video_test_try_n(video, fourcc, w, h, bpl, size, 1, f);
 }
 
 static struct camss_video *video_test_video(struct kunit *test, bool line_based)
@@ -95,6 +109,68 @@ static void video_test_baseline_limits(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, pix->height, 8000);
 	KUNIT_EXPECT_EQ(test, pix->plane_fmt[0].sizeimage,
 			roundup(4624 * 10 / 8, 16) * 8000);
+}
+
+/*
+ * Any requested plane count, for one and two plane formats and for an
+ * unsupported fourcc, yields the format's planes only (UBSAN fails the
+ * test on a division by an unused plane's zero subsampling).
+ */
+static void video_test_plane_counts(struct kunit *test)
+{
+	static const unsigned int counts[] = { 0, 1, 2, 3, VIDEO_MAX_PLANES };
+	static const u32 fourccs[] = {
+		V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_NV12M, v4l2_fourcc('X', 'X', 'X', 'X'),
+	};
+	struct v4l2_pix_format_mplane *pix;
+	struct camss_video *video;
+	struct v4l2_format f;
+	unsigned int i, j;
+
+	video = video_test_video(test, true);
+	for (i = 0; i < ARRAY_SIZE(fourccs); i++)
+		for (j = 0; j < ARRAY_SIZE(counts); j++) {
+			pix = video_test_try_n(video, fourccs[i], 2000, 1128, 4096, 0,
+					       counts[j], &f);
+			if (fourccs[i] == V4L2_PIX_FMT_NV12M) {
+				KUNIT_EXPECT_EQ(test, pix->num_planes, 2);
+				KUNIT_EXPECT_EQ(test, pix->plane_fmt[1].sizeimage,
+						pix->plane_fmt[1].bytesperline * 564);
+			} else {
+				KUNIT_EXPECT_EQ(test, pix->pixelformat, V4L2_PIX_FMT_NV12);
+				KUNIT_EXPECT_EQ(test, pix->num_planes, 1);
+				KUNIT_EXPECT_GE(test, pix->plane_fmt[0].sizeimage,
+						pix->plane_fmt[0].bytesperline * 1692);
+			}
+		}
+}
+
+/* Switching from a two plane request to a one plane format drops plane 1 */
+static void video_test_format_switch(struct kunit *test)
+{
+	struct v4l2_pix_format_mplane *pix;
+	struct camss_video *video;
+	struct v4l2_format f;
+
+	video = video_test_video(test, true);
+	pix = video_test_try_n(video, V4L2_PIX_FMT_NV12M, 2000, 1128, 4096, 0, 2, &f);
+	KUNIT_ASSERT_EQ(test, pix->num_planes, 2);
+	pix->pixelformat = V4L2_PIX_FMT_NV12;
+	__video_try_fmt(video, &f);
+	KUNIT_EXPECT_EQ(test, pix->num_planes, 1);
+	KUNIT_EXPECT_EQ(test, pix->plane_fmt[0].bytesperline, 4096);
+	KUNIT_EXPECT_GE(test, pix->plane_fmt[0].sizeimage, 4096 * 1692);
+	KUNIT_EXPECT_EQ(test, pix->plane_fmt[1].sizeimage, 0);
+}
+
+/* The CPU sink (PIX staging) offers no DMA-BUF import */
+static void video_test_io_modes(struct kunit *test)
+{
+	struct camss_video *video = video_test_video(test, true);
+
+	KUNIT_EXPECT_EQ(test, video_io_modes(video), VB2_DMABUF | VB2_MMAP | VB2_READ);
+	video->cpu_sink = true;
+	KUNIT_EXPECT_EQ(test, video_io_modes(video), VB2_MMAP | VB2_READ);
 }
 
 struct video_test_sd {
@@ -181,6 +257,9 @@ static struct kunit_case video_test_cases[] = {
 	KUNIT_CASE(video_test_nv12_max_height),
 	KUNIT_CASE(video_test_nv12_user_stride),
 	KUNIT_CASE(video_test_baseline_limits),
+	KUNIT_CASE(video_test_plane_counts),
+	KUNIT_CASE(video_test_format_switch),
+	KUNIT_CASE(video_test_io_modes),
 	KUNIT_CASE(video_test_start_unwind),
 	KUNIT_CASE(video_test_start_no_stream_op),
 	{}
