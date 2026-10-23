@@ -179,6 +179,13 @@
 #define		GAMMA_LUT_ENTRIES		64
 #define		GAMMA_LUT_DELTA_SHIFT		10
 
+/* Titan 170 register facts; counter phase/reset/wrap are not yet measured. */
+#define VFE_DIAG_CFG				(0xc48)
+#define		DIAG_CFG_DIAG_EN			BIT(0)
+#define		DIAG_CFG_CAMIF_FRM_CNT_EN	BIT(4)
+/* CAMIF count in bits 7:0, RDI0/1/2 in the remaining three bytes. */
+#define VFE_DIAG_SENSOR_FRM_CNT_STATUS		(0xd58)
+
 #define VFE_FULL_OUT_Y				(0xe0c)
 #define VFE_FULL_OUT_C				(0xe2c)
 #define		OUT_CROP_RND_CLAMP_CFG		(0x00)
@@ -853,6 +860,17 @@ static void vfe_pix_copy_work(struct work_struct *work)
 	}
 }
 
+static void vfe_pix_diag_enable(struct vfe_device *vfe)
+{
+	/*
+	 * Stock GPL CAMIF debug enables DIAG_EN only. The register description
+	 * separately defines CAMIF_FRM_CNT_EN; that bit is not stock-flow proof.
+	 * Preserve SENSOR_SEL, all RDI counter enables and every other field.
+	 */
+	vfe_reg_set(vfe, VFE_DIAG_CFG,
+		    DIAG_CFG_DIAG_EN | DIAG_CFG_CAMIF_FRM_CNT_EN);
+}
+
 /*
  * vfe_pix_enable - Configure and arm the PIX path
  *
@@ -936,6 +954,8 @@ static int vfe_pix_enable(struct vfe_line *line)
 	vfe_pix_config(vfe, bayer, w, h);
 
 	vfe_bus_common_init(vfe);
+	/* Powered, after reset/config/clock overrides, before arm/RUP/upstream. */
+	vfe_pix_diag_enable(vfe);
 	vfe_pix_wm_config(vfe, VFE_PIX_WM_Y, w, h, bpl);
 	vfe_pix_wm_config(vfe, VFE_PIX_WM_C, w, h / 2, bpl);
 
@@ -995,6 +1015,12 @@ static void vfe_pix_frame_sync(struct vfe_line *line, u32 sequence)
 static u32 vfe_pix_wm_last(struct vfe_device *vfe, u8 wm)
 {
 	return readl_relaxed(vfe->base + VFE_BUS_WM_STATUS0(wm));
+}
+
+/* Raw observation only, called with a live PIX output and tracing enabled. */
+static u32 vfe_pix_diag_frame_count(struct vfe_device *vfe)
+{
+	return readl_relaxed(vfe->base + VFE_DIAG_SENSOR_FRM_CNT_STATUS);
 }
 
 /*
@@ -1070,7 +1096,8 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 					     tok.valid, head, st->frame[head].dma,
 					     deliver,
 					     vfe_pix_wm_last(vfe, VFE_PIX_WM_Y),
-					     vfe_pix_wm_last(vfe, VFE_PIX_WM_C));
+					     vfe_pix_wm_last(vfe, VFE_PIX_WM_C),
+					     vfe_pix_diag_frame_count(vfe));
 		st->frame_error = false;
 
 		st->hw[0] = st->hw[1];
@@ -1087,7 +1114,8 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 					    st->tok.valid, st->hw[0],
 					    st->frame[st->hw[0]].dma,
 					    vfe_pix_wm_last(vfe, VFE_PIX_WM_Y),
-					    vfe_pix_wm_last(vfe, VFE_PIX_WM_C));
+					    vfe_pix_wm_last(vfe, VFE_PIX_WM_C),
+					    vfe_pix_diag_frame_count(vfe));
 		if (st->tok.valid)
 			fault |= vfe_pix_fault_locked(output);
 		st->tok = (struct vfe_pix_token) {

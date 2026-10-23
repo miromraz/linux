@@ -48,12 +48,16 @@ TRACE_EVENT(camss_pix_irq,
  * A PIX SOF: its token, whether a frame was still unretired (a fault) and
  * the slot the token went to (frame and its Y address). last_y/last_c are WM3/WM4
  * STATUS_0 ("last consumed client address" in the register description),
- * read for observation only; their semantics are not relied on.
+ * read for observation only; their semantics are not relied on. diag_frm_cnt
+ * is raw VFE_DIAG_SENSOR_FRM_CNT_STATUS (0xd58): CAMIF in bits 7:0,
+ * RDI0/1/2 in bits 15:8/23:16/31:24. Phase/reset/wrap are unverified;
+ * this sample is not an enforced frame identity or an atomic WM snapshot.
  */
 TRACE_EVENT(camss_pix_sof,
 	TP_PROTO(u8 vfe, u32 generation, u32 sequence, bool unretired, u8 frame,
-		 u32 addr, u32 last_y, u32 last_c),
-	TP_ARGS(vfe, generation, sequence, unretired, frame, addr, last_y, last_c),
+		 u32 addr, u32 last_y, u32 last_c, u32 diag_frm_cnt),
+	TP_ARGS(vfe, generation, sequence, unretired, frame, addr, last_y, last_c,
+		diag_frm_cnt),
 	TP_STRUCT__entry(
 		__field(u8, vfe)
 		__field(u32, generation)
@@ -63,6 +67,7 @@ TRACE_EVENT(camss_pix_sof,
 		__field(u32, addr)
 		__field(u32, last_y)
 		__field(u32, last_c)
+		__field(u32, diag_frm_cnt)
 	),
 	TP_fast_assign(
 		__entry->vfe = vfe;
@@ -73,22 +78,23 @@ TRACE_EVENT(camss_pix_sof,
 		__entry->addr = addr;
 		__entry->last_y = last_y;
 		__entry->last_c = last_c;
+		__entry->diag_frm_cnt = diag_frm_cnt;
 	),
-	TP_printk("vfe%u gen=%u seq=%u unretired=%u frame=%u addr=0x%08x last_y=0x%08x last_c=0x%08x",
+	TP_printk("vfe%u gen=%u seq=%u unretired=%u frame=%u addr=0x%08x last_y=0x%08x last_c=0x%08x diag_frm_cnt=0x%08x",
 		  __entry->vfe, __entry->generation, __entry->sequence,
 		  __entry->unretired, __entry->frame, __entry->addr,
-		  __entry->last_y, __entry->last_c)
+		  __entry->last_y, __entry->last_c, __entry->diag_frm_cnt)
 );
 
 /*
  * An image composite done: the retired slot's frame, its Y address and
- * token; last_y/last_c as for camss_pix_sof, observation only.
+ * token; last_y/last_c/diag_frm_cnt as for camss_pix_sof, observation only.
  */
 TRACE_EVENT(camss_pix_done,
 	TP_PROTO(u8 vfe, u32 generation, u32 sequence, bool valid, u8 frame,
-		 u32 addr, bool delivered, u32 last_y, u32 last_c),
+		 u32 addr, bool delivered, u32 last_y, u32 last_c, u32 diag_frm_cnt),
 	TP_ARGS(vfe, generation, sequence, valid, frame, addr, delivered,
-		last_y, last_c),
+		last_y, last_c, diag_frm_cnt),
 	TP_STRUCT__entry(
 		__field(u8, vfe)
 		__field(u32, generation)
@@ -99,6 +105,7 @@ TRACE_EVENT(camss_pix_done,
 		__field(bool, delivered)
 		__field(u32, last_y)
 		__field(u32, last_c)
+		__field(u32, diag_frm_cnt)
 	),
 	TP_fast_assign(
 		__entry->vfe = vfe;
@@ -110,11 +117,13 @@ TRACE_EVENT(camss_pix_done,
 		__entry->delivered = delivered;
 		__entry->last_y = last_y;
 		__entry->last_c = last_c;
+		__entry->diag_frm_cnt = diag_frm_cnt;
 	),
-	TP_printk("vfe%u gen=%u seq=%u valid=%u frame=%u addr=0x%08x delivered=%u last_y=0x%08x last_c=0x%08x",
+	TP_printk("vfe%u gen=%u seq=%u valid=%u frame=%u addr=0x%08x delivered=%u last_y=0x%08x last_c=0x%08x diag_frm_cnt=0x%08x",
 		  __entry->vfe, __entry->generation, __entry->sequence,
 		  __entry->valid, __entry->frame, __entry->addr,
-		  __entry->delivered, __entry->last_y, __entry->last_c)
+		  __entry->delivered, __entry->last_y, __entry->last_c,
+		  __entry->diag_frm_cnt)
 );
 
 #endif /* _CAMSS_VFE170_TRACE_H */

@@ -971,7 +971,27 @@ static void pix_test_lost_done_and_sof_undetected(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 }
 
+/* Fake MMIO proves wiring/preservation only, never counter progression. */
+static void pix_test_diag_counter_observation(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	/* SENSOR_SEL=RDI1 (2), RDI0/1/2 counters enabled; bits 0/4 clear. */
+	u32 cfg = (2u << 1) | BIT(5) | BIT(6) | BIT(7);
+	u32 status = 0xa53ce781;
+
+	t->ack_reset = true;
+	writel_relaxed(cfg, t->vfe.base + VFE_DIAG_CFG);
+	writel_relaxed(status, t->vfe.base + VFE_DIAG_SENSOR_FRM_CNT_STATUS);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_DIAG_CFG),
+			cfg | DIAG_CFG_DIAG_EN | DIAG_CFG_CAMIF_FRM_CNT_EN);
+	KUNIT_EXPECT_EQ(test, vfe_pix_diag_frame_count(&t->vfe), status);
+	KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_DIAG_SENSOR_FRM_CNT_STATUS), status);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
 static struct kunit_case pix_test_cases[] = {
+	KUNIT_CASE(pix_test_diag_counter_observation),
 	KUNIT_CASE(pix_test_pix_then_rdi),
 	KUNIT_CASE(pix_test_rdi_then_pix),
 	KUNIT_CASE(pix_test_rdi_then_rdi),
