@@ -5996,6 +5996,11 @@ static const struct of_device_id camss_dt_match[] = {
 
 MODULE_DEVICE_TABLE(of, camss_dt_match);
 
+bool camss_titan170_pix;
+module_param_named(titan170_pix, camss_titan170_pix, bool, 0444);
+MODULE_PARM_DESC(titan170_pix,
+		 "Experimental: route the full CSID IPP into the Titan 170 VFE pixel pipeline (SC7180 family)");
+
 static int __maybe_unused camss_runtime_suspend(struct device *dev)
 {
 	struct camss *camss = dev_get_drvdata(dev);

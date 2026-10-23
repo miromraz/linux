@@ -164,6 +164,8 @@ struct parent_dev_ops {
 	void __iomem *(*get_base_address)(struct camss *camss, int id);
 };
 
+extern bool camss_titan170_pix;
+
 void camss_add_clock_margin(u64 *rate);
 int camss_enable_clocks(int nclocks, struct camss_clock *clock,
 			struct device *dev);
