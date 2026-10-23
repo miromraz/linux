@@ -21,6 +21,9 @@
 #include "camss.h"
 #include "camss-vfe.h"
 
+#define CREATE_TRACE_POINTS
+#include "camss-vfe-17x-trace.h"
+
 #define VFE_GLOBAL_RESET_CMD			(0x018)
 #define		GLOBAL_RESET_CMD_CORE		BIT(0)
 #define		GLOBAL_RESET_CMD_CAMIF		BIT(1)
@@ -1074,6 +1077,12 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 
 	writel_relaxed(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
 	writel_relaxed(1, vfe->base + VFE_BUS_IRQ_CLEAR_GLOBAL);
+
+	if (pix)
+		trace_camss_pix_irq(vfe->id, status0, status1, vfe_bus_status[0],
+				    vfe_bus_status[1],
+				    READ_ONCE(vfe->line[VFE_LINE_PIX].output.pix.hw[0]),
+				    READ_ONCE(vfe->line[VFE_LINE_PIX].output.pix.hw[1]));
 
 	if (status0 & STATUS_0_RESET_ACK)
 		vfe->isr_ops.reset_ack(vfe);
