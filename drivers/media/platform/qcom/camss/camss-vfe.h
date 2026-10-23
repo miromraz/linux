@@ -56,6 +56,36 @@ enum vfe_line_id {
 	VFE_LINE_NUM_MAX = 4
 };
 
+/* Frames the PIX write masters may target; the last one is the drop frame */
+#define VFE_PIX_STAGING_NUM	3
+#define VFE_PIX_DROP		VFE_PIX_STAGING_NUM
+
+struct vfe_pix_frame {
+	void *cpu;
+	dma_addr_t dma;
+	u32 sequence;
+	u64 timestamp;
+	bool error;
+};
+
+/*
+ * Titan 170 PIX staging: the hardware writes only driver allocations; a
+ * worker copies completed frames into vb2 buffers. A frame is handed back
+ * to the hardware only after its copy finished. All fields but the frame
+ * contents are protected by vfe->output_lock.
+ */
+struct vfe_pix_staging {
+	struct vfe_pix_frame frame[VFE_PIX_STAGING_NUM + 1];
+	size_t size;		/* NV12 bytes per frame */
+	u32 c_offset;		/* CbCr plane offset */
+	u8 hw[2];		/* frames in the two programmed address slots */
+	unsigned long free;	/* staging frames the hardware may get */
+	u8 ready[VFE_PIX_STAGING_NUM];	/* completed, in order, to copy */
+	u8 nready;
+	bool frame_error;	/* a bus or CAMIF error hit the frame in hw[0] */
+	struct work_struct copy_work;
+};
+
 struct vfe_output {
 	u8 wm_num;
 	u8 wm_idx[3];
@@ -66,16 +96,8 @@ struct vfe_output {
 
 	unsigned int drop_update_idx;
 
-	/*
-	 * Titan 170 PIX: driver-owned DMA target written by the hardware for
-	 * frames that have no queued buffer, so the write masters never point
-	 * at a buffer that has been returned to userspace.
-	 */
-	void *scratch_cpu;
-	dma_addr_t scratch_dma;
-	size_t scratch_size;
-	/* A bus or CAMIF error hit the frame at the head of buf[] */
-	bool frame_error;
+	/* Titan 170 PIX: DMA only ever targets these driver frames */
+	struct vfe_pix_staging pix;
 
 	union {
 		struct {
@@ -171,6 +193,12 @@ struct vfe_device {
 	int power_count;
 	struct mutex stream_lock;
 	int stream_count;
+	/* PIX owns the VFE exclusively (titan170_pix), under stream_lock */
+	bool pix_active;
+	/* A stop could not reset the VFE; refuse streaming until power cycle */
+	bool wedged;
+	/* PIX DMA frames abandoned to the hardware after an unconfirmed reset */
+	size_t quarantined;
 	spinlock_t output_lock;
 	enum vfe_line_id wm_output_map[MSM_VFE_IMAGE_MASTERS_NUM];
 	struct vfe_line line[VFE_LINE_NUM_MAX];
