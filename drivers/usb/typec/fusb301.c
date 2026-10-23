@@ -9,6 +9,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/workqueue.h>
@@ -74,6 +75,9 @@ struct fusb301 {
 	struct delayed_work poll_work;
 	enum typec_pwr_opmode pwr_opmode;
 	unsigned int partner_type;
+	struct power_supply *psy;
+	struct power_supply_desc psy_desc;
+	unsigned int sink_current_ua;
 };
 
 /*
@@ -166,6 +170,59 @@ static enum typec_pwr_opmode fusb301_sink_opmode(unsigned int status)
 	}
 }
 
+/* Current a source advertises through its Rp resistor, in microamperes. */
+static unsigned int fusb301_sink_current_ua(enum typec_pwr_opmode mode)
+{
+	switch (mode) {
+	case TYPEC_PWR_MODE_1_5A:
+		return 1500000;
+	case TYPEC_PWR_MODE_3_0A:
+		return 3000000;
+	case TYPEC_PWR_MODE_USB:
+	default:
+		return 500000;
+	}
+}
+
+/*
+ * Publish the Type-C current the attached source advertises so a charger
+ * wired as a supplicant (power-supplies phandle) can raise its input current
+ * limit. Zero means no source we draw from is attached.
+ */
+static void fusb301_set_sink_current(struct fusb301 *fusb, unsigned int ua)
+{
+	if (fusb->sink_current_ua == ua)
+		return;
+
+	fusb->sink_current_ua = ua;
+	power_supply_changed(fusb->psy);
+}
+
+static int fusb301_psy_get_property(struct power_supply *psy,
+				    enum power_supply_property psp,
+				    union power_supply_propval *val)
+{
+	struct fusb301 *fusb = power_supply_get_drvdata(psy);
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_ONLINE:
+		val->intval = fusb->sink_current_ua > 0;
+		break;
+	case POWER_SUPPLY_PROP_CURRENT_MAX:
+		val->intval = fusb->sink_current_ua;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static const enum power_supply_property fusb301_psy_props[] = {
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_CURRENT_MAX,
+};
+
 static int fusb301_set_port_type(struct typec_port *port,
 				  enum typec_port_type type)
 {
@@ -215,6 +272,7 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		fusb301_vbus_set(fusb, false);
 		fusb301_unregister_partner(fusb);
 		fusb->partner_type = 0;
+		fusb301_set_sink_current(fusb, 0);
 		pwr_role = fusb301_default_role(fusb);
 		data_role = pwr_role == TYPEC_SOURCE ? TYPEC_HOST : TYPEC_DEVICE;
 		usb_role_switch_set_role(fusb->role_sw, USB_ROLE_NONE);
@@ -256,10 +314,15 @@ static int fusb301_update_status(struct fusb301 *fusb)
 		typec_set_data_role(fusb->port, data_role);
 	}
 
-	if (pwr_role == TYPEC_SINK)
-		typec_set_pwr_opmode(fusb->port, fusb301_sink_opmode(status));
-	else
+	if (pwr_role == TYPEC_SINK) {
+		enum typec_pwr_opmode opmode = fusb301_sink_opmode(status);
+
+		typec_set_pwr_opmode(fusb->port, opmode);
+		fusb301_set_sink_current(fusb, fusb301_sink_current_ua(opmode));
+	} else {
 		typec_set_pwr_opmode(fusb->port, fusb->pwr_opmode);
+		fusb301_set_sink_current(fusb, 0);
+	}
 
 	typec_set_orientation(fusb->port, fusb301_orientation(status));
 	fusb->partner_type = partner_type;
@@ -339,6 +402,7 @@ static int fusb301_hw_init(struct fusb301 *fusb)
 
 static int fusb301_probe(struct i2c_client *client)
 {
+	struct power_supply_config psy_cfg = { };
 	struct device *dev = &client->dev;
 	struct fusb301 *fusb;
 	const char *opmode;
@@ -420,6 +484,26 @@ static int fusb301_probe(struct i2c_client *client)
 	if (IS_ERR(fusb->port)) {
 		ret = PTR_ERR(fusb->port);
 		goto err_put_role_sw;
+	}
+
+	fusb->psy_desc.name = devm_kasprintf(dev, GFP_KERNEL, "fusb301-%s",
+					     dev_name(dev));
+	if (!fusb->psy_desc.name) {
+		ret = -ENOMEM;
+		goto err_unregister_port;
+	}
+	fusb->psy_desc.type = POWER_SUPPLY_TYPE_USB;
+	fusb->psy_desc.properties = fusb301_psy_props;
+	fusb->psy_desc.num_properties = ARRAY_SIZE(fusb301_psy_props);
+	fusb->psy_desc.get_property = fusb301_psy_get_property;
+
+	psy_cfg.fwnode = dev_fwnode(dev);
+	psy_cfg.drv_data = fusb;
+	fusb->psy = devm_power_supply_register(dev, &fusb->psy_desc, &psy_cfg);
+	if (IS_ERR(fusb->psy)) {
+		ret = dev_err_probe(dev, PTR_ERR(fusb->psy),
+				    "failed to register power supply\n");
+		goto err_unregister_port;
 	}
 
 	ret = fusb301_update_status(fusb);
