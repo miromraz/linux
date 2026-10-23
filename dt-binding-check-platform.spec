@@ -34,6 +34,10 @@ tree-wide pre-existing findings are logged but do not fail the build.
 
 %build
 set -o pipefail
+# scmsync splits the kernel tree into per-top-dir *.obscpio which OBS unpacks
+# into the sources dir (%{_sourcedir}); that is the kernel tree root, not the
+# empty %%{name}-%%{version}-build subdir rpm cd's us into. Run make from there.
+cd %{_sourcedir}
 echo "=== dt-validate version ==="; dt-validate --version 2>&1 || true
 
 # The 56 binding yaml the series adds/changes (basenames, for scoping).
@@ -143,6 +147,8 @@ fi
 exit $rc
 
 %install
+# %%build ran in the kernel root (%{_sourcedir}) and wrote the logs there.
+cd %{_sourcedir}
 d=%{buildroot}%{_docdir}/%{name}
 install -D -m0644 binding_check.full.log     $d/binding_check.full.log
 install -D -m0644 binding_check.series.log   $d/binding_check.series.log
