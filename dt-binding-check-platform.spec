@@ -19,9 +19,7 @@ BuildRequires:  bison
 BuildRequires:  flex
 BuildRequires:  dtc
 BuildRequires:  python3-dtschema
-BuildRequires:  yamllint
 BuildRequires:  perl
-BuildRequires:  cpp
 BuildRequires:  rsync
 
 %description
