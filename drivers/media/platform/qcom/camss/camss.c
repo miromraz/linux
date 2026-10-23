@@ -6139,9 +6139,25 @@ static struct platform_driver qcom_camss_driver = {
 	},
 };
 
-module_platform_driver(qcom_camss_driver);
+static int __init camss_init(void)
+{
+	/*
+	 * With the experimental pixel path an unacknowledged VFE reset leaves
+	 * DMA this driver must keep owning: no sysfs unbind (the module also
+	 * pins itself in that case, see vfe_pix_release_frames()).
+	 */
+	qcom_camss_driver.driver.suppress_bind_attrs = camss_titan170_pix;
+
+	return platform_driver_register(&qcom_camss_driver);
+}
+module_init(camss_init);
+
+static void __exit camss_exit(void)
+{
+	platform_driver_unregister(&qcom_camss_driver);
+}
+module_exit(camss_exit);
 
 MODULE_DESCRIPTION("Qualcomm Camera Subsystem driver");
-MODULE_IMPORT_NS("DMA_BUF");
 MODULE_AUTHOR("Todor Tomov <todor.tomov@linaro.org>");
 MODULE_LICENSE("GPL v2");

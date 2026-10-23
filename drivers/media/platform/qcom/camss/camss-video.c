@@ -258,6 +258,20 @@ static int video_prepare_streaming(struct vb2_queue *q)
 }
 
 /*
+ * A CPU sink (Titan 170 PIX staging) cannot import DMA-BUFs: writing one
+ * means CPU access waits on its fences, without bound, in the copy worker
+ * that STREAMOFF has to wait for. ponytail: MMAP/READ until bounded,
+ * cancellable import (or zero-copy capture) exists.
+ */
+static unsigned int video_io_modes(const struct camss_video *video)
+{
+	if (video->cpu_sink)
+		return VB2_MMAP | VB2_READ;
+
+	return VB2_DMABUF | VB2_MMAP | VB2_READ;
+}
+
+/*
  * camss_video_start_subdevs - Start a pipeline, unwinding on failure
  * @sd: subdevs from the video node upstream
  * @n: number of subdevs
@@ -559,9 +573,10 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
 	/*
 	 * Line based outputs are limited in image height; a plane holds
 	 * that many lines scaled by its vertical subsampling (NV12: 3/2).
+	 * Only the format's planes carry meaningful requests.
 	 */
 	if (video->line_based)
-		for (i = 0; i < pix_mp->num_planes && i < 3; i++) {
+		for (i = 0; i < min_t(unsigned int, pix_mp->num_planes, fi->planes); i++) {
 			p = &pix_mp->plane_fmt[i];
 			bytesperline[i] = clamp_t(u32, p->bytesperline,
 						  1, 65528);
@@ -791,7 +806,7 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 	q->mem_ops = video->cpu_sink ? &vb2_vmalloc_memops : &vb2_dma_sg_memops;
 	q->ops = &msm_video_vb2_q_ops;
 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-	q->io_modes = VB2_DMABUF | VB2_MMAP | VB2_READ;
+	q->io_modes = video_io_modes(video);
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
 	q->buf_struct_size = sizeof(struct camss_buffer);
 	/*

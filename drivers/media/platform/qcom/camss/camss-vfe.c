@@ -762,6 +762,9 @@ int vfe_reset(struct vfe_device *vfe)
 {
 	unsigned long time;
 
+	if (vfe->res->hw_ops->reset && vfe_line_is_pix(&vfe->line[VFE_LINE_PIX]))
+		return vfe->res->hw_ops->reset(vfe);
+
 	reinit_completion(&vfe->reset_complete);
 
 	vfe->res->hw_ops->global_reset(vfe);
@@ -1200,6 +1203,12 @@ int vfe_get(struct vfe_device *vfe)
 
 	mutex_lock(&vfe->power_lock);
 
+	/* fail closed: an unacknowledged reset is not retried until reboot */
+	if (READ_ONCE(vfe->wedged)) {
+		ret = -EIO;
+		goto error_pm_domain;
+	}
+
 	if (vfe->power_count == 0) {
 		ret = vfe->res->hw_ops->pm_domain_on(vfe);
 		if (ret < 0)
@@ -1229,13 +1238,11 @@ int vfe_get(struct vfe_device *vfe)
 		/*
 		 * Nothing streams on an unpowered VFE: drop counts a failed
 		 * start or stop left behind, so the next enable restores the
-		 * IRQ masks the reset cleared. A wedged VFE is usable again
-		 * once this power-up reset was acknowledged.
+		 * IRQ masks the reset cleared.
 		 */
 		mutex_lock(&vfe->stream_lock);
 		vfe->stream_count = 0;
 		vfe->pix_active = false;
-		vfe->wedged = false;
 		mutex_unlock(&vfe->stream_lock);
 
 		vfe->res->hw_ops->hw_version(vfe);
@@ -2389,9 +2396,6 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
 {
 	int i;
 
-	mutex_destroy(&vfe->power_lock);
-	mutex_destroy(&vfe->stream_lock);
-
 	for (i = 0; i < vfe->res->line_num; i++) {
 		struct v4l2_subdev *sd = &vfe->line[i].subdev;
 		struct camss_video *video_out = &vfe->line[i].video_out;
@@ -2400,6 +2404,10 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
 	}
+
+	/* unregistering a queue can stop and power down the line */
+	mutex_destroy(&vfe->power_lock);
+	mutex_destroy(&vfe->stream_lock);
 }
 
 bool vfe_is_lite(struct vfe_device *vfe)

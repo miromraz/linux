@@ -12,7 +12,9 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/math64.h>
-#include <linux/dma-buf.h>
+#include <linux/list.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
 
 #include <kunit/static_stub.h>
 
@@ -685,73 +687,107 @@ static void vfe_pix_frame_free(struct vfe_device *vfe, size_t size,
 }
 
 /*
- * vfe_pix_release_frames - Free the DMA frames, or abandon them
+ * DMA frames left to an unconfirmed reset. Kept for the life of the system:
+ * the allocations (pages and IOVA mappings) and a reference on the device
+ * are never released, and the module pins itself so that an unload cannot
+ * tear down the device and its IOMMU domain. With titan170_pix the driver
+ * also suppresses sysfs bind/unbind (see camss_init()). This does not make
+ * kexec, or removal of the platform device by other means, safe; neither
+ * happens in normal operation of the A52 build this targets.
+ */
+struct vfe_pix_quarantine {
+	struct list_head list;
+	struct device *dev;
+	size_t size;
+	struct vfe_pix_frame frame[VFE_PIX_STAGING_NUM + 1];
+};
+
+static LIST_HEAD(vfe_pix_quarantine_list);
+static DEFINE_MUTEX(vfe_pix_quarantine_lock);
+
+/*
+ * vfe_pix_release_frames - Free the DMA frames, or retain them for good
  * @quarantine: the bus was not confirmed idle; the hardware may still
  *              write to any of them, so none may ever be reused or freed
  */
 static void vfe_pix_release_frames(struct vfe_device *vfe, struct vfe_pix_staging *st,
 				   bool quarantine)
 {
+	struct vfe_pix_quarantine *q;
 	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(st->frame); i++) {
-		if (!st->frame[i].cpu)
-			continue;
-		if (quarantine)
-			vfe->quarantined += st->size;
-		else
-			vfe_pix_frame_free(vfe, st->size, &st->frame[i]);
-		st->frame[i].cpu = NULL;
+	if (!quarantine) {
+		for (i = 0; i < ARRAY_SIZE(st->frame); i++)
+			if (st->frame[i].cpu)
+				vfe_pix_frame_free(vfe, st->size, &st->frame[i]);
+		memset(st->frame, 0, sizeof(st->frame));
+		return;
 	}
+
+	mutex_lock(&vfe_pix_quarantine_lock);
+	if (list_empty(&vfe_pix_quarantine_list))
+		__module_get(THIS_MODULE);	/* never put */
+
+	/* ponytail: on allocation failure the frames are still never freed */
+	q = kzalloc(sizeof(*q), GFP_KERNEL);
+	if (q) {
+		q->dev = get_device(vfe->camss->dev);
+		q->size = st->size;
+		memcpy(q->frame, st->frame, sizeof(q->frame));
+		list_add_tail(&q->list, &vfe_pix_quarantine_list);
+	}
+	for (i = 0; i < ARRAY_SIZE(st->frame); i++)
+		if (st->frame[i].cpu)
+			vfe->quarantined += st->size;
+	mutex_unlock(&vfe_pix_quarantine_lock);
+
+	memset(st->frame, 0, sizeof(st->frame));
 }
 
 /*
  * vfe_pix_copy - Copy a completed staging frame into a vb2 buffer
  *
- * The PIX video node uses vb2-vmalloc: its buffers are CPU memory with no
- * device mapping. MMAP buffers need no cache maintenance; an imported
- * DMA-BUF is written through its vmap inside the exporter's CPU write
- * access window. The staging frame is synced for the CPU before reading.
+ * The PIX video node uses vb2-vmalloc with MMAP/READ only: its buffers are
+ * CPU memory with no device mapping and need no cache maintenance. The
+ * staging frame is synced for the CPU before reading. DMA-BUF import is not
+ * offered: an exporter's CPU access can wait on fences without bound, and
+ * this worker must always finish for STREAMOFF to complete.
  */
 static int vfe_pix_copy(struct vfe_device *vfe, struct vfe_pix_staging *st,
 			struct vfe_pix_frame *f, struct camss_buffer *buf)
 {
-	struct vb2_buffer *vb = &buf->vb.vb2_buf;
-	struct dma_buf *dbuf = NULL;
-	void *dst;
-	int ret;
+	void *dst = vb2_plane_vaddr(&buf->vb.vb2_buf, 0);
 
 	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_copy, vfe, st, f, buf);
 
+	if (!dst)
+		return -ENOMEM;
+
 	dma_sync_single_for_cpu(vfe->camss->dev, f->dma, st->size, DMA_FROM_DEVICE);
+	memcpy(dst, f->cpu, st->size);
 
-	if (vb->memory == VB2_MEMORY_DMABUF) {
-		dbuf = vb->planes[0].dbuf;
-		ret = dma_buf_begin_cpu_access(dbuf, DMA_TO_DEVICE);
-		if (ret)
-			return ret;
-	}
-
-	dst = vb2_plane_vaddr(vb, 0);
-	if (dst)
-		memcpy(dst, f->cpu, st->size);
-
-	if (dbuf) {
-		ret = dma_buf_end_cpu_access(dbuf, DMA_TO_DEVICE);
-		if (ret)
-			return ret;
-	}
-
-	return dst ? 0 : -ENOMEM;
+	return 0;
 }
 
-/* Give a copied staging frame back to the device. A KUnit stub point. */
-static void vfe_pix_frame_to_device(struct vfe_device *vfe, struct vfe_pix_staging *st,
+/*
+ * Hand a staging or drop frame to the device: before its address is first
+ * published (the allocator leaves CPU cache lines dirty) and after every
+ * copy. A KUnit static stub point.
+ */
+static void vfe_pix_frame_to_device(struct vfe_device *vfe, size_t size,
 				    struct vfe_pix_frame *f)
 {
-	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_frame_to_device, vfe, st, f);
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_frame_to_device, vfe, size, f);
 
-	dma_sync_single_for_device(vfe->camss->dev, f->dma, st->size, DMA_FROM_DEVICE);
+	dma_sync_single_for_device(vfe->camss->dev, f->dma, size, DMA_FROM_DEVICE);
+}
+
+/* Fail the vb2 queue after a fault. A KUnit static stub point. */
+static void vfe_pix_signal_fault(struct vfe_line *line)
+{
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_signal_fault, line);
+
+	vb2_queue_error(&line->video_out.vb2_q);
 }
 
 /* vb2 completion, a KUnit static stub point */
@@ -783,7 +819,7 @@ static void vfe_pix_copy_work(struct work_struct *work)
 
 	for (;;) {
 		spin_lock_irqsave(&vfe->output_lock, flags);
-		if (output->state != VFE_OUTPUT_ON || !st->nready) {
+		if (output->state != VFE_OUTPUT_ON || st->faulted || !st->nready) {
 			spin_unlock_irqrestore(&vfe->output_lock, flags);
 			return;
 		}
@@ -805,7 +841,7 @@ static void vfe_pix_copy_work(struct work_struct *work)
 					    vfe->id, f->sequence);
 		}
 
-		vfe_pix_frame_to_device(vfe, st, f);
+		vfe_pix_frame_to_device(vfe, st->size, f);
 
 		spin_lock_irqsave(&vfe->output_lock, flags);
 		set_bit(idx, &st->free);
@@ -857,6 +893,8 @@ static int vfe_pix_enable(struct vfe_line *line)
 			ret = -ENOMEM;
 			goto error_free;
 		}
+		/* clean the allocator's dirty lines before any address is published */
+		vfe_pix_frame_to_device(vfe, size, &frame[i]);
 	}
 
 	INIT_WORK(&st->copy_work, vfe_pix_copy_work);
@@ -878,6 +916,7 @@ static int vfe_pix_enable(struct vfe_line *line)
 	st->free = GENMASK(VFE_PIX_STAGING_NUM - 1, 0);
 	st->nready = 0;
 	st->frame_error = false;
+	st->faulted = false;
 	output->wm_num = 2;
 	output->wm_idx[0] = VFE_PIX_WM_Y;
 	output->wm_idx[1] = VFE_PIX_WM_C;
@@ -943,7 +982,7 @@ static void vfe_pix_buf_done(struct vfe_device *vfe)
 	}
 
 	head = st->hw[0];
-	if (head != VFE_PIX_DROP && output->state == VFE_OUTPUT_ON) {
+	if (head != VFE_PIX_DROP && output->state == VFE_OUTPUT_ON && !st->faulted) {
 		st->frame[head].sequence = output->sequence;
 		st->frame[head].timestamp = ts;
 		st->frame[head].error = st->frame_error;
@@ -955,26 +994,53 @@ static void vfe_pix_buf_done(struct vfe_device *vfe)
 	output->sequence++;
 
 	st->hw[0] = st->hw[1];
-	st->hw[1] = output->state == VFE_OUTPUT_ON ? vfe_pix_take_frame(st) :
-						     VFE_PIX_DROP;
+	st->hw[1] = output->state == VFE_OUTPUT_ON && !st->faulted ?
+		    vfe_pix_take_frame(st) : VFE_PIX_DROP;
 	vfe_pix_queue_addr(vfe, st, st->hw[1]);
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 }
 
+/* Bus errors after which completions may no longer match address slots */
+#define VFE_PIX_BUS_FAULT	(STATUS0_COMP_ERROR | STATUS0_COMP_OVERWRITE | \
+				 STATUS0_OVERFLOW | STATUS0_VIOLATION)
+
+/*
+ * vfe_pix_error - Bus or CAMIF error on the PIX line
+ *
+ * A CAMIF error or VFE violation fails the frame in progress. A bus
+ * overflow, violation or composite error/overwrite can mean a completion
+ * was lost or merged, after which a completion no longer proves which
+ * staging frame the hardware finished: fail closed. No completed frame is
+ * read any more, the hardware only gets the drop frame, and the queue is
+ * failed so that userspace stops; the frames are freed or retained at stop
+ * depending on the reset.
+ */
 static void vfe_pix_error(struct vfe_device *vfe, u32 status1, u32 bus_status0)
 {
-	struct vfe_output *output = &vfe->line[VFE_LINE_PIX].output;
+	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
+	struct vfe_output *output = &line->output;
+	struct vfe_pix_staging *st = &output->pix;
+	bool fault = false;
 	unsigned long flags;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
-	if (output->state == VFE_OUTPUT_ON)
-		output->pix.frame_error = true;
+	if (output->state == VFE_OUTPUT_ON) {
+		st->frame_error = true;
+		if ((bus_status0 & VFE_PIX_BUS_FAULT) && !st->faulted) {
+			st->faulted = true;
+			st->nready = 0;
+			fault = true;
+		}
+	}
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
+	if (fault)
+		vfe_pix_signal_fault(line);
+
 	dev_err_ratelimited(vfe->camss->dev,
-			    "VFE%u PIX: error status1 0x%08x bus0 0x%08x\n",
-			    vfe->id, status1, bus_status0);
+			    "VFE%u PIX: %s status1 0x%08x bus0 0x%08x\n", vfe->id,
+			    fault ? "fault, capture stopped:" : "error", status1, bus_status0);
 }
 
 /*
@@ -1119,20 +1185,22 @@ static int vfe_enable(struct vfe_line *line)
 
 	/*
 	 * A global reset is the only stop this backend has and it takes down
-	 * every line, so with the pixel path enabled PIX owns the VFE alone.
-	 * Reserved here, under stream_lock, in either start order.
+	 * every line, so with the pixel path enabled one line (PIX or RDI)
+	 * owns the VFE at a time. Reserved here, under stream_lock, in either
+	 * start order. ponytail: whole-VFE exclusivity until lines can be
+	 * stopped individually.
 	 */
 	if (vfe_line_is_pix(&vfe->line[VFE_LINE_PIX])) {
 		ret = 0;
-		if (vfe->wedged)
+		if (READ_ONCE(vfe->wedged))
 			ret = -EIO;
-		else if (vfe_line_is_pix(line) ? vfe->stream_count : vfe->pix_active)
+		else if (vfe->stream_count)
 			ret = -EBUSY;
 		if (ret) {
 			mutex_unlock(&vfe->stream_lock);
 			dev_err(vfe->camss->dev, "VFE%u: %s\n", vfe->id,
-				ret == -EIO ? "wedged, power cycle required" :
-				"PIX and RDI cannot stream together");
+				ret == -EIO ? "wedged, reboot required" :
+				"one line streams at a time");
 			return ret;
 		}
 		if (vfe_line_is_pix(line))
@@ -1274,35 +1342,64 @@ out_unlock:
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 }
 
-/*
- * vfe_pix_reset - Global reset, the only stop this backend has
- *
- * The reset acknowledge normally arrives as an IRQ. If it times out, take
- * the status away from the ISR and look again: a fresh RESET_ACK in
- * STATUS_0 means the IRQ was lost, not the reset. Anything else is an
- * unconfirmed reset.
- */
-static int vfe_pix_reset(struct vfe_device *vfe)
+/* RESET_ACK status and its clear, KUnit static stub points */
+static bool vfe_reset_ack_status(struct vfe_device *vfe)
 {
-	int ret;
+	KUNIT_STATIC_STUB_REDIRECT(vfe_reset_ack_status, vfe);
 
-	/* no stale acknowledge may stand in for this reset */
+	return readl(vfe->base + VFE_IRQ_STATUS_0) & STATUS_0_RESET_ACK;
+}
+
+static void vfe_reset_ack_clear(struct vfe_device *vfe)
+{
+	KUNIT_STATIC_STUB_REDIRECT(vfe_reset_ack_clear, vfe);
+
 	writel_relaxed(STATUS_0_RESET_ACK, vfe->base + VFE_IRQ_CLEAR_0);
 	writel(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
+}
 
-	ret = vfe_reset(vfe);
-	if (!ret)
-		return 0;
+/*
+ * vfe_reset_170 - Serialized global reset (titan170_pix)
+ *
+ * Used for every reset of a PIX capable VFE: stream stop and power-up. The
+ * ISR is kept off the line for the whole sequence, so only this function
+ * consumes RESET_ACK: drain a stale acknowledge and require it to clear,
+ * issue the reset, poll for a fresh acknowledge, clear it.
+ *
+ * A reset that is not acknowledged leaves the bus state unknown, and a
+ * late acknowledge could later pass for a new one. Fail closed: the VFE is
+ * wedged until reboot and no further reset is attempted.
+ */
+static int vfe_reset_170(struct vfe_device *vfe)
+{
+	bool ack;
+	int ret;
+
+	if (READ_ONCE(vfe->wedged))
+		return -EIO;
 
 	disable_irq(vfe->irq);
-	if (completion_done(&vfe->reset_complete) ||
-	    readl(vfe->base + VFE_IRQ_STATUS_0) & STATUS_0_RESET_ACK) {
-		writel_relaxed(STATUS_0_RESET_ACK, vfe->base + VFE_IRQ_CLEAR_0);
-		writel(CMD_GLOBAL_CLEAR, vfe->base + VFE_IRQ_CMD);
-		dev_warn(vfe->camss->dev, "VFE%u: reset acknowledged without IRQ\n",
+
+	vfe_reset_ack_clear(vfe);
+	if (vfe_reset_ack_status(vfe)) {
+		ret = -EIO;
+		dev_crit(vfe->camss->dev, "VFE%u: stale reset acknowledge does not clear\n",
 			 vfe->id);
-		ret = 0;
+		goto out;
 	}
+
+	vfe->res->hw_ops->global_reset(vfe);
+
+	ret = read_poll_timeout(vfe_reset_ack_status, ack, ack, 100,
+				VFE_RESET_TIMEOUT_US, false, vfe);
+	if (!ret)
+		vfe_reset_ack_clear(vfe);
+	else
+		dev_crit(vfe->camss->dev, "VFE%u: reset not acknowledged\n", vfe->id);
+
+out:
+	if (ret)
+		WRITE_ONCE(vfe->wedged, true);
 	enable_irq(vfe->irq);
 
 	return ret;
@@ -1337,7 +1434,7 @@ static int vfe_pix_disable(struct vfe_line *line)
 	/* a copy in progress completes its vb2 buffer; no new ones start */
 	cancel_work_sync(&st->copy_work);
 
-	ret = vfe_pix_reset(vfe);
+	ret = vfe_reset(vfe);
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	output->state = VFE_OUTPUT_IDLE;
@@ -1348,15 +1445,13 @@ static int vfe_pix_disable(struct vfe_line *line)
 	vfe_put_output(line);
 
 	mutex_lock(&vfe->stream_lock);
-	if (ret)
-		vfe->wedged = true;
 	vfe->pix_active = false;
 	vfe->stream_count--;
 	mutex_unlock(&vfe->stream_lock);
 
 	if (ret)
 		dev_crit(vfe->camss->dev,
-			 "VFE%u PIX: reset not confirmed, %zu bytes of DMA frames abandoned, VFE disabled until power cycle\n",
+			 "VFE%u PIX: reset not confirmed, %zu bytes of DMA frames retained, VFE disabled until reboot\n",
 			 vfe->id, vfe->quarantined);
 
 	return ret;
@@ -1399,6 +1494,7 @@ const struct vfe_hw_ops vfe_ops_170 = {
 	.pm_domain_on = vfe_pm_domain_on,
 	.reg_update_clear = vfe_reg_update_clear,
 	.reg_update = vfe_reg_update,
+	.reset = vfe_reset_170,
 	.subdev_init = vfe_subdev_init,
 	.vfe_disable = vfe_disable_170,
 	.vfe_enable = vfe_enable,

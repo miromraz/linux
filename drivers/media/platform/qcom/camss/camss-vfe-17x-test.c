@@ -30,13 +30,18 @@ struct pix_test {
 	struct vfe_hw_ops ops;
 	struct camss_buffer buf[PIX_TEST_NBUF];
 
-	/* reset acknowledged by IRQ, or only visible in STATUS_0 */
+	/* emulated RESET_ACK: set by an acknowledged reset, write-1-to-clear */
 	bool ack_reset;
-	bool ack_status_only;
+	bool ack_pending;
+	bool ack_stuck;
 	unsigned int resets;
 
 	unsigned int allocs, frees, fail_alloc_at;
 	unsigned int to_device;
+	/* device handoffs seen while no WM was enabled nor address published */
+	unsigned int handoff_unpublished;
+	dma_addr_t handoff[VFE_PIX_STAGING_NUM + 1];
+	unsigned int faults;
 
 	struct camss_buffer *returned[PIX_TEST_NBUF * 2];
 	enum vb2_buffer_state state[PIX_TEST_NBUF * 2];
@@ -68,9 +73,24 @@ static void pix_test_global_reset(struct vfe_device *vfe)
 
 	t->resets++;
 	if (t->ack_reset)
-		complete(&vfe->reset_complete);
-	else if (t->ack_status_only)
-		writel_relaxed(STATUS_0_RESET_ACK, vfe->base + VFE_IRQ_STATUS_0);
+		t->ack_pending = true;
+}
+
+static bool pix_test_ack_status(struct vfe_device *vfe)
+{
+	struct pix_test *t = pix_test_ctx();
+
+	return t->ack_pending || t->ack_stuck;
+}
+
+static void pix_test_ack_clear(struct vfe_device *vfe)
+{
+	pix_test_ctx()->ack_pending = false;
+}
+
+static void pix_test_signal_fault(struct vfe_line *line)
+{
+	pix_test_ctx()->faults++;
 }
 
 static void *pix_test_frame_alloc(struct vfe_device *vfe, size_t size, dma_addr_t *dma)
@@ -107,10 +127,20 @@ static int pix_test_copy(struct vfe_device *vfe, struct vfe_pix_staging *st,
 	return 0;
 }
 
-static void pix_test_to_device(struct vfe_device *vfe, struct vfe_pix_staging *st,
+static u32 pix_reg(struct pix_test *t, u32 reg);
+
+static void pix_test_to_device(struct vfe_device *vfe, size_t size,
 			       struct vfe_pix_frame *f)
 {
-	pix_test_ctx()->to_device++;
+	struct pix_test *t = pix_test_ctx();
+
+	if (!pix_reg(t, VFE_BUS_WM_CFG(VFE_PIX_WM_Y)) &&
+	    !pix_reg(t, VFE_BUS_WM_CFG(VFE_PIX_WM_C)) &&
+	    !pix_reg(t, VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_Y)) &&
+	    !pix_reg(t, VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_C)) &&
+	    t->handoff_unpublished < ARRAY_SIZE(t->handoff))
+		t->handoff[t->handoff_unpublished++] = f->dma;
+	t->to_device++;
 }
 
 static void pix_test_return_buf(struct camss_buffer *buf, enum vb2_buffer_state state)
@@ -150,6 +180,7 @@ static int pix_test_init(struct kunit *test)
 	t->csid.camss = &t->camss;
 
 	t->ops = vfe_ops_170;
+	t->ops.subdev_init(dev, &t->vfe);
 	t->ops.global_reset = pix_test_global_reset;
 	t->vres.has_pix = true;
 	t->vres.line_num = 4;
@@ -198,12 +229,39 @@ static int pix_test_init(struct kunit *test)
 	kunit_activate_static_stub(test, vfe_pix_copy, pix_test_copy);
 	kunit_activate_static_stub(test, vfe_pix_frame_to_device, pix_test_to_device);
 	kunit_activate_static_stub(test, vfe_pix_return_buf, pix_test_return_buf);
+	kunit_activate_static_stub(test, vfe_reset_ack_status, pix_test_ack_status);
+	kunit_activate_static_stub(test, vfe_reset_ack_clear, pix_test_ack_clear);
+	kunit_activate_static_stub(test, vfe_pix_signal_fault, pix_test_signal_fault);
 
 	return 0;
 }
 
+/* Test-only: drop this test's retained entries, which production never frees */
+static struct vfe_pix_quarantine *pix_test_quarantine(struct pix_test *t)
+{
+	struct vfe_pix_quarantine *q, *found = NULL;
+
+	mutex_lock(&vfe_pix_quarantine_lock);
+	list_for_each_entry(q, &vfe_pix_quarantine_list, list)
+		if (q->dev == t->camss.dev)
+			found = q;
+	mutex_unlock(&vfe_pix_quarantine_lock);
+
+	return found;
+}
+
 static void pix_test_exit(struct kunit *test)
 {
+	struct pix_test *t = test->priv;
+	struct vfe_pix_quarantine *q;
+
+	while ((q = pix_test_quarantine(t))) {
+		mutex_lock(&vfe_pix_quarantine_lock);
+		list_del(&q->list);
+		mutex_unlock(&vfe_pix_quarantine_lock);
+		put_device(q->dev);
+		kfree(q);
+	}
 	camss_titan170_pix = false;
 }
 
@@ -313,6 +371,17 @@ static void pix_test_pix_then_rdi(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, t->frees, t->allocs);
 }
 
+/* One line at a time: a second RDI is refused too */
+static void pix_test_rdi_then_rdi(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->vfe.stream_count = 1;	/* RDI0 streaming, as left by vfe_enable() */
+	KUNIT_EXPECT_EQ(test, pix_start(t, &t->vfe.line[VFE_LINE_RDI1]), -EBUSY);
+	KUNIT_EXPECT_EQ(test, t->vfe.stream_count, 1);
+	KUNIT_EXPECT_EQ(test, t->vfe.wm_output_map[VFE_LINE_RDI1], VFE_LINE_NONE);
+}
+
 /* RDI first (stream_count as left by vfe_enable()): PIX is refused */
 static void pix_test_rdi_then_pix(struct kunit *test)
 {
@@ -340,6 +409,12 @@ static void pix_test_arm_driver_frames(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 
 	KUNIT_EXPECT_EQ(test, t->allocs, VFE_PIX_STAGING_NUM + 1);
+	/* every staging frame and the drop frame went to the device first */
+	KUNIT_ASSERT_EQ(test, t->handoff_unpublished, VFE_PIX_STAGING_NUM + 1);
+	for (unsigned int i = 0; i <= VFE_PIX_STAGING_NUM; i++)
+		KUNIT_EXPECT_EQ(test, t->handoff[i], PIX_TEST_DMA(i));
+	KUNIT_EXPECT_EQ(test, pix_st(t)->frame[VFE_PIX_DROP].dma,
+			PIX_TEST_DMA(VFE_PIX_DROP));
 	KUNIT_EXPECT_EQ(test, pix_st(t)->hw[0], 0);
 	KUNIT_EXPECT_EQ(test, pix_st(t)->hw[1], 1);
 	/* the last programmed slot: staging frame 1 */
@@ -388,7 +463,8 @@ static void pix_test_copy_order_and_starvation(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, t->copied[0], PIX_TEST_DMA(0));
 	KUNIT_EXPECT_EQ(test, t->copied[1], PIX_TEST_DMA(1));
 	KUNIT_EXPECT_EQ(test, t->copied[2], PIX_TEST_DMA(0));
-	KUNIT_EXPECT_EQ(test, t->to_device, 4);
+	/* four initial handoffs, then one per copied or dropped frame */
+	KUNIT_EXPECT_EQ(test, t->to_device, VFE_PIX_STAGING_NUM + 1 + 4);
 	pix_expect_driver_targets(test, t);
 
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
@@ -545,20 +621,99 @@ static void pix_test_start_failures(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_BUS_WM_CFG(VFE_PIX_WM_Y)), 0);
 }
 
-/* The acknowledge is in STATUS_0 but its IRQ was lost: a confirmed reset */
-static void pix_test_reset_ack_without_irq(struct kunit *test)
+/*
+ * The reset is confirmed from STATUS_0 alone, with the ISR off the line:
+ * the IRQ completion plays no part.
+ */
+static void pix_test_reset_polled(struct kunit *test)
 {
 	struct pix_test *t = test->priv;
 
 	t->ack_reset = true;
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
-
-	t->ack_reset = false;
-	t->ack_status_only = true;
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+	KUNIT_EXPECT_EQ(test, t->resets, 1);
+	KUNIT_EXPECT_FALSE(test, completion_done(&t->vfe.reset_complete));
+	KUNIT_EXPECT_FALSE(test, t->ack_pending);
 	KUNIT_EXPECT_FALSE(test, t->vfe.wedged);
 	KUNIT_EXPECT_EQ(test, t->frees, t->allocs);
+}
+
+/*
+ * A stale acknowledge is drained before the reset; one that does not clear
+ * fails closed without issuing a reset it could stand in for.
+ */
+static void pix_test_reset_stale_ack(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	/* stale but clearable: drained, then the fresh one is required */
+	t->ack_pending = true;
+	t->ack_reset = false;
+	KUNIT_EXPECT_LT(test, vfe_reset(&t->vfe), 0);
+	KUNIT_EXPECT_EQ(test, t->resets, 1);
+	KUNIT_EXPECT_TRUE(test, t->vfe.wedged);
+
+	/* after a missing acknowledge nothing is retried, a late one is ignored */
+	t->ack_pending = true;
+	t->ack_reset = true;
+	KUNIT_EXPECT_EQ(test, vfe_reset(&t->vfe), -EIO);
+	KUNIT_EXPECT_EQ(test, t->resets, 1);
+	KUNIT_EXPECT_EQ(test, pix_start(t, pix_line(t)), -EIO);
+	KUNIT_EXPECT_EQ(test, pix_start(t, &t->vfe.line[VFE_LINE_RDI0]), -EIO);
+}
+
+static void pix_test_reset_stuck_ack(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->ack_stuck = true;
+	t->ack_reset = true;
+	KUNIT_EXPECT_EQ(test, vfe_reset(&t->vfe), -EIO);
+	KUNIT_EXPECT_EQ(test, t->resets, 0);
+	KUNIT_EXPECT_TRUE(test, t->vfe.wedged);
+}
+
+/*
+ * A bus fault reported with a completion in the same interrupt: the real
+ * ISR handles the error first, nothing is copied from then on, the queue
+ * is failed once, the hardware only gets the drop frame.
+ */
+static void pix_test_bus_fault_fails_closed(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	struct vfe_pix_staging *st = pix_st(t);
+	unsigned int i;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue(t, 1);
+	pix_queue(t, 2);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	pix_frame(t);			/* frame 0 delivered */
+	KUNIT_ASSERT_EQ(test, t->nreturned, 1);
+
+	writel_relaxed(BIT(9), t->vfe.base + VFE_IRQ_STATUS_0);
+	writel_relaxed(STATUS0_OVERFLOW | STATUS0_COMP_BUF_DONE(VFE_PIX_COMP_GRP),
+		       t->vfe.base + VFE_BUS_IRQ_STATUS(0));
+	vfe_isr(0, &t->vfe);
+	writel_relaxed(0, t->vfe.base + VFE_BUS_IRQ_STATUS(0));
+	flush_work(&st->copy_work);
+
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_TRUE(test, st->faulted);
+	KUNIT_EXPECT_EQ(test, st->nready, 0);
+	for (i = 0; i < 4; i++)
+		pix_frame(t);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
+	KUNIT_EXPECT_EQ(test, t->ncopied, 1);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_EQ(test, st->hw[0], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, st->hw[1], VFE_PIX_DROP);
+
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 	pix_assert_released(test, t);
+	KUNIT_EXPECT_EQ(test, t->frees, t->allocs);
 }
 
 /*
@@ -568,6 +723,7 @@ static void pix_test_reset_ack_without_irq(struct kunit *test)
 static void pix_test_reset_unconfirmed(struct kunit *test)
 {
 	struct pix_test *t = test->priv;
+	struct vfe_pix_quarantine *q;
 
 	t->ack_reset = true;
 	pix_queue(t, 0);
@@ -580,6 +736,15 @@ static void pix_test_reset_unconfirmed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, t->frees, 0);
 	KUNIT_EXPECT_EQ(test, t->vfe.quarantined,
 			(size_t)(VFE_PIX_STAGING_NUM + 1) * PIX_TEST_SIZE);
+	/* the handles stay owned: every frame, with its device reference */
+	q = pix_test_quarantine(t);
+	KUNIT_ASSERT_NOT_NULL(test, q);
+	KUNIT_EXPECT_PTR_EQ(test, q->dev, t->camss.dev);
+	KUNIT_EXPECT_EQ(test, q->size, PIX_TEST_SIZE);
+	for (unsigned int i = 0; i <= VFE_PIX_STAGING_NUM; i++) {
+		KUNIT_EXPECT_NOT_NULL(test, q->frame[i].cpu);
+		KUNIT_EXPECT_EQ(test, q->frame[i].dma, PIX_TEST_DMA(i));
+	}
 	KUNIT_EXPECT_TRUE(test, t->vfe.wedged);
 	pix_assert_released(test, t);
 	pix_expect_driver_targets(test, t);
@@ -594,6 +759,7 @@ static void pix_test_reset_unconfirmed(struct kunit *test)
 static struct kunit_case pix_test_cases[] = {
 	KUNIT_CASE(pix_test_pix_then_rdi),
 	KUNIT_CASE(pix_test_rdi_then_pix),
+	KUNIT_CASE(pix_test_rdi_then_rdi),
 	KUNIT_CASE(pix_test_arm_driver_frames),
 	KUNIT_CASE(pix_test_copy_order_and_starvation),
 	KUNIT_CASE(pix_test_frame_error),
@@ -601,7 +767,10 @@ static struct kunit_case pix_test_cases[] = {
 	KUNIT_CASE(pix_test_stop_during_copy),
 	KUNIT_CASE(pix_test_start_unwind_and_retry),
 	KUNIT_CASE(pix_test_start_failures),
-	KUNIT_CASE(pix_test_reset_ack_without_irq),
+	KUNIT_CASE(pix_test_reset_polled),
+	KUNIT_CASE(pix_test_reset_stale_ack),
+	KUNIT_CASE(pix_test_reset_stuck_ack),
+	KUNIT_CASE(pix_test_bus_fault_fails_closed),
 	KUNIT_CASE(pix_test_reset_unconfirmed),
 	{}
 };

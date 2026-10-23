@@ -26,6 +26,9 @@
 #define MSM_VFE_IMAGE_MASTERS_NUM 7
 #define MSM_VFE_COMPOSITE_IRQ_NUM 4
 
+/* VFE reset acknowledge timeout (polled) */
+#define VFE_RESET_TIMEOUT_US (50 * USEC_PER_MSEC)
+
 /* VFE halt timeout */
 #define VFE_HALT_TIMEOUT_MS 100
 /* Frame drop value. VAL + UPDATES - 1 should not exceed 31 */
@@ -83,6 +86,7 @@ struct vfe_pix_staging {
 	u8 ready[VFE_PIX_STAGING_NUM];	/* completed, in order, to copy */
 	u8 nready;
 	bool frame_error;	/* a bus or CAMIF error hit the frame in hw[0] */
+	bool faulted;		/* completions no longer trusted, see vfe_pix_error() */
 	struct work_struct copy_work;
 };
 
@@ -139,6 +143,8 @@ struct vfe_hw_ops {
 	void (*isr_read)(struct vfe_device *vfe, u32 *value0, u32 *value1);
 	void (*pm_domain_off)(struct vfe_device *vfe);
 	int (*pm_domain_on)(struct vfe_device *vfe);
+	/* serialized reset, used instead of vfe_reset()'s IRQ wait with titan170_pix */
+	int (*reset)(struct vfe_device *vfe);
 	void (*reg_update)(struct vfe_device *vfe, enum vfe_line_id line_id);
 	void (*reg_update_clear)(struct vfe_device *vfe,
 				 enum vfe_line_id line_id);
@@ -195,9 +201,9 @@ struct vfe_device {
 	int stream_count;
 	/* PIX owns the VFE exclusively (titan170_pix), under stream_lock */
 	bool pix_active;
-	/* A stop could not reset the VFE; refuse streaming until power cycle */
+	/* A reset was not acknowledged; sticky until reboot (titan170_pix) */
 	bool wedged;
-	/* PIX DMA frames abandoned to the hardware after an unconfirmed reset */
+	/* PIX DMA frames retained after an unconfirmed reset */
 	size_t quarantined;
 	spinlock_t output_lock;
 	enum vfe_line_id wm_output_map[MSM_VFE_IMAGE_MASTERS_NUM];
