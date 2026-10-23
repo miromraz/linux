@@ -790,13 +790,27 @@ static int bq25890_charger_get_scaled_iinlim_regval(struct bq25890_device *bq,
 	return bq25890_find_idx(iinlim_ua, TBL_IINLIM);
 }
 
-/* On the BQ25892 try to get charger-type info from our supplier */
+static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq);
+
+/* Re-evaluate the input current limit when a supplier's advertisement changes */
 static void bq25890_charger_external_power_changed(struct power_supply *psy)
 {
 	struct bq25890_device *bq = power_supply_get_drvdata(psy);
 	union power_supply_propval val;
 	int input_current_limit, ret;
 
+	/*
+	 * The BQ25896 takes its limit from the PSEL pin and, when the source is
+	 * a USB-C connector, from the Type-C current the supplier advertises.
+	 */
+	if (bq->chip_version == BQ25896) {
+		mutex_lock(&bq->lock);
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+		mutex_unlock(&bq->lock);
+		return;
+	}
+
+	/* On the BQ25892 try to get charger-type info from our supplier */
 	if (bq->chip_version != BQ25892)
 		return;
 
@@ -829,15 +843,42 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 }
 
 /*
+ * The BQ25896 has no D+/D- and no CC pins, so it cannot see the Type-C current
+ * a USB-C source advertises through its Rp resistor. A Type-C port controller
+ * wired as our supplier (DT "power-supplies") reports that current as
+ * POWER_SUPPLY_PROP_CURRENT_MAX; return it, or 0 when no such source is known.
+ */
+static int bq25896_typec_input_current_ua(struct bq25890_device *bq)
+{
+	union power_supply_propval val;
+
+	if (!bq->charger)
+		return 0;
+
+	if (power_supply_get_property_from_supplier(bq->charger,
+						    POWER_SUPPLY_PROP_CURRENT_MAX,
+						    &val))
+		return 0;
+
+	return val.intval;
+}
+
+/*
  * The BQ25896 sets REG00 IINLIM itself from the PSEL pin at every VBUS
  * insertion (datasheet 9.2.3.3): PSEL high -> 500 mA, PSEL low -> 3.25 A.
  * Re-apply that limit from the reported VBUS_STAT. With linux,skip-reset the
  * driver inherits the bootloader's IINLIM, so this resyncs a stale value; on a
  * normal plug event it just rewrites what the chip already programmed.
+ *
+ * On boards where PSEL is strapped high the chip reports USB SDP for every
+ * source, so raise the limit to the current a USB-C source advertises via its
+ * Rp resistor when that is higher. The advertisement is an upper bound set by
+ * the source, so the limit never exceeds it; with no Type-C information the
+ * chip's own 500 mA SDP value stands.
  */
 static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
 {
-	int iinlim_ua;
+	int iinlim_ua, typec_ua;
 
 	switch (bq->state.vbus_status) {
 	case BQ25896_VBUS_ADAPTER:
@@ -848,6 +889,10 @@ static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
 		iinlim_ua = 500000;
 		break;
 	}
+
+	typec_ua = bq25896_typec_input_current_ua(bq);
+	if (typec_ua > iinlim_ua)
+		iinlim_ua = typec_ua;
 
 	bq25890_field_write(bq, F_IINLIM,
 			    bq25890_charger_get_scaled_iinlim_regval(bq, iinlim_ua));
