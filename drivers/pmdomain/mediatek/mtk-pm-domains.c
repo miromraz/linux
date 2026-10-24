@@ -78,6 +78,7 @@ struct scpsys {
 	u8 bus_prot_index[BUS_PROT_BLOCK_COUNT];
 	struct regmap **bus_prot;
 	struct genpd_onecell_data pd_data;
+	struct regulator **supplies;
 	struct generic_pm_domain *domains[];
 };
 
@@ -802,13 +803,13 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
 	pd->hwv_data = hwv_domain_data;
 	pd->scpsys = scpsys;
 
-	if (MTK_SCPD_CAPS(pd, MTK_SCPD_DOMAIN_SUPPLY)) {
-		pd->supply = devm_of_regulator_get_optional(scpsys->dev, node, "domain");
-		if (IS_ERR(pd->supply))
-			return dev_err_cast_probe(scpsys->dev, pd->supply,
-				      "%pOF: failed to get power supply.\n",
-				      node);
-	}
+	/*
+	 * All domain-supply regulators were resolved up front by
+	 * scpsys_preacquire_supplies() before any domain was registered, so any
+	 * probe deferral already happened; here we only consume the result.
+	 */
+	if (MTK_SCPD_CAPS(pd, MTK_SCPD_DOMAIN_SUPPLY))
+		pd->supply = scpsys->supplies[id];
 
 	num_clks = of_clk_get_parent_count(node);
 	if (num_clks > 0) {
@@ -1262,6 +1263,62 @@ static const struct of_device_id scpsys_of_match[] = {
 	{ }
 };
 
+static u16 scpsys_domain_caps(const struct scpsys_soc_data *soc, u32 id)
+{
+	switch (soc->type) {
+	case SCPSYS_MTCMOS_TYPE_DIRECT_CTL:
+		if (id < soc->num_domains)
+			return soc->domains_data[id].caps;
+		break;
+	case SCPSYS_MTCMOS_TYPE_HW_VOTER:
+		if (id < soc->num_hwv_domains)
+			return soc->hwv_domains_data[id].caps;
+		break;
+	}
+
+	return 0;
+}
+
+/*
+ * Resolve every domain-supply regulator before any power domain is registered.
+ *
+ * A domain-supply regulator (e.g. the MFG_ASYNC rail on MT6797, backed by an
+ * I2C PMIC that probes late) can return -EPROBE_DEFER. Fetching it lazily while
+ * the domains are being walked and registered leaves earlier domains already
+ * pm_genpd_init()'d - and, for boot-on domains, already powered - when a later
+ * supply defers, which the error cleanup then has to special-case. Resolve all
+ * supplies in a first pass so the probe defers cleanly before the first
+ * pm_genpd_init(), and store them for scpsys_add_one_domain() to consume.
+ */
+static int scpsys_preacquire_supplies(struct scpsys *scpsys, struct device_node *parent)
+{
+	const struct scpsys_soc_data *soc = scpsys->soc_data;
+
+	for_each_available_child_of_node_scoped(parent, node) {
+		struct regulator *supply;
+		u32 id;
+		int ret;
+
+		if (of_property_read_u32(node, "reg", &id))
+			continue;	/* scpsys_add_one_domain() reports this */
+
+		if ((scpsys_domain_caps(soc, id) & MTK_SCPD_DOMAIN_SUPPLY) &&
+		    !scpsys->supplies[id]) {
+			supply = devm_of_regulator_get_optional(scpsys->dev, node, "domain");
+			if (IS_ERR(supply))
+				return dev_err_probe(scpsys->dev, PTR_ERR(supply),
+						     "%pOF: failed to get power supply\n", node);
+			scpsys->supplies[id] = supply;
+		}
+
+		ret = scpsys_preacquire_supplies(scpsys, node);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static int scpsys_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1304,6 +1361,11 @@ static int scpsys_probe(struct platform_device *pdev)
 	scpsys->pd_data.domains = scpsys->domains;
 	scpsys->pd_data.num_domains = num_domains;
 
+	scpsys->supplies = devm_kcalloc(dev, num_domains, sizeof(*scpsys->supplies),
+					GFP_KERNEL);
+	if (!scpsys->supplies)
+		return -ENOMEM;
+
 	parent = dev->parent;
 	if (!parent) {
 		dev_err(dev, "no parent for syscon devices\n");
@@ -1321,6 +1383,10 @@ static int scpsys_probe(struct platform_device *pdev)
 	else
 		ret = scpsys_get_bus_protection_legacy(dev, scpsys);
 
+	if (ret)
+		return ret;
+
+	ret = scpsys_preacquire_supplies(scpsys, np);
 	if (ret)
 		return ret;
 
