@@ -13,7 +13,9 @@ description:
   The MT6797 feeds the SRAM of its Cortex-A53 clusters and the CCI from a bank
   of on-SoC LDOs in the always-on infracfg block. They form a single Vsram
   rail that must track the DA9214 Vproc rail during frequency changes, so it is
-  used as the sram/mem supply of the CPU and CCI frequency drivers.
+  used as the sram/mem supply of the CPU and CCI frequency drivers. The LDO
+  registers live in the infracfg block, so the node is a child of the infracfg
+  syscon and reaches the registers through the parent regmap.
 
 allOf:
   - $ref: regulator.yaml#
@@ -22,25 +24,26 @@ properties:
   compatible:
     const: mediatek,mt6797-cpu-sram
 
-  mediatek,infracfg:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description: phandle to the infracfg syscon that holds the LDO registers.
-
 required:
   - compatible
-  - mediatek,infracfg
 
 unevaluatedProperties: false
 
 examples:
   - |
-    regulator-cpu-sram {
-        compatible = "mediatek,mt6797-cpu-sram";
-        mediatek,infracfg = <&infrasys>;
-        regulator-name = "vsram-cpu";
-        regulator-min-microvolt = <1000000>;
-        regulator-max-microvolt = <1200000>;
-        regulator-always-on;
+    syscon@10001000 {
+        compatible = "mediatek,mt6797-infracfg", "syscon", "simple-mfd";
+        reg = <0x10001000 0x1000>;
+        #clock-cells = <1>;
+        #reset-cells = <1>;
+
+        regulator-cpu-sram {
+            compatible = "mediatek,mt6797-cpu-sram";
+            regulator-name = "vsram-cpu";
+            regulator-min-microvolt = <1000000>;
+            regulator-max-microvolt = <1200000>;
+            regulator-always-on;
+        };
     };
 
 ...

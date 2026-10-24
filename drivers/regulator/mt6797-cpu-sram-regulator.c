@@ -114,10 +114,10 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 	struct regulator_dev *rdev;
 	struct regmap *regmap;
 
-	regmap = syscon_regmap_lookup_by_phandle(np, "mediatek,infracfg");
+	regmap = syscon_node_to_regmap(dev->parent->of_node);
 	if (IS_ERR(regmap))
 		return dev_err_probe(dev, PTR_ERR(regmap),
-				     "failed to get infracfg regmap\n");
+				     "failed to get parent infracfg regmap\n");
 
 	config.dev = dev;
 	config.of_node = np;
