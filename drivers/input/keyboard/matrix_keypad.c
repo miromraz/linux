@@ -115,20 +115,16 @@ static uint32_t read_row_state(struct matrix_keypad *keypad)
 	return row_state;
 }
 
-/*
- * This gets the keys from keyboard and reports it to input subsystem
- */
-static void matrix_keypad_scan_matrix(struct matrix_keypad *keypad)
+/* Read the whole matrix into state[] (one word per column) without reporting. */
+static void matrix_keypad_read_state(struct matrix_keypad *keypad,
+				     u32 *state)
 {
-	struct input_dev *input_dev = keypad->input_dev;
-	const unsigned short *keycodes = input_dev->keycode;
-	uint32_t new_state[MATRIX_MAX_COLS];
-	int row, col, code;
+	int row, col;
 
 	/* de-activate all columns for scanning */
 	activate_all_cols(keypad, false);
 
-	memset(new_state, 0, sizeof(new_state));
+	memset(state, 0, sizeof(u32) * MATRIX_MAX_COLS);
 
 	for (row = 0; row < keypad->num_row_gpios; row++)
 		gpiod_direction_input(keypad->row_gpios[row]);
@@ -138,13 +134,22 @@ static void matrix_keypad_scan_matrix(struct matrix_keypad *keypad)
 
 		activate_col(keypad, col, true);
 
-		new_state[col] = read_row_state(keypad);
+		state[col] = read_row_state(keypad);
 
 		activate_col(keypad, col, false);
 	}
+}
+
+/* Report the difference between new_state[] and the last reported state. */
+static void matrix_keypad_report_state(struct matrix_keypad *keypad,
+				       const u32 *new_state)
+{
+	struct input_dev *input_dev = keypad->input_dev;
+	const unsigned short *keycodes = input_dev->keycode;
+	int row, col, code;
 
 	for (col = 0; col < keypad->num_col_gpios; col++) {
-		uint32_t bits_changed;
+		u32 bits_changed;
 
 		bits_changed = keypad->last_key_state[col] ^ new_state[col];
 		if (bits_changed == 0)
@@ -163,7 +168,19 @@ static void matrix_keypad_scan_matrix(struct matrix_keypad *keypad)
 	}
 	input_sync(input_dev);
 
-	memcpy(keypad->last_key_state, new_state, sizeof(new_state));
+	memcpy(keypad->last_key_state, new_state,
+	       sizeof(u32) * MATRIX_MAX_COLS);
+}
+
+/*
+ * This gets the keys from keyboard and reports it to input subsystem
+ */
+static void matrix_keypad_scan_matrix(struct matrix_keypad *keypad)
+{
+	u32 new_state[MATRIX_MAX_COLS];
+
+	matrix_keypad_read_state(keypad, new_state);
+	matrix_keypad_report_state(keypad, new_state);
 
 	activate_all_cols(keypad, true);
 }
@@ -181,12 +198,36 @@ static void matrix_keypad_scan(struct work_struct *work)
 {
 	struct matrix_keypad *keypad =
 		container_of(work, struct matrix_keypad, work.work);
+	u32 state[MATRIX_MAX_COLS], confirm[MATRIX_MAX_COLS];
 	u32 init_row_state, new_row_state;
 
 	/* read initial row state to detect changes between scan */
 	init_row_state = read_row_state(keypad);
 
-	matrix_keypad_scan_matrix(keypad);
+	/*
+	 * The matrix has no per-key scan diodes, so a row input can read
+	 * asserted for a single scan while a key is still bouncing - observed
+	 * on the Gemini PDA AW9523 matrix as a phantom key in the first
+	 * scanned column. Unlike the polling path, the interrupt path scans
+	 * only once per edge, so such a transient would be latched for the
+	 * whole key press. Require two identical back-to-back scans before
+	 * reporting; if they disagree the matrix has not settled, so rescan
+	 * after the debounce interval without reporting or re-enabling the
+	 * row IRQs.
+	 */
+	matrix_keypad_read_state(keypad, state);
+	matrix_keypad_read_state(keypad, confirm);
+	if (memcmp(state, confirm, sizeof(state))) {
+		activate_all_cols(keypad, true);
+		guard(spinlock_irq)(&keypad->lock);
+		if (likely(!keypad->stopped))
+			schedule_delayed_work(&keypad->work,
+					      msecs_to_jiffies(keypad->debounce_ms));
+		return;
+	}
+
+	matrix_keypad_report_state(keypad, state);
+	activate_all_cols(keypad, true);
 
 	/* Enable IRQs again */
 	scoped_guard(spinlock_irq, &keypad->lock) {
