@@ -351,8 +351,21 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	}
 
 	ret = camss_video_start_subdevs(sd, n);
-	if (ret < 0)
+	if (ret < 0) {
+		/*
+		 * Diagnostic (a52q/teardown-fix-static, trace only): record that
+		 * the start-failure unwind path ran. A sensor start failure here
+		 * (e.g. the intermittent CCI queue timeout) now reverse-stops the
+		 * already-started VFE/CSID/CAMIF in camss_video_start_subdevs(),
+		 * so the next start does not re-arm the write master at IOVA 0 and
+		 * fault the IFE SMMU context bank. If the SMMU TF/WNR iova=0 fault
+		 * ever recurs without this line, the origin is not this path.
+		 */
+		dev_warn_ratelimited(video->camss->dev,
+				     "start-failure unwind: subdev stream-on failed (%d); already-started subdevs stopped to quiesce the VFE write master\n",
+				     ret);
 		goto error;
+	}
 
 	return 0;
 
