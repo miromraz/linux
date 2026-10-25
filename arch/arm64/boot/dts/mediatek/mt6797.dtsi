@@ -661,33 +661,6 @@
 		};
 	};
 
-	/*
-	 * On-SoC CPU SRAM LDO bank in the always-on infracfg block. It is the
-	 * Vsram rail of the Cortex-A53 clusters and the CCI; the CPU and CCI
-	 * frequency drivers track it against the DA9214 Vproc rail. The range
-	 * is the vendor MIN/MAX_VSRAM_VOLT (1.00-1.20 V); it is always on
-	 * because it powers live CPU caches.
-	 */
-	cpu_sram: regulator-cpu-sram {
-		compatible = "mediatek,mt6797-cpu-sram";
-		mediatek,infracfg = <&infrasys>;
-		regulator-name = "vsram-cpu";
-		/*
-		 * The minimum is the board Vproc floor (DA9214 buck A, 1.04 V)
-		 * plus the vendor NORMAL_DIFF_VRSAM_VPROC of 100 mV, rounded up
-		 * to the 25 mV grid: 1.15 V. The Vsram tracking in the CPU and
-		 * CCI drivers computes Vsram from the requested Vproc, which the
-		 * buck A floor can silently raise; enforcing the floor+100 mV
-		 * minimum here, at the regulator core, keeps Vsram >= Vproc on
-		 * the real rails at the lowest OPPs (where requested Vproc is
-		 * below the floor). The LK value is 1.10 V, so the core raises
-		 * it to 1.15 V at registration (an upward, safe move).
-		 */
-		regulator-min-microvolt = <1150000>;
-		regulator-max-microvolt = <1200000>;
-		regulator-always-on;
-	};
-
 	u3phy: t-phy@11290000 {
 		compatible = "mediatek,mt6797-tphy", "mediatek,generic-tphy-v1";
 		reg = <0 0x11290000 0 0x800>;
@@ -800,10 +773,41 @@
 	};
 
 	infrasys: syscon@10001000 {
-		compatible = "mediatek,mt6797-infracfg", "syscon";
+		compatible = "mediatek,mt6797-infracfg", "syscon", "simple-mfd";
 		reg = <0 0x10001000 0 0x1000>;
 		#clock-cells = <1>;
 		#reset-cells = <1>;
+
+		/*
+		 * On-SoC CPU SRAM LDO bank in the always-on infracfg block. It
+		 * is the Vsram rail of the Cortex-A53 clusters and the CCI; the
+		 * CPU and CCI frequency drivers track it against the DA9214
+		 * Vproc rail. The range is the vendor MIN/MAX_VSRAM_VOLT
+		 * (1.00-1.20 V); it is always on because it powers live CPU
+		 * caches. The LDO registers live in this infracfg block, so the
+		 * regulator is a child of it and reaches the registers through
+		 * the parent syscon regmap.
+		 */
+		cpu_sram: regulator-cpu-sram {
+			compatible = "mediatek,mt6797-cpu-sram";
+			regulator-name = "vsram-cpu";
+			/*
+			 * The minimum is the board Vproc floor (DA9214 buck A,
+			 * 1.04 V) plus the vendor NORMAL_DIFF_VRSAM_VPROC of
+			 * 100 mV, rounded up to the 25 mV grid: 1.15 V. The
+			 * Vsram tracking in the CPU and CCI drivers computes
+			 * Vsram from the requested Vproc, which the buck A floor
+			 * can silently raise; enforcing the floor+100 mV minimum
+			 * here, at the regulator core, keeps Vsram >= Vproc on
+			 * the real rails at the lowest OPPs (where requested
+			 * Vproc is below the floor). The LK value is 1.10 V, so
+			 * the core raises it to 1.15 V at registration (an
+			 * upward, safe move).
+			 */
+			regulator-min-microvolt = <1150000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-always-on;
+		};
 	};
 
 	pio: pinctrl@10005000 {
