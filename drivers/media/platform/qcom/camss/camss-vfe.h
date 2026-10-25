@@ -59,15 +59,22 @@ enum vfe_line_id {
 	VFE_LINE_NUM_MAX = 4
 };
 
-/* Frames the PIX write masters may target; the last one is the drop frame */
+/* Frames a PIX ring's write masters may target; the last one is the drop frame */
 #define VFE_PIX_STAGING_NUM	3
 #define VFE_PIX_DROP		VFE_PIX_STAGING_NUM
+
+/* Staging rings of the PIX line; statistics are not enabled yet */
+enum vfe_pix_ring_id {
+	VFE_PIX_RING_IMAGE,
+	VFE_PIX_RING_STATS,
+	VFE_PIX_RINGS,
+};
 
 /*
  * Identity of a frame: stream generation, PIX SOF sequence and host SOF
  * time. The SOF time is not an exposure start (rolling shutter, offset not
- * calibrated) and is not the vb2 timestamp; userspace gets it from the
- * FRAME_SYNC event of the same sequence.
+ * calibrated) and is not the vb2 timestamp. FRAME_SYNC carries the same
+ * sequence with a later host notification timestamp.
  */
 struct vfe_pix_token {
 	u32 generation;
@@ -84,26 +91,59 @@ struct vfe_pix_frame {
 	bool error;
 };
 
+struct vfe_device;
+struct vfe_pix_ring;
+
 /*
- * Titan 170 PIX staging: the hardware writes only driver allocations; a
- * worker copies completed frames into vb2 buffers. A frame is handed back
- * to the hardware only after its copy finished. All fields but the frame
- * contents are protected by vfe->output_lock.
+ * What differs between the consumers of a staging ring. queue_addr runs
+ * under output_lock and programs a frame of the ring, possibly its drop
+ * frame, into the ring's write masters. stop disables its write masters
+ * under the same lock, but does not prove DMA idle. copy runs in the copy
+ * worker and fills a vb2 buffer from a completed frame. The worker syncs
+ * that frame for the CPU before copy and for the device afterwards.
  */
-struct vfe_pix_staging {
+struct vfe_pix_ring_ops {
+	void (*queue_addr)(struct vfe_device *vfe, struct vfe_pix_ring *ring, u8 idx);
+	void (*stop)(struct vfe_device *vfe, struct vfe_pix_ring *ring);
+	int (*copy)(struct vfe_device *vfe, struct vfe_pix_ring *ring,
+		    struct vfe_pix_frame *f, struct camss_buffer *buf);
+};
+
+/*
+ * Titan 170 PIX staging ring: the hardware writes only driver allocations;
+ * a worker copies completed frames into vb2 buffers. A frame is handed back
+ * to the hardware only after its copy finished. All fields but the frame
+ * contents are protected by vfe->output_lock. line, ops, bufs and size are
+ * fixed from start until stop has joined copy_work and reset the whole VFE.
+ * A frame popped from ready remains neither free nor in hw until its copy
+ * and device handoff finish. The drop frame is never queued for a copy.
+ */
+struct vfe_pix_ring {
 	struct vfe_pix_frame frame[VFE_PIX_STAGING_NUM + 1];
-	size_t size;		/* NV12 bytes per frame */
-	u32 c_offset;		/* CbCr plane offset */
+	size_t size;		/* bytes per frame */
 	u8 hw[2];		/* frames in the two programmed address slots */
-	struct vfe_pix_token tok;	/* frame started in hw[0], not retired */
-	u32 generation;		/* stream starts, never reset */
-	u32 sof_sequence;	/* next PIX SOF sequence of this generation */
 	unsigned long free;	/* staging frames the hardware may get */
 	u8 ready[VFE_PIX_STAGING_NUM];	/* completed, in order, to copy */
 	u8 nready;
 	bool frame_error;	/* a bus or CAMIF error hit the frame in hw[0] */
-	bool faulted;		/* completions no longer trusted, see vfe_pix_error() */
 	struct work_struct copy_work;
+	struct vfe_line *line;
+	/* set from start until the frames are released, NULL otherwise */
+	const struct vfe_pix_ring_ops *ops;
+	struct list_head *bufs;	/* queued vb2 buffers it fills, oldest first */
+};
+
+/*
+ * Titan 170 PIX line: one frame identity for every ring, staging rings and
+ * the fail-closed state they share. Protected by vfe->output_lock.
+ */
+struct vfe_pix_staging {
+	struct vfe_pix_ring ring[VFE_PIX_RINGS];
+	u32 c_offset;		/* CbCr plane offset in an image frame */
+	struct vfe_pix_token tok;	/* frame started in image hw[0], not retired */
+	u32 generation;		/* stream starts, never reset */
+	u32 sof_sequence;	/* next PIX SOF sequence of this generation */
+	bool faulted;		/* completions no longer trusted, see vfe_pix_error() */
 };
 
 struct vfe_output {

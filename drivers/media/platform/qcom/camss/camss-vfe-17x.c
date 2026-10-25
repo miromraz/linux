@@ -658,26 +658,39 @@ static void vfe_pix_wm_config(struct vfe_device *vfe, u8 wm, u32 width,
 	writel_relaxed(1, vfe->base + VFE_BUS_WM_IRQ_SUBSAMPLE_PATTERN(wm));
 }
 
-/* Program a frame's plane addresses into the next slot of both WMs */
-static void vfe_pix_queue_addr(struct vfe_device *vfe, struct vfe_pix_staging *st,
+/* Program an image frame's plane addresses into the next slot of both WMs */
+static void vfe_pix_queue_addr(struct vfe_device *vfe, struct vfe_pix_ring *ring,
 			       u8 idx)
 {
-	dma_addr_t y = st->frame[idx].dma;
+	dma_addr_t y = ring->frame[idx].dma;
 
 	writel_relaxed(y, vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_Y));
-	writel_relaxed(y + st->c_offset, vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_C));
+	writel_relaxed(y + ring->line->output.pix.c_offset,
+		       vfe->base + VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_C));
+}
+
+static void vfe_pix_image_stop(struct vfe_device *vfe, struct vfe_pix_ring *ring)
+{
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_PIX_WM_Y));
+	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_PIX_WM_C));
 }
 
 /* A free staging frame for the hardware, else the drop frame. Locked. */
-static u8 vfe_pix_take_frame(struct vfe_pix_staging *st)
+static u8 vfe_pix_take_frame(struct vfe_pix_ring *ring)
 {
-	unsigned long idx = find_first_bit(&st->free, VFE_PIX_STAGING_NUM);
+	unsigned long idx = find_first_bit(&ring->free, VFE_PIX_STAGING_NUM);
 
 	if (idx >= VFE_PIX_STAGING_NUM)
 		return VFE_PIX_DROP;
 
-	clear_bit(idx, &st->free);
+	clear_bit(idx, &ring->free);
 	return idx;
+}
+
+/* Delivery runs: the line is on and its completions are trusted. Locked. */
+static bool vfe_pix_delivering(struct vfe_output *output)
+{
+	return output->state == VFE_OUTPUT_ON && !output->pix.faulted;
 }
 
 /* DMA frame lifetime, KUnit static stub points */
@@ -698,13 +711,13 @@ static void vfe_pix_frame_free(struct vfe_device *vfe, size_t size,
 }
 
 /*
- * DMA frames left to an unconfirmed reset. Kept for the life of the system:
- * the allocations (pages and IOVA mappings) and a reference on the device
- * are never released, and the module pins itself so that an unload cannot
- * tear down the device and its IOMMU domain. With titan170_pix the driver
- * also suppresses sysfs bind/unbind (see camss_init()). This does not make
- * kexec, or removal of the platform device by other means, safe; neither
- * happens in normal operation of the A52 build this targets.
+ * One ring's DMA frames left to an unconfirmed reset. Kept for the life of
+ * the system: the allocations (pages and IOVA mappings) and a reference on
+ * the device are never released, and the module pins itself so that an
+ * unload cannot tear down the device and its IOMMU domain. With titan170_pix
+ * the driver also suppresses sysfs bind/unbind (see camss_init()). This does
+ * not make kexec, or removal of the platform device by other means, safe;
+ * neither happens in normal operation of the A52 build this targets.
  */
 struct vfe_pix_quarantine {
 	struct list_head list;
@@ -717,21 +730,25 @@ static LIST_HEAD(vfe_pix_quarantine_list);
 static DEFINE_MUTEX(vfe_pix_quarantine_lock);
 
 /*
- * vfe_pix_release_frames - Free the DMA frames, or retain them for good
+ * vfe_pix_release_frames - Free a ring's DMA frames, or retain them for good
  * @quarantine: the bus was not confirmed idle; the hardware may still
  *              write to any of them, so none may ever be reused or freed
+ *
+ * Either way the ring is no longer in use afterwards.
  */
-static void vfe_pix_release_frames(struct vfe_device *vfe, struct vfe_pix_staging *st,
+static void vfe_pix_release_frames(struct vfe_device *vfe, struct vfe_pix_ring *ring,
 				   bool quarantine)
 {
 	struct vfe_pix_quarantine *q;
 	unsigned int i;
 
+	ring->ops = NULL;
+
 	if (!quarantine) {
-		for (i = 0; i < ARRAY_SIZE(st->frame); i++)
-			if (st->frame[i].cpu)
-				vfe_pix_frame_free(vfe, st->size, &st->frame[i]);
-		memset(st->frame, 0, sizeof(st->frame));
+		for (i = 0; i < ARRAY_SIZE(ring->frame); i++)
+			if (ring->frame[i].cpu)
+				vfe_pix_frame_free(vfe, ring->size, &ring->frame[i]);
+		memset(ring->frame, 0, sizeof(ring->frame));
 		return;
 	}
 
@@ -743,20 +760,20 @@ static void vfe_pix_release_frames(struct vfe_device *vfe, struct vfe_pix_stagin
 	q = kzalloc(sizeof(*q), GFP_KERNEL);
 	if (q) {
 		q->dev = get_device(vfe->camss->dev);
-		q->size = st->size;
-		memcpy(q->frame, st->frame, sizeof(q->frame));
+		q->size = ring->size;
+		memcpy(q->frame, ring->frame, sizeof(q->frame));
 		list_add_tail(&q->list, &vfe_pix_quarantine_list);
 	}
-	for (i = 0; i < ARRAY_SIZE(st->frame); i++)
-		if (st->frame[i].cpu)
-			vfe->quarantined += st->size;
+	for (i = 0; i < ARRAY_SIZE(ring->frame); i++)
+		if (ring->frame[i].cpu)
+			vfe->quarantined += ring->size;
 	mutex_unlock(&vfe_pix_quarantine_lock);
 
-	memset(st->frame, 0, sizeof(st->frame));
+	memset(ring->frame, 0, sizeof(ring->frame));
 }
 
 /*
- * vfe_pix_copy - Copy a completed staging frame into a vb2 buffer
+ * vfe_pix_copy - Copy a completed image frame into a vb2 buffer
  *
  * The PIX video node uses vb2-vmalloc with MMAP/READ only: its buffers are
  * CPU memory with no device mapping and need no cache maintenance. The
@@ -764,20 +781,33 @@ static void vfe_pix_release_frames(struct vfe_device *vfe, struct vfe_pix_stagin
  * offered: an exporter's CPU access can wait on fences without bound, and
  * this worker must always finish for STREAMOFF to complete.
  */
-static int vfe_pix_copy(struct vfe_device *vfe, struct vfe_pix_staging *st,
+static int vfe_pix_copy(struct vfe_device *vfe, struct vfe_pix_ring *ring,
 			struct vfe_pix_frame *f, struct camss_buffer *buf)
 {
 	void *dst = vb2_plane_vaddr(&buf->vb.vb2_buf, 0);
 
-	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_copy, vfe, st, f, buf);
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_copy, vfe, ring, f, buf);
 
 	if (!dst)
 		return -ENOMEM;
 
-	dma_sync_single_for_cpu(vfe->camss->dev, f->dma, st->size, DMA_FROM_DEVICE);
-	memcpy(dst, f->cpu, st->size);
+	memcpy(dst, f->cpu, ring->size);
 
 	return 0;
+}
+
+static const struct vfe_pix_ring_ops vfe_pix_image_ops = {
+	.queue_addr = vfe_pix_queue_addr,
+	.stop = vfe_pix_image_stop,
+	.copy = vfe_pix_copy,
+};
+
+static void vfe_pix_frame_to_cpu(struct vfe_device *vfe, size_t size,
+			       struct vfe_pix_frame *f)
+{
+	KUNIT_STATIC_STUB_REDIRECT(vfe_pix_frame_to_cpu, vfe, size, f);
+
+	dma_sync_single_for_cpu(vfe->camss->dev, f->dma, size, DMA_FROM_DEVICE);
 }
 
 /*
@@ -810,18 +840,17 @@ static void vfe_pix_return_buf(struct camss_buffer *buf, enum vb2_buffer_state s
 }
 
 /*
- * vfe_pix_copy_work - Deliver completed frames, oldest first
+ * vfe_pix_copy_work - Deliver a ring's completed frames, oldest first
  *
- * Each frame goes to the oldest queued vb2 buffer, or is dropped if none
- * is queued. Only then does the staging frame become available to the
+ * Each frame goes to the ring's oldest queued vb2 buffer, or is dropped if
+ * none is queued. Only then does the staging frame become available to the
  * hardware again.
  */
 static void vfe_pix_copy_work(struct work_struct *work)
 {
-	struct vfe_pix_staging *st = container_of(work, struct vfe_pix_staging, copy_work);
-	struct vfe_output *output = container_of(st, struct vfe_output, pix);
-	struct vfe_line *line = container_of(output, struct vfe_line, output);
-	struct vfe_device *vfe = to_vfe(line);
+	struct vfe_pix_ring *ring = container_of(work, struct vfe_pix_ring, copy_work);
+	struct vfe_output *output = &ring->line->output;
+	struct vfe_device *vfe = to_vfe(ring->line);
 	struct camss_buffer *buf;
 	struct vfe_pix_frame *f;
 	unsigned long flags;
@@ -830,18 +859,21 @@ static void vfe_pix_copy_work(struct work_struct *work)
 
 	for (;;) {
 		spin_lock_irqsave(&vfe->output_lock, flags);
-		if (output->state != VFE_OUTPUT_ON || st->faulted || !st->nready) {
+		if (!vfe_pix_delivering(output) || !ring->nready) {
 			spin_unlock_irqrestore(&vfe->output_lock, flags);
 			return;
 		}
-		idx = st->ready[0];
-		memmove(&st->ready[0], &st->ready[1], --st->nready);
-		buf = vfe_buf_get_pending(output);
+		idx = ring->ready[0];
+		memmove(&ring->ready[0], &ring->ready[1], --ring->nready);
+		buf = list_first_entry_or_null(ring->bufs, struct camss_buffer, queue);
+		if (buf)
+			list_del(&buf->queue);
 		spin_unlock_irqrestore(&vfe->output_lock, flags);
 
-		f = &st->frame[idx];
+		f = &ring->frame[idx];
 		if (buf) {
-			ret = vfe_pix_copy(vfe, st, f, buf);
+			vfe_pix_frame_to_cpu(vfe, ring->size, f);
+			ret = ring->ops->copy(vfe, ring, f, buf);
 			buf->vb.vb2_buf.timestamp = f->done_ts;
 			buf->vb.sequence = f->token.sequence;
 			vfe_pix_return_buf(buf, ret || f->error ? VB2_BUF_STATE_ERROR :
@@ -852,12 +884,117 @@ static void vfe_pix_copy_work(struct work_struct *work)
 					    vfe->id, f->token.sequence);
 		}
 
-		vfe_pix_frame_to_device(vfe, st->size, f);
+		vfe_pix_frame_to_device(vfe, ring->size, f);
 
 		spin_lock_irqsave(&vfe->output_lock, flags);
-		set_bit(idx, &st->free);
+		set_bit(idx, &ring->free);
 		spin_unlock_irqrestore(&vfe->output_lock, flags);
 	}
+}
+
+/* Free frames that never reached the hardware, newest first */
+static void vfe_pix_frames_free(struct vfe_device *vfe, struct vfe_pix_frame *frame,
+				size_t size)
+{
+	unsigned int i = VFE_PIX_STAGING_NUM + 1;
+
+	while (i--)
+		if (frame[i].cpu)
+			vfe_pix_frame_free(vfe, size, &frame[i]);
+	memset(frame, 0, sizeof(*frame) * (VFE_PIX_STAGING_NUM + 1));
+}
+
+/*
+ * vfe_pix_ring_alloc - Allocate a ring's staging frames and drop frame
+ * @frame: VFE_PIX_STAGING_NUM + 1 zeroed entries
+ *
+ * Each frame is handed to the device before any address is published. On
+ * failure nothing stays allocated.
+ */
+static int vfe_pix_ring_alloc(struct vfe_device *vfe, struct vfe_pix_frame *frame,
+			      size_t size)
+{
+	unsigned int i;
+
+	for (i = 0; i < VFE_PIX_STAGING_NUM + 1; i++) {
+		frame[i].cpu = vfe_pix_frame_alloc(vfe, size, &frame[i].dma);
+		if (!frame[i].cpu) {
+			vfe_pix_frames_free(vfe, frame, size);
+			return -ENOMEM;
+		}
+		/* clean the allocator's dirty lines before any address is published */
+		vfe_pix_frame_to_device(vfe, size, &frame[i]);
+	}
+
+	return 0;
+}
+
+/*
+ * vfe_pix_ring_start - Give a ring its frames, prime both address slots
+ * @bufs: the vb2 buffers it fills, protected by output_lock
+ *
+ * Locked, before the ring's write masters are enabled; any previous copy
+ * work must have been joined. From here until vfe_pix_release_frames() the
+ * ring is in use and a PIX stop cancels, frees or retains it.
+ */
+static void vfe_pix_ring_start(struct vfe_device *vfe, struct vfe_pix_ring *ring,
+			       const struct vfe_pix_ring_ops *ops, struct list_head *bufs,
+			       const struct vfe_pix_frame *frame, size_t size)
+{
+	unsigned int i;
+
+	memcpy(ring->frame, frame, sizeof(ring->frame));
+	ring->size = size;
+	ring->free = GENMASK(VFE_PIX_STAGING_NUM - 1, 0);
+	ring->nready = 0;
+	ring->frame_error = false;
+	ring->line = &vfe->line[VFE_LINE_PIX];
+	ring->ops = ops;
+	ring->bufs = bufs;
+	INIT_WORK(&ring->copy_work, vfe_pix_copy_work);
+
+	/* Two frames' addresses in flight, both driver owned */
+	for (i = 0; i < ARRAY_SIZE(ring->hw); i++) {
+		ring->hw[i] = vfe_pix_take_frame(ring);
+		ops->queue_addr(vfe, ring, ring->hw[i]);
+	}
+}
+
+/*
+ * vfe_pix_ring_retire - The frame in hw[0] completed. Locked.
+ *
+ * Queue it for its copy with @tok and done time @ts, unless it is the drop
+ * frame or delivery stopped. Return whether it was queued. The caller must
+ * validate the consumer's completion/token association first and advance
+ * once afterwards. This helper establishes no hardware frame identity.
+ */
+static bool vfe_pix_ring_retire(struct vfe_pix_ring *ring,
+				const struct vfe_pix_token *tok, u64 ts)
+{
+	u8 head = ring->hw[0];
+
+	if (head == VFE_PIX_DROP || !vfe_pix_delivering(&ring->line->output))
+		return false;
+
+	ring->frame[head].token = *tok;
+	ring->frame[head].done_ts = ts;
+	ring->frame[head].error = ring->frame_error;
+	ring->ready[ring->nready++] = head;
+	/* under the lock: vfe_pix_disable() cancels after STOPPING */
+	queue_work(system_highpri_wq, &ring->copy_work);
+
+	return true;
+}
+
+/* hw[1] is now in progress; give the next address slot a frame. Locked. */
+static void vfe_pix_ring_advance(struct vfe_device *vfe, struct vfe_pix_ring *ring)
+{
+	ring->frame_error = false;
+
+	ring->hw[0] = ring->hw[1];
+	ring->hw[1] = vfe_pix_delivering(&ring->line->output) ?
+		      vfe_pix_take_frame(ring) : VFE_PIX_DROP;
+	ring->ops->queue_addr(vfe, ring, ring->hw[1]);
 }
 
 static void vfe_pix_diag_enable(struct vfe_device *vfe)
@@ -884,6 +1021,7 @@ static int vfe_pix_enable(struct vfe_line *line)
 	struct vfe_device *vfe = to_vfe(line);
 	struct vfe_output *output = &line->output;
 	struct vfe_pix_staging *st = &output->pix;
+	struct vfe_pix_ring *img = &st->ring[VFE_PIX_RING_IMAGE];
 	const struct v4l2_pix_format_mplane *pix = &line->video_out.active_fmt.fmt.pix_mp;
 	const struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
 	const struct v4l2_mbus_framefmt *src = &line->fmt[MSM_VFE_PAD_SRC];
@@ -892,7 +1030,6 @@ static int vfe_pix_enable(struct vfe_line *line)
 	u32 w = sink->width, h = sink->height;
 	u32 bpl = pix->plane_fmt[0].bytesperline;
 	unsigned long flags;
-	unsigned int i;
 	size_t size;
 	int ret;
 
@@ -909,17 +1046,9 @@ static int vfe_pix_enable(struct vfe_line *line)
 	}
 
 	size = (size_t)bpl * h * 3 / 2;
-	for (i = 0; i < ARRAY_SIZE(frame); i++) {
-		frame[i].cpu = vfe_pix_frame_alloc(vfe, size, &frame[i].dma);
-		if (!frame[i].cpu) {
-			ret = -ENOMEM;
-			goto error_free;
-		}
-		/* clean the allocator's dirty lines before any address is published */
-		vfe_pix_frame_to_device(vfe, size, &frame[i]);
-	}
-
-	INIT_WORK(&st->copy_work, vfe_pix_copy_work);
+	ret = vfe_pix_ring_alloc(vfe, frame, size);
+	if (ret)
+		return ret;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
@@ -928,16 +1057,12 @@ static int vfe_pix_enable(struct vfe_line *line)
 	    vfe->wm_output_map[VFE_PIX_WM_C] != VFE_LINE_NONE) {
 		spin_unlock_irqrestore(&vfe->output_lock, flags);
 		dev_err(vfe->camss->dev, "VFE%u PIX: output busy\n", vfe->id);
-		ret = -EBUSY;
-		goto error_free;
+		/* never handed to the hardware */
+		vfe_pix_frames_free(vfe, frame, size);
+		return -EBUSY;
 	}
 
-	memcpy(st->frame, frame, sizeof(frame));
-	st->size = size;
 	st->c_offset = bpl * h;
-	st->free = GENMASK(VFE_PIX_STAGING_NUM - 1, 0);
-	st->nready = 0;
-	st->frame_error = false;
 	st->faulted = false;
 	st->generation++;
 	st->sof_sequence = 0;
@@ -959,11 +1084,8 @@ static int vfe_pix_enable(struct vfe_line *line)
 	vfe_pix_wm_config(vfe, VFE_PIX_WM_Y, w, h, bpl);
 	vfe_pix_wm_config(vfe, VFE_PIX_WM_C, w, h / 2, bpl);
 
-	/* Two frames' addresses in flight, both driver owned */
-	for (i = 0; i < 2; i++) {
-		st->hw[i] = vfe_pix_take_frame(st);
-		vfe_pix_queue_addr(vfe, st, st->hw[i]);
-	}
+	vfe_pix_ring_start(vfe, img, &vfe_pix_image_ops, &output->pending_bufs,
+			   frame, size);
 
 	/* Arm only once both address slots of both planes are valid */
 	writel_relaxed(BIT(VFE_PIX_WM_Y) | BIT(VFE_PIX_WM_C),
@@ -977,24 +1099,20 @@ static int vfe_pix_enable(struct vfe_line *line)
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	return 0;
-
-error_free:
-	/* never handed to the hardware */
-	while (i--)
-		vfe_pix_frame_free(vfe, size, &frame[i]);
-	return ret;
 }
 
 /* Fail closed, see vfe_pix_error(). Locked; true if this started the fault. */
 static bool vfe_pix_fault_locked(struct vfe_output *output)
 {
 	struct vfe_pix_staging *st = &output->pix;
+	unsigned int i;
 
-	if (output->state != VFE_OUTPUT_ON || st->faulted)
+	if (!vfe_pix_delivering(output))
 		return false;
 
 	st->faulted = true;
-	st->nready = 0;
+	for (i = 0; i < VFE_PIX_RINGS; i++)
+		st->ring[i].nready = 0;
 	return true;
 }
 
@@ -1052,7 +1170,7 @@ static u8 vfe_pix_expected_frame_count(u32 sequence)
  * and a done is ambiguous: done then SOF would be legal, SOF then done not,
  * and the status cannot tell; it fails closed too.
  *
- * Grounded only by the 2000x1128 ~30 fps physical trace (done 3.8-7.1 ms
+ * Grounded only by the 2000x1128 ~30 fps physical trace (done 3.8-7.3 ms
  * after SOF, at least 26 ms before the next SOF, never coalesced); a mode
  * whose done can legitimately follow the next SOF will fail closed here.
  *
@@ -1071,6 +1189,7 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
 	struct vfe_output *output = &line->output;
 	struct vfe_pix_staging *st = &output->pix;
+	struct vfe_pix_ring *img = &st->ring[VFE_PIX_RING_IMAGE];
 	bool fault = false, sync = false;
 	unsigned long flags;
 	u32 diag_frm_cnt;
@@ -1104,30 +1223,16 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 			fault |= vfe_pix_fault_locked(output);
 		st->tok.valid = false;
 
-		head = st->hw[0];
-		deliver = head != VFE_PIX_DROP && output->state == VFE_OUTPUT_ON &&
-			  !st->faulted;
-		if (deliver) {
-			st->frame[head].token = tok;
-			st->frame[head].done_ts = ts;
-			st->frame[head].error = st->frame_error;
-			st->ready[st->nready++] = head;
-			/* under the lock: vfe_pix_disable() cancels after STOPPING */
-			queue_work(system_highpri_wq, &st->copy_work);
-		}
+		head = img->hw[0];
+		deliver = vfe_pix_ring_retire(img, &tok, ts);
 		if (trace_camss_pix_done_enabled())
 			trace_camss_pix_done(vfe->id, tok.generation, tok.sequence,
-					     tok.valid, head, st->frame[head].dma,
+					     tok.valid, head, img->frame[head].dma,
 					     deliver,
 					     vfe_pix_wm_last(vfe, VFE_PIX_WM_Y),
 					     vfe_pix_wm_last(vfe, VFE_PIX_WM_C),
 					     diag_frm_cnt);
-		st->frame_error = false;
-
-		st->hw[0] = st->hw[1];
-		st->hw[1] = output->state == VFE_OUTPUT_ON && !st->faulted ?
-			    vfe_pix_take_frame(st) : VFE_PIX_DROP;
-		vfe_pix_queue_addr(vfe, st, st->hw[1]);
+		vfe_pix_ring_advance(vfe, img);
 	}
 
 	if (sof) {
@@ -1135,8 +1240,8 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done, u64 t
 		sync = true;
 		if (trace_camss_pix_sof_enabled())
 			trace_camss_pix_sof(vfe->id, st->generation, sequence,
-					    st->tok.valid, st->hw[0],
-					    st->frame[st->hw[0]].dma,
+					    st->tok.valid, img->hw[0],
+					    img->frame[img->hw[0]].dma,
 					    vfe_pix_wm_last(vfe, VFE_PIX_WM_Y),
 					    vfe_pix_wm_last(vfe, VFE_PIX_WM_C),
 					    diag_frm_cnt);
@@ -1185,10 +1290,12 @@ static void vfe_pix_error(struct vfe_device *vfe, u32 status1, u32 bus_status0)
 	struct vfe_pix_staging *st = &output->pix;
 	bool fault = false;
 	unsigned long flags;
+	unsigned int i;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	if (output->state == VFE_OUTPUT_ON) {
-		st->frame_error = true;
+		for (i = 0; i < VFE_PIX_RINGS; i++)
+			st->ring[i].frame_error = true;
 		if (bus_status0 & VFE_PIX_BUS_FAULT)
 			fault = vfe_pix_fault_locked(output);
 	}
@@ -1213,6 +1320,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 {
 	struct vfe_device *vfe = dev;
 	bool pix = vfe_line_is_pix(&vfe->line[VFE_LINE_PIX]);
+	struct vfe_pix_ring *img = &vfe->line[VFE_LINE_PIX].output.pix.ring[VFE_PIX_RING_IMAGE];
 	u64 ts = ktime_get_ns();
 	u32 status0, status1, vfe_bus_status[VFE_BUS_IRQ_BANKS];
 	int i, wm, rdi_num;
@@ -1238,8 +1346,7 @@ static irqreturn_t vfe_isr(int irq, void *dev)
 	if (pix)
 		trace_camss_pix_irq(vfe->id, status0, status1, vfe_bus_status[0],
 				    vfe_bus_status[1],
-				    READ_ONCE(vfe->line[VFE_LINE_PIX].output.pix.hw[0]),
-				    READ_ONCE(vfe->line[VFE_LINE_PIX].output.pix.hw[1]));
+				    READ_ONCE(img->hw[0]), READ_ONCE(img->hw[1]));
 
 	if (status0 & STATUS_0_RESET_ACK)
 		vfe->isr_ops.reset_ack(vfe);
@@ -1576,11 +1683,11 @@ out:
  * vfe_pix_disable - Stop the PIX line
  *
  * Once STOPPING is set under output_lock no IRQ queues copy work, so the
- * cancel below leaves none behind. vb2 buffers are never DMA targets (the
- * node uses vb2-vmalloc), so they can always be returned. The
- * driver frames can be freed only once a reset confirmed the bus idle;
- * otherwise they are abandoned for good and the VFE refuses to stream until
- * a power-up reset is acknowledged.
+ * cancels below leave none behind. vb2 buffers are never DMA targets (the
+ * node uses vb2-vmalloc), so they can always be returned. The driver frames
+ * of every ring in use can be freed only once a reset confirmed the bus
+ * idle; otherwise all of them are abandoned for good and the VFE stays
+ * wedged until reboot.
  */
 static int vfe_pix_disable(struct vfe_line *line)
 {
@@ -1588,27 +1695,35 @@ static int vfe_pix_disable(struct vfe_line *line)
 	struct vfe_output *output = &line->output;
 	struct vfe_pix_staging *st = &output->pix;
 	unsigned long flags;
+	unsigned int i;
 	int ret;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	output->state = VFE_OUTPUT_STOPPING;
 	writel_relaxed(0, vfe->base + VFE_BUS_COMP_MASK(VFE_PIX_COMP_GRP));
 	writel_relaxed(0, vfe->base + VFE_CAMIF_CFG);
-	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_PIX_WM_Y));
-	writel_relaxed(0, vfe->base + VFE_BUS_WM_CFG(VFE_PIX_WM_C));
+	for (i = 0; i < VFE_PIX_RINGS; i++)
+		if (st->ring[i].ops)
+			st->ring[i].ops->stop(vfe, &st->ring[i]);
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
 	/* a copy in progress completes its vb2 buffer; no new ones start */
-	cancel_work_sync(&st->copy_work);
+	for (i = 0; i < VFE_PIX_RINGS; i++)
+		if (st->ring[i].ops)
+			cancel_work_sync(&st->ring[i].copy_work);
 
 	ret = vfe_reset(vfe);
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 	output->state = VFE_OUTPUT_IDLE;
-	st->nready = 0;
+	for (i = 0; i < VFE_PIX_RINGS; i++)
+		st->ring[i].nready = 0;
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
-	vfe_pix_release_frames(vfe, st, ret);
+	/* one reset for the whole bus: no ring is freed unless it is confirmed */
+	for (i = 0; i < VFE_PIX_RINGS; i++)
+		if (st->ring[i].ops)
+			vfe_pix_release_frames(vfe, &st->ring[i], ret);
 	vfe_put_output(line);
 
 	mutex_lock(&vfe->stream_lock);

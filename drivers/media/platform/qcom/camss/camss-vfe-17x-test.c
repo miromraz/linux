@@ -2,10 +2,11 @@
 /*
  * KUnit tests for the Titan 170 PIX lifecycle: exclusivity, start failure
  * unwind, staging ownership, copy ordering, starvation and stop with and
- * without a confirmed reset. Included by camss-vfe-17x.c so the production
+ * without a confirmed reset, for the image ring alone and next to a second
+ * ring consumer. Included by camss-vfe-17x.c so the production
  * static functions are exercised directly. The VFE is backed by plain
  * memory; reset acknowledges, DMA frame allocation, the vb2 copy and vb2
- * completion are faked.
+ * completion are faked. None of this shows how the hardware writes DMA.
  */
 #include <kunit/device.h>
 #include <kunit/static_stub.h>
@@ -18,9 +19,13 @@
 #define PIX_TEST_BPL	2000
 #define PIX_TEST_SIZE	(PIX_TEST_BPL * PIX_TEST_H * 3 / 2)
 #define PIX_TEST_NBUF	4
+#define PIX_TEST_MAX_ALLOCS	32
 #define PIX_TEST_DMA(n)	(0x80000000u + (n) * 0x01000000u)
 /* vb2 buffers are CPU memory; any of these in a WM register is a bug */
 #define PIX_TEST_VB2(n)	(0x10000000u + (n) * 0x01000000u)
+/* The second ring consumer, test-only: no write master, no statistics */
+#define PIX_TEST_RING2_SIZE	4096
+#define PIX_TEST_RING2_DMA(n)	PIX_TEST_DMA(VFE_PIX_STAGING_NUM + 1 + (n))
 
 struct pix_test {
 	struct camss camss;
@@ -38,6 +43,12 @@ struct pix_test {
 
 	unsigned int allocs, frees, fail_alloc_at;
 	unsigned int to_device;
+	unsigned int to_cpu;
+	bool cpu_owned[PIX_TEST_MAX_ALLOCS];
+	size_t dma_size[PIX_TEST_MAX_ALLOCS];
+	unsigned int cpu_handoff[PIX_TEST_MAX_ALLOCS];
+	unsigned int device_handoff[PIX_TEST_MAX_ALLOCS];
+	unsigned int bad_handoff, early_free, early_reset;
 	/* device handoffs seen while no WM was enabled nor address published */
 	unsigned int handoff_unpublished;
 	dma_addr_t handoff[VFE_PIX_STAGING_NUM + 1];
@@ -60,9 +71,26 @@ struct pix_test {
 	bool block_copy;
 	struct completion copy_entered, copy_release;
 
-	struct delayed_work release_work;
+	/* second ring: own buffers, last programmed frame, copies */
+	struct camss_buffer buf2[PIX_TEST_NBUF];
+	struct list_head bufs2;
+	dma_addr_t addr2;
+	unsigned int naddr2;
+	unsigned int stops2;
+	dma_addr_t copied2[PIX_TEST_NBUF * 2];
+	unsigned int ncopied2;
+	bool block_copy2;
+	struct completion copy2_entered, copy2_release;
+
+	/* both rings' copy workers record handoffs and completions */
+	spinlock_t lock;
+
+	struct delayed_work release_work, release2_work;
 	struct kunit *test;
 };
+
+static void pix_test_release_copy(struct work_struct *work);
+static void pix_test_release_copy2(struct work_struct *work);
 
 static const struct camss_resources pix_test_res = {
 	.csid_num = 1,
@@ -77,6 +105,11 @@ static void pix_test_global_reset(struct vfe_device *vfe)
 {
 	struct pix_test *t = container_of(vfe, struct pix_test, vfe);
 
+	spin_lock(&t->lock);
+	for (unsigned int i = 0; i < ARRAY_SIZE(t->cpu_owned); i++)
+		if (t->cpu_owned[i])
+			t->early_reset++;
+	spin_unlock(&t->lock);
 	t->resets++;
 	if (t->ack_reset)
 		t->ack_pending = true;
@@ -105,7 +138,10 @@ static void *pix_test_frame_alloc(struct vfe_device *vfe, size_t size, dma_addr_
 
 	if (t->fail_alloc_at && t->allocs + 1 == t->fail_alloc_at)
 		return NULL;
+	if (t->allocs >= PIX_TEST_MAX_ALLOCS)
+		return NULL;
 	*dma = PIX_TEST_DMA(t->allocs);
+	t->dma_size[t->allocs] = size;
 	t->allocs++;
 	/* nothing reads it: copies are faked */
 	return kunit_kzalloc(kunit_get_current_test(), 16, GFP_KERNEL);
@@ -114,14 +150,30 @@ static void *pix_test_frame_alloc(struct vfe_device *vfe, size_t size, dma_addr_
 static void pix_test_frame_free(struct vfe_device *vfe, size_t size,
 				struct vfe_pix_frame *f)
 {
-	pix_test_ctx()->frees++;
+	struct pix_test *t = pix_test_ctx();
+	unsigned int idx = (f->dma - PIX_TEST_DMA(0)) / 0x01000000u;
+
+	if (idx < ARRAY_SIZE(t->cpu_owned) && t->cpu_owned[idx])
+		t->early_free++;
+	t->frees++;
 }
 
-static int pix_test_copy(struct vfe_device *vfe, struct vfe_pix_staging *st,
+static void pix_test_check_cpu_owned(struct pix_test *t, struct vfe_pix_frame *f)
+{
+	unsigned int idx = (f->dma - PIX_TEST_DMA(0)) / 0x01000000u;
+
+	spin_lock(&t->lock);
+	if (idx >= ARRAY_SIZE(t->cpu_owned) || !t->cpu_owned[idx])
+		t->bad_handoff++;
+	spin_unlock(&t->lock);
+}
+
+static int pix_test_copy(struct vfe_device *vfe, struct vfe_pix_ring *ring,
 			 struct vfe_pix_frame *f, struct camss_buffer *buf)
 {
 	struct pix_test *t = pix_test_ctx();
 
+	pix_test_check_cpu_owned(t, f);
 	if (t->ncopied < ARRAY_SIZE(t->copied))
 		t->copied[t->ncopied] = f->dma;
 	t->ncopied++;
@@ -135,11 +187,39 @@ static int pix_test_copy(struct vfe_device *vfe, struct vfe_pix_staging *st,
 
 static u32 pix_reg(struct pix_test *t, u32 reg);
 
+static void pix_test_to_cpu(struct vfe_device *vfe, size_t size,
+			    struct vfe_pix_frame *f)
+{
+	struct pix_test *t = pix_test_ctx();
+	unsigned int idx = (f->dma - PIX_TEST_DMA(0)) / 0x01000000u;
+
+	spin_lock(&t->lock);
+	if (idx >= ARRAY_SIZE(t->cpu_owned) ||
+	    size != t->dma_size[idx]) {
+		t->bad_handoff++;
+	} else {
+		if (t->cpu_owned[idx])
+			t->bad_handoff++;
+		t->cpu_owned[idx] = true;
+		t->cpu_handoff[idx]++;
+	}
+	t->to_cpu++;
+	spin_unlock(&t->lock);
+}
+
 static void pix_test_to_device(struct vfe_device *vfe, size_t size,
 			       struct vfe_pix_frame *f)
 {
 	struct pix_test *t = pix_test_ctx();
+	unsigned int idx = (f->dma - PIX_TEST_DMA(0)) / 0x01000000u;
 
+	spin_lock(&t->lock);
+	if (idx >= ARRAY_SIZE(t->cpu_owned) || size != t->dma_size[idx]) {
+		t->bad_handoff++;
+	} else {
+		t->cpu_owned[idx] = false;
+		t->device_handoff[idx]++;
+	}
 	if (!pix_reg(t, VFE_BUS_WM_CFG(VFE_PIX_WM_Y)) &&
 	    !pix_reg(t, VFE_BUS_WM_CFG(VFE_PIX_WM_C)) &&
 	    !pix_reg(t, VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_Y)) &&
@@ -147,12 +227,14 @@ static void pix_test_to_device(struct vfe_device *vfe, size_t size,
 	    t->handoff_unpublished < ARRAY_SIZE(t->handoff))
 		t->handoff[t->handoff_unpublished++] = f->dma;
 	t->to_device++;
+	spin_unlock(&t->lock);
 }
 
 static void pix_test_return_buf(struct camss_buffer *buf, enum vb2_buffer_state state)
 {
 	struct pix_test *t = pix_test_ctx();
 
+	spin_lock(&t->lock);
 	if (t->nreturned < ARRAY_SIZE(t->returned)) {
 		t->returned[t->nreturned] = buf;
 		t->state[t->nreturned] = state;
@@ -160,7 +242,54 @@ static void pix_test_return_buf(struct camss_buffer *buf, enum vb2_buffer_state 
 		t->ts[t->nreturned] = buf->vb.vb2_buf.timestamp;
 	}
 	t->nreturned++;
+	spin_unlock(&t->lock);
 }
+
+/* Second ring hooks: record the programmed frame, copy like the image stub */
+static void pix_test_ring2_queue_addr(struct vfe_device *vfe, struct vfe_pix_ring *ring,
+				      u8 idx)
+{
+	struct pix_test *t = container_of(vfe, struct pix_test, vfe);
+	unsigned int dma_idx = (ring->frame[idx].dma - PIX_TEST_DMA(0)) / 0x01000000u;
+
+	spin_lock(&t->lock);
+	if (dma_idx >= ARRAY_SIZE(t->cpu_owned) || t->cpu_owned[dma_idx] ||
+	    !t->device_handoff[dma_idx])
+		t->bad_handoff++;
+	spin_unlock(&t->lock);
+	t->addr2 = ring->frame[idx].dma;
+	t->naddr2++;
+}
+
+static void pix_test_ring2_stop(struct vfe_device *vfe, struct vfe_pix_ring *ring)
+{
+	struct pix_test *t = container_of(vfe, struct pix_test, vfe);
+
+	t->stops2++;
+}
+
+static int pix_test_ring2_copy(struct vfe_device *vfe, struct vfe_pix_ring *ring,
+			       struct vfe_pix_frame *f, struct camss_buffer *buf)
+{
+	struct pix_test *t = container_of(vfe, struct pix_test, vfe);
+
+	pix_test_check_cpu_owned(t, f);
+	if (t->ncopied2 < ARRAY_SIZE(t->copied2))
+		t->copied2[t->ncopied2] = f->dma;
+	t->ncopied2++;
+	if (t->block_copy2) {
+		t->block_copy2 = false;
+		complete(&t->copy2_entered);
+		wait_for_completion(&t->copy2_release);
+	}
+	return 0;
+}
+
+static const struct vfe_pix_ring_ops pix_test_ring2_ops = {
+	.queue_addr = pix_test_ring2_queue_addr,
+	.stop = pix_test_ring2_stop,
+	.copy = pix_test_ring2_copy,
+};
 
 static void pix_test_frame_sync(struct vfe_line *line, u32 sequence)
 {
@@ -233,16 +362,25 @@ static int pix_test_init(struct kunit *test)
 		pix->plane_fmt[0].sizeimage = PIX_TEST_SIZE;
 	}
 
-	for (i = 0; i < PIX_TEST_NBUF; i++)
+	for (i = 0; i < PIX_TEST_NBUF; i++) {
 		t->buf[i].addr[0] = PIX_TEST_VB2(i);
+		t->buf2[i].addr[0] = PIX_TEST_VB2(PIX_TEST_NBUF + i);
+	}
 
 	init_completion(&t->copy_entered);
 	init_completion(&t->copy_release);
+	init_completion(&t->copy2_entered);
+	init_completion(&t->copy2_release);
+	INIT_LIST_HEAD(&t->bufs2);
+	spin_lock_init(&t->lock);
+	INIT_DELAYED_WORK(&t->release_work, pix_test_release_copy);
+	INIT_DELAYED_WORK(&t->release2_work, pix_test_release_copy2);
 
 	camss_titan170_pix = true;
 	kunit_activate_static_stub(test, vfe_pix_frame_alloc, pix_test_frame_alloc);
 	kunit_activate_static_stub(test, vfe_pix_frame_free, pix_test_frame_free);
 	kunit_activate_static_stub(test, vfe_pix_copy, pix_test_copy);
+	kunit_activate_static_stub(test, vfe_pix_frame_to_cpu, pix_test_to_cpu);
 	kunit_activate_static_stub(test, vfe_pix_frame_to_device, pix_test_to_device);
 	kunit_activate_static_stub(test, vfe_pix_return_buf, pix_test_return_buf);
 	kunit_activate_static_stub(test, vfe_reset_ack_status, pix_test_ack_status);
@@ -272,6 +410,20 @@ static void pix_test_exit(struct kunit *test)
 	struct pix_test *t = test->priv;
 	struct vfe_pix_quarantine *q;
 
+	/* An assertion or a negative control must not strand a blocked worker. */
+	complete_all(&t->copy_release);
+	complete_all(&t->copy2_release);
+	cancel_delayed_work_sync(&t->release_work);
+	cancel_delayed_work_sync(&t->release2_work);
+	if (t->vfe.pix_active)
+		vfe_pix_disable(&t->vfe.line[VFE_LINE_PIX]);
+	for (unsigned int i = 0; i < VFE_PIX_RINGS; i++) {
+		struct vfe_pix_ring *ring = &t->vfe.line[VFE_LINE_PIX].output.pix.ring[i];
+
+		if (ring->line)
+			cancel_work_sync(&ring->copy_work);
+	}
+
 	while ((q = pix_test_quarantine(t))) {
 		mutex_lock(&vfe_pix_quarantine_lock);
 		list_del(&q->list);
@@ -292,6 +444,16 @@ static struct vfe_pix_staging *pix_st(struct pix_test *t)
 	return &pix_line(t)->output.pix;
 }
 
+static struct vfe_pix_ring *pix_img(struct pix_test *t)
+{
+	return &pix_st(t)->ring[VFE_PIX_RING_IMAGE];
+}
+
+static struct vfe_pix_ring *pix_ring2(struct pix_test *t)
+{
+	return &pix_st(t)->ring[VFE_PIX_RING_STATS];
+}
+
 static void pix_queue(struct pix_test *t, unsigned int i)
 {
 	unsigned long flags;
@@ -307,10 +469,8 @@ static void pix_queue(struct pix_test *t, unsigned int i)
  */
 static void pix_test_copy_work(struct work_struct *work)
 {
-	struct vfe_pix_staging *st = container_of(work, struct vfe_pix_staging, copy_work);
-	struct vfe_output *output = container_of(st, struct vfe_output, pix);
-	struct vfe_line *line = container_of(output, struct vfe_line, output);
-	struct pix_test *t = container_of(to_vfe(line), struct pix_test, vfe);
+	struct vfe_pix_ring *ring = container_of(work, struct vfe_pix_ring, copy_work);
+	struct pix_test *t = container_of(to_vfe(ring->line), struct pix_test, vfe);
 	struct kunit *prev = current->kunit_test;
 
 	current->kunit_test = t->test;
@@ -326,7 +486,7 @@ static int pix_start(struct pix_test *t, struct vfe_line *line)
 	line->output.state = VFE_OUTPUT_RESERVED;
 	ret = t->vfe.res->hw_ops->vfe_enable(line);
 	if (!ret && vfe_line_is_pix(line)) {
-		line->output.pix.copy_work.func = pix_test_copy_work;
+		line->output.pix.ring[VFE_PIX_RING_IMAGE].copy_work.func = pix_test_copy_work;
 		t->camif_count = 0;
 	}
 
@@ -374,7 +534,7 @@ static void pix_frame(struct pix_test *t)
 {
 	pix_sof(t);
 	pix_done(t);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 }
 
 /* The WM address registers only ever hold driver DMA frames */
@@ -398,8 +558,13 @@ static void pix_assert_released(struct kunit *test, struct pix_test *t)
 	KUNIT_EXPECT_EQ(test, t->vfe.wm_output_map[VFE_PIX_WM_Y], VFE_LINE_NONE);
 	KUNIT_EXPECT_EQ(test, t->vfe.wm_output_map[VFE_PIX_WM_C], VFE_LINE_NONE);
 	KUNIT_EXPECT_EQ(test, output->state, VFE_OUTPUT_OFF);
-	for (i = 0; i <= VFE_PIX_STAGING_NUM; i++)
-		KUNIT_EXPECT_NULL(test, output->pix.frame[i].cpu);
+	for (i = 0; i < VFE_PIX_RINGS; i++) {
+		struct vfe_pix_ring *ring = &output->pix.ring[i];
+
+		KUNIT_EXPECT_NULL(test, ring->ops);
+		for (unsigned int j = 0; j <= VFE_PIX_STAGING_NUM; j++)
+			KUNIT_EXPECT_NULL(test, ring->frame[j].cpu);
+	}
 }
 
 /* PIX first: an RDI start on the same VFE is refused, nothing is touched */
@@ -464,10 +629,10 @@ static void pix_test_arm_driver_frames(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, t->handoff_unpublished, VFE_PIX_STAGING_NUM + 1);
 	for (unsigned int i = 0; i <= VFE_PIX_STAGING_NUM; i++)
 		KUNIT_EXPECT_EQ(test, t->handoff[i], PIX_TEST_DMA(i));
-	KUNIT_EXPECT_EQ(test, pix_st(t)->frame[VFE_PIX_DROP].dma,
+	KUNIT_EXPECT_EQ(test, pix_img(t)->frame[VFE_PIX_DROP].dma,
 			PIX_TEST_DMA(VFE_PIX_DROP));
-	KUNIT_EXPECT_EQ(test, pix_st(t)->hw[0], 0);
-	KUNIT_EXPECT_EQ(test, pix_st(t)->hw[1], 1);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->hw[0], 0);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->hw[1], 1);
 	/* the last programmed slot: staging frame 1 */
 	KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_Y)),
 			PIX_TEST_DMA(1));
@@ -550,7 +715,7 @@ static void pix_test_frame_error(struct kunit *test)
 static void pix_test_no_reuse_during_copy(struct kunit *test)
 {
 	struct pix_test *t = test->priv;
-	struct vfe_pix_staging *st = pix_st(t);
+	struct vfe_pix_ring *ring = pix_img(t);
 	unsigned int i;
 
 	t->ack_reset = true;
@@ -565,19 +730,19 @@ static void pix_test_no_reuse_during_copy(struct kunit *test)
 	for (i = 0; i < 6; i++) {
 		pix_sof(t);
 		pix_done(t);
-		KUNIT_EXPECT_NE(test, st->hw[0], 0);
-		KUNIT_EXPECT_NE(test, st->hw[1], 0);
+		KUNIT_EXPECT_NE(test, ring->hw[0], 0);
+		KUNIT_EXPECT_NE(test, ring->hw[1], 0);
 		KUNIT_EXPECT_NE(test, pix_reg(t, VFE_BUS_WM_IMAGE_ADDR(VFE_PIX_WM_Y)),
 				PIX_TEST_DMA(0));
 	}
 	/* staging 1 and 2 completed and wait behind the blocked copy */
-	KUNIT_EXPECT_EQ(test, st->hw[0], VFE_PIX_DROP);
-	KUNIT_EXPECT_EQ(test, st->hw[1], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, ring->hw[0], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, ring->hw[1], VFE_PIX_DROP);
 
 	complete(&t->copy_release);
-	flush_work(&st->copy_work);
+	flush_work(&ring->copy_work);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
-	KUNIT_EXPECT_EQ(test, st->free, GENMASK(VFE_PIX_STAGING_NUM - 1, 0));
+	KUNIT_EXPECT_EQ(test, ring->free, GENMASK(VFE_PIX_STAGING_NUM - 1, 0));
 
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 	pix_assert_released(test, t);
@@ -589,6 +754,14 @@ static void pix_test_release_copy(struct work_struct *work)
 					  release_work);
 
 	complete(&t->copy_release);
+}
+
+static void pix_test_release_copy2(struct work_struct *work)
+{
+	struct pix_test *t = container_of(to_delayed_work(work), struct pix_test,
+					  release2_work);
+
+	complete(&t->copy2_release);
 }
 
 /*
@@ -611,7 +784,6 @@ static void pix_test_stop_during_copy(struct kunit *test)
 	pix_sof(t);
 	pix_done(t);			/* second frame ready, queued behind */
 
-	INIT_DELAYED_WORK(&t->release_work, pix_test_release_copy);
 	schedule_delayed_work(&t->release_work, msecs_to_jiffies(50));
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 	flush_delayed_work(&t->release_work);
@@ -620,7 +792,7 @@ static void pix_test_stop_during_copy(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
 	KUNIT_EXPECT_EQ(test, t->ncopied, 1);
 	pix_snap(t, true, true, 0);	/* late IRQ */
-	KUNIT_EXPECT_FALSE(test, work_pending(&pix_st(t)->copy_work));
+	KUNIT_EXPECT_FALSE(test, work_pending(&pix_img(t)->copy_work));
 	pix_assert_released(test, t);
 	/* buf 1 never left the pending list: the caller's flush returns it */
 	KUNIT_EXPECT_PTR_EQ(test, vfe_buf_get_pending(&pix_line(t)->output), &t->buf[1]);
@@ -737,7 +909,7 @@ static void pix_test_reset_stuck_ack(struct kunit *test)
 static void pix_test_bus_fault_fails_closed(struct kunit *test)
 {
 	struct pix_test *t = test->priv;
-	struct vfe_pix_staging *st = pix_st(t);
+	struct vfe_pix_ring *ring = pix_img(t);
 	unsigned int i;
 
 	t->ack_reset = true;
@@ -754,18 +926,18 @@ static void pix_test_bus_fault_fails_closed(struct kunit *test)
 		       t->vfe.base + VFE_BUS_IRQ_STATUS(0));
 	vfe_isr(0, &t->vfe);
 	writel_relaxed(0, t->vfe.base + VFE_BUS_IRQ_STATUS(0));
-	flush_work(&st->copy_work);
+	flush_work(&ring->copy_work);
 
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
-	KUNIT_EXPECT_TRUE(test, st->faulted);
-	KUNIT_EXPECT_EQ(test, st->nready, 0);
+	KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
+	KUNIT_EXPECT_EQ(test, ring->nready, 0);
 	for (i = 0; i < 4; i++)
 		pix_frame(t);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
 	KUNIT_EXPECT_EQ(test, t->ncopied, 1);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
-	KUNIT_EXPECT_EQ(test, st->hw[0], VFE_PIX_DROP);
-	KUNIT_EXPECT_EQ(test, st->hw[1], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, ring->hw[0], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, ring->hw[1], VFE_PIX_DROP);
 
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 	pix_assert_released(test, t);
@@ -833,10 +1005,10 @@ static void pix_test_token_and_generation(struct kunit *test)
 		for (n = 0; n < 3; n++) {
 			pix_snap(t, true, false, 1000 + 100 * n);	/* SOF */
 			pix_snap(t, false, true, 1050 + 100 * n);	/* done */
-			flush_work(&pix_st(t)->copy_work);
-			KUNIT_EXPECT_EQ(test, pix_st(t)->frame[n].token.timestamp,
+			flush_work(&pix_img(t)->copy_work);
+			KUNIT_EXPECT_EQ(test, pix_img(t)->frame[n].token.timestamp,
 					1000 + 100 * n);
-			KUNIT_EXPECT_EQ(test, pix_st(t)->frame[n].token.generation,
+			KUNIT_EXPECT_EQ(test, pix_img(t)->frame[n].token.generation,
 					run + 1);
 		}
 
@@ -866,7 +1038,7 @@ static void pix_test_same_snapshot_fails_closed(struct kunit *test)
 
 	pix_sof(t);
 	pix_snap(t, true, true, 0);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
 	KUNIT_EXPECT_EQ(test, t->nsyncs, 2);
@@ -903,12 +1075,12 @@ static void pix_test_done_without_sof(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 
 	pix_done(t);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
 	KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
 	pix_frame(t);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
-	KUNIT_EXPECT_EQ(test, pix_st(t)->hw[1], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->hw[1], VFE_PIX_DROP);
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 }
 
@@ -935,7 +1107,7 @@ static void pix_test_unretired_at_sof_fails_closed(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
 	pix_done(t);			/* late, or frames 1+2 merged */
 	pix_frame(t);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
 	KUNIT_EXPECT_EQ(test, t->seq[0], 0);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
@@ -955,7 +1127,7 @@ static void pix_test_missed_sof(struct kunit *test)
 	pix_frame(t);		/* frame 0 delivered */
 	pix_counter_advance(t);	/* frame 1 starts, its SOF IRQ is lost */
 	pix_done(t);		/* frame 1 completes, its SOF was never seen */
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
 	KUNIT_ASSERT_EQ(test, t->nreturned, 1);
 	KUNIT_EXPECT_EQ(test, t->seq[0], 0);
@@ -980,12 +1152,12 @@ static void pix_test_lost_done_and_sof_fails_closed(struct kunit *test)
 	pix_sof(t);			/* frame 0; its done is lost */
 	pix_counter_advance(t);		/* frame 1's SOF IRQ is lost */
 	pix_done(t);			/* frame 1 done, old token: reject */
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
 	KUNIT_EXPECT_EQ(test, t->ncopied, 0);
-	KUNIT_EXPECT_EQ(test, pix_st(t)->nready, 0);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->nready, 0);
 	pix_frame(t);			/* frame 2 */
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
@@ -1006,7 +1178,7 @@ static void pix_test_counter_first_phase(struct kunit *test)
 		KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 		pix_snap_raw(t, true, false, 0, bad[i]);
 		pix_snap_raw(t, false, true, 0, bad[i]);
-		flush_work(&pix_st(t)->copy_work);
+		flush_work(&pix_img(t)->copy_work);
 		KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
 		KUNIT_EXPECT_EQ(test, t->faults, i + 1);
 		KUNIT_EXPECT_EQ(test, t->ncopied, 0);
@@ -1033,12 +1205,12 @@ static void pix_test_counter_sof_faults(struct kunit *test)
 		pix_frame(t);	/* frame 0/count 1 delivered */
 		pix_snap_raw(t, true, false, 0, bad[i]); /* expected 2 */
 		pix_snap_raw(t, false, true, 0, 2); /* cannot repair SOF fault */
-		flush_work(&pix_st(t)->copy_work);
+		flush_work(&pix_img(t)->copy_work);
 		KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
 		KUNIT_EXPECT_EQ(test, t->faults, i + 1);
 		KUNIT_EXPECT_EQ(test, t->ncopied, i + 1);
 		KUNIT_EXPECT_EQ(test, t->nreturned, i + 1);
-		KUNIT_EXPECT_EQ(test, pix_st(t)->nready, 0);
+		KUNIT_EXPECT_EQ(test, pix_img(t)->nready, 0);
 		KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 		KUNIT_EXPECT_PTR_EQ(test, vfe_buf_get_pending(&pix_line(t)->output),
 				    &t->buf[1]);
@@ -1060,12 +1232,12 @@ static void pix_test_counter_done_faults(struct kunit *test)
 		pix_frame(t);
 		pix_sof(t);	/* frame 1/count 2: token valid */
 		pix_snap_raw(t, false, true, 0, bad[i]);
-		flush_work(&pix_st(t)->copy_work);
+		flush_work(&pix_img(t)->copy_work);
 		KUNIT_EXPECT_TRUE(test, pix_st(t)->faulted);
 		KUNIT_EXPECT_EQ(test, t->faults, i + 1);
 		KUNIT_EXPECT_EQ(test, t->ncopied, i + 1);
 		KUNIT_EXPECT_EQ(test, t->nreturned, i + 1);
-		KUNIT_EXPECT_EQ(test, pix_st(t)->nready, 0);
+		KUNIT_EXPECT_EQ(test, pix_img(t)->nready, 0);
 		KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 		KUNIT_EXPECT_PTR_EQ(test, vfe_buf_get_pending(&pix_line(t)->output),
 				    &t->buf[1]);
@@ -1114,7 +1286,7 @@ static void pix_test_counter_restart(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 	pix_snap_raw(t, true, false, 0, 2); /* stale phase, no reseeding */
 	pix_snap_raw(t, false, true, 0, 2);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
@@ -1142,7 +1314,7 @@ static void pix_test_counter_upper_bytes(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 	pix_snap_raw(t, true, false, 0, raw);
 	pix_snap_raw(t, false, true, 0, raw);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, pix_reg(t, VFE_DIAG_SENSOR_FRM_CNT_STATUS), raw);
 	KUNIT_EXPECT_EQ(test, t->faults, 0);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
@@ -1161,7 +1333,7 @@ static void pix_test_counter_trace_off(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
 	pix_sof(t);
 	pix_snap_raw(t, false, true, 0, 2);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
 	KUNIT_EXPECT_EQ(test, t->ncopied, 0);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
@@ -1182,7 +1354,7 @@ static void pix_test_lost_done_and_sof_at_wrap(struct kunit *test)
 	pix_sof(t);		/* frame 254/count 255, DONE lost */
 	pix_counter_advance(t);	/* frame 255/count 1, SOF lost */
 	pix_done(t);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->faults, 1);
 	KUNIT_EXPECT_EQ(test, t->ncopied, 0);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 0);
@@ -1202,7 +1374,7 @@ static void pix_test_counter_255_frame_alias(struct kunit *test)
 	for (i = 0; i < 255; i++)
 		pix_counter_advance(t); /* no intervening IRQs in this model */
 	pix_done(t);
-	flush_work(&pix_st(t)->copy_work);
+	flush_work(&pix_img(t)->copy_work);
 	KUNIT_EXPECT_EQ(test, t->camif_count, 1);
 	KUNIT_EXPECT_EQ(test, t->faults, 0);
 	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
@@ -1229,7 +1401,432 @@ static void pix_test_diag_counter_observation(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 }
 
+/* Test-only stats-style consumer: no metadata node, engine or IRQ is enabled. */
+static int pix_ring2_start(struct pix_test *t)
+{
+	struct vfe_pix_frame frame[VFE_PIX_STAGING_NUM + 1] = {};
+	struct vfe_pix_ring *ring = pix_ring2(t);
+	unsigned long flags;
+	int ret;
+
+	ret = vfe_pix_ring_alloc(&t->vfe, frame, PIX_TEST_RING2_SIZE);
+	if (ret)
+		return ret;
+
+	spin_lock_irqsave(&t->vfe.output_lock, flags);
+	vfe_pix_ring_start(&t->vfe, ring, &pix_test_ring2_ops, &t->bufs2,
+			   frame, PIX_TEST_RING2_SIZE);
+	ring->copy_work.func = pix_test_copy_work;
+	spin_unlock_irqrestore(&t->vfe.output_lock, flags);
+	return 0;
+}
+
+static void pix_queue2(struct pix_test *t, unsigned int i)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&t->vfe.output_lock, flags);
+	list_add_tail(&t->buf2[i].queue, &t->bufs2);
+	spin_unlock_irqrestore(&t->vfe.output_lock, flags);
+}
+
+/*
+ * Synthetic validated completion supplied by a second consumer, independent
+ * of image DONE. This does not model BHIST's token/IRQ association.
+ */
+static void pix_ring2_done(struct pix_test *t, const struct vfe_pix_token *tok, u64 ts)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&t->vfe.output_lock, flags);
+	vfe_pix_ring_retire(pix_ring2(t), tok, ts);
+	vfe_pix_ring_advance(&t->vfe, pix_ring2(t));
+	spin_unlock_irqrestore(&t->vfe.output_lock, flags);
+}
+
+static void pix_two_frame(struct pix_test *t, u64 ts)
+{
+	pix_snap(t, true, false, ts);
+	pix_ring2_done(t, &pix_st(t)->tok, ts + 20);
+	pix_snap(t, false, true, ts + 10);
+	flush_work(&pix_img(t)->copy_work);
+	flush_work(&pix_ring2(t)->copy_work);
+}
+
+static void pix_expect_return(struct kunit *test, struct pix_test *t,
+			      struct camss_buffer *buf, u32 seq, u64 ts,
+			      enum vb2_buffer_state state)
+{
+	unsigned int i, matches = 0;
+
+	for (i = 0; i < min(t->nreturned, (unsigned int)ARRAY_SIZE(t->returned)); i++) {
+		if (t->returned[i] != buf)
+			continue;
+		matches++;
+		KUNIT_EXPECT_EQ(test, t->seq[i], seq);
+		KUNIT_EXPECT_EQ(test, t->ts[i], ts);
+		KUNIT_EXPECT_EQ(test, t->state[i], state);
+	}
+	KUNIT_EXPECT_EQ(test, matches, 1);
+}
+
+/* Each consumer has its own FIFO, vb2 starvation and completion timestamp. */
+static void pix_test_two_ring_consumers(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue(t, 1);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+	KUNIT_EXPECT_EQ(test, t->addr2, PIX_TEST_RING2_DMA(1));
+	KUNIT_EXPECT_EQ(test, t->naddr2, 2);
+
+	pix_two_frame(t, 100); /* stats has no buffer; only its frame is recycled */
+	KUNIT_EXPECT_EQ(test, t->ncopied2, 0);
+	KUNIT_EXPECT_EQ(test, t->cpu_handoff[VFE_PIX_STAGING_NUM + 1], 0);
+	KUNIT_EXPECT_EQ(test, t->device_handoff[VFE_PIX_STAGING_NUM + 1], 2);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->frame[0].token.timestamp, 100);
+	KUNIT_EXPECT_EQ(test, pix_ring2(t)->frame[0].token.timestamp, 100);
+	KUNIT_EXPECT_EQ(test, pix_ring2(t)->frame[0].token.generation,
+			pix_st(t)->generation);
+
+	pix_queue2(t, 0);
+	pix_queue2(t, 1);
+	pix_two_frame(t, 200);
+	pix_two_frame(t, 300); /* image starved while stats continues */
+	pix_queue(t, 2);
+	pix_queue2(t, 2);
+	pix_two_frame(t, 400);
+
+	KUNIT_ASSERT_EQ(test, t->nreturned, 6);
+	pix_expect_return(test, t, &t->buf[0], 0, 110, VB2_BUF_STATE_DONE);
+	pix_expect_return(test, t, &t->buf[1], 1, 210, VB2_BUF_STATE_DONE);
+	pix_expect_return(test, t, &t->buf[2], 3, 410, VB2_BUF_STATE_DONE);
+	pix_expect_return(test, t, &t->buf2[0], 1, 220, VB2_BUF_STATE_DONE);
+	pix_expect_return(test, t, &t->buf2[1], 2, 320, VB2_BUF_STATE_DONE);
+	pix_expect_return(test, t, &t->buf2[2], 3, 420, VB2_BUF_STATE_DONE);
+	KUNIT_EXPECT_EQ(test, t->copied2[0], PIX_TEST_RING2_DMA(1));
+	KUNIT_EXPECT_EQ(test, t->copied2[1], PIX_TEST_RING2_DMA(2));
+	KUNIT_EXPECT_EQ(test, t->copied2[2], PIX_TEST_RING2_DMA(0));
+	KUNIT_EXPECT_EQ(test, t->bad_handoff, 0);
+	KUNIT_EXPECT_EQ(test, t->faults, 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+	KUNIT_EXPECT_EQ(test, t->resets, 1);
+	KUNIT_EXPECT_EQ(test, t->stops2, 1);
+	KUNIT_EXPECT_EQ(test, t->frees, 2 * (VFE_PIX_STAGING_NUM + 1));
+	pix_assert_released(test, t);
+}
+
+/* A blocked stats copy drains only its own free slots; image keeps moving. */
+static void pix_test_two_ring_stats_copy_stalls(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	struct vfe_pix_ring *ring = pix_ring2(t);
+	unsigned int i;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue2(t, 0);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+	t->block_copy2 = true;
+	pix_sof(t);
+	pix_ring2_done(t, &pix_st(t)->tok, 1);
+	pix_done(t);
+	flush_work(&pix_img(t)->copy_work);
+	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy2_entered, HZ));
+
+	for (i = 0; i < 6; i++) {
+		pix_queue(t, 0);
+		pix_sof(t);
+		pix_ring2_done(t, &pix_st(t)->tok, 2 + i);
+		pix_done(t);
+		flush_work(&pix_img(t)->copy_work);
+		KUNIT_EXPECT_NE(test, ring->hw[0], 0);
+		KUNIT_EXPECT_NE(test, ring->hw[1], 0);
+		KUNIT_EXPECT_NE(test, t->addr2, PIX_TEST_RING2_DMA(0));
+		KUNIT_EXPECT_EQ(test, t->ncopied, i + 2);
+	}
+	KUNIT_EXPECT_EQ(test, ring->hw[0], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, ring->hw[1], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, ring->nready, 2);
+	KUNIT_EXPECT_EQ(test, ring->free, 0);
+	/* Still CPU owned: no post-copy device handoff has happened. */
+	KUNIT_EXPECT_TRUE(test, t->cpu_owned[VFE_PIX_STAGING_NUM + 1]);
+	KUNIT_EXPECT_EQ(test, t->device_handoff[VFE_PIX_STAGING_NUM + 1], 1);
+
+	complete(&t->copy2_release);
+	flush_work(&ring->copy_work);
+	KUNIT_EXPECT_EQ(test, t->ncopied2, 1);
+	KUNIT_EXPECT_EQ(test, ring->free, GENMASK(VFE_PIX_STAGING_NUM - 1, 0));
+	KUNIT_EXPECT_FALSE(test, t->cpu_owned[VFE_PIX_STAGING_NUM + 1]);
+	pix_queue2(t, 1);
+	/* Two in-flight drop slots must pass before a normal frame returns. */
+	for (i = 0; i < 3; i++)
+		pix_two_frame(t, 100 + i);
+	pix_expect_return(test, t, &t->buf2[1], 9, 122, VB2_BUF_STATE_DONE);
+	KUNIT_EXPECT_EQ(test, t->bad_handoff, 0);
+	KUNIT_EXPECT_EQ(test, t->faults, 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+	KUNIT_EXPECT_EQ(test, t->early_free, 0);
+	pix_assert_released(test, t);
+}
+
+/* A blocked image copy must not stop the stats-style consumer either. */
+static void pix_test_two_ring_image_copy_stalls(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	unsigned int i;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue2(t, 0);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+	t->block_copy = true;
+	pix_sof(t);
+	pix_ring2_done(t, &pix_st(t)->tok, 1);
+	pix_done(t);
+	flush_work(&pix_ring2(t)->copy_work);
+	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy_entered, HZ));
+	for (i = 0; i < 6; i++) {
+		pix_queue2(t, 0);
+		pix_sof(t);
+		pix_ring2_done(t, &pix_st(t)->tok, 2 + i);
+		pix_done(t);
+		flush_work(&pix_ring2(t)->copy_work);
+		KUNIT_EXPECT_NE(test, pix_img(t)->hw[0], 0);
+		KUNIT_EXPECT_NE(test, pix_img(t)->hw[1], 0);
+		KUNIT_EXPECT_EQ(test, t->ncopied2, i + 2);
+		pix_expect_driver_targets(test, t);
+	}
+	KUNIT_EXPECT_EQ(test, pix_img(t)->hw[0], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->hw[1], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, t->device_handoff[0], 1);
+	complete(&t->copy_release);
+	flush_work(&pix_img(t)->copy_work);
+	KUNIT_EXPECT_EQ(test, t->ncopied, 1);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->free, GENMASK(VFE_PIX_STAGING_NUM - 1, 0));
+	KUNIT_EXPECT_EQ(test, t->bad_handoff, 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+	pix_assert_released(test, t);
+}
+
+/* Both copies must finish before either ring is freed or quarantined. */
+static void pix_two_ring_stop_copy(struct kunit *test, bool reset_ack)
+{
+	struct pix_test *t = test->priv;
+	unsigned int naddr2;
+	int ret;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue(t, 1);
+	pix_queue2(t, 0);
+	pix_queue2(t, 1);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+	t->block_copy = true;
+	t->block_copy2 = true;
+	pix_sof(t);
+	pix_ring2_done(t, &pix_st(t)->tok, 20);
+	pix_done(t);
+	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy_entered, HZ));
+	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy2_entered, HZ));
+	pix_sof(t);
+	pix_ring2_done(t, &pix_st(t)->tok, 30);
+	pix_done(t); /* one more ready in each ring, no copy may start at stop */
+
+	t->ack_reset = reset_ack;
+	schedule_delayed_work(&t->release_work, msecs_to_jiffies(50));
+	schedule_delayed_work(&t->release2_work, msecs_to_jiffies(100));
+	ret = pix_stop(t, pix_line(t));
+	if (reset_ack)
+		KUNIT_EXPECT_EQ(test, ret, 0);
+	else
+		KUNIT_EXPECT_LT(test, ret, 0);
+	flush_delayed_work(&t->release_work);
+	flush_delayed_work(&t->release2_work);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 2);
+	KUNIT_EXPECT_EQ(test, t->ncopied, 1);
+	KUNIT_EXPECT_EQ(test, t->ncopied2, 1);
+	KUNIT_EXPECT_EQ(test, t->early_free, 0);
+	KUNIT_EXPECT_EQ(test, t->early_reset, 0);
+	KUNIT_EXPECT_EQ(test, t->bad_handoff, 0);
+	KUNIT_EXPECT_EQ(test, t->stops2, 1);
+	KUNIT_EXPECT_EQ(test, t->resets, 1);
+	KUNIT_EXPECT_EQ(test, t->frees, reset_ack ? t->allocs : 0);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->nready, 0);
+	KUNIT_EXPECT_EQ(test, pix_ring2(t)->nready, 0);
+	KUNIT_EXPECT_PTR_EQ(test, vfe_buf_get_pending(&pix_line(t)->output), &t->buf[1]);
+	KUNIT_EXPECT_PTR_EQ(test, list_first_entry(&t->bufs2, struct camss_buffer, queue),
+			    &t->buf2[1]);
+	naddr2 = t->naddr2;
+	pix_snap(t, true, true, 0); /* late image IRQ cannot schedule either worker */
+	KUNIT_EXPECT_EQ(test, t->naddr2, naddr2);
+	KUNIT_EXPECT_FALSE(test, work_pending(&pix_img(t)->copy_work));
+	KUNIT_EXPECT_FALSE(test, work_pending(&pix_ring2(t)->copy_work));
+	pix_assert_released(test, t);
+}
+
+static void pix_test_two_ring_stop_during_copy(struct kunit *test)
+{
+	pix_two_ring_stop_copy(test, true);
+}
+
+static void pix_test_two_ring_failed_reset_during_copy(struct kunit *test)
+{
+	pix_two_ring_stop_copy(test, false);
+}
+
+/* Inspect every retained handle, rather than accepting the byte count alone. */
+static void pix_test_two_ring_reset_unconfirmed(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	struct vfe_pix_quarantine *q;
+	unsigned int entries = 0;
+	unsigned long retained = 0;
+
+	t->ack_reset = false;
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+	KUNIT_EXPECT_LT(test, pix_stop(t, pix_line(t)), 0);
+	KUNIT_EXPECT_EQ(test, t->frees, 0);
+	KUNIT_EXPECT_EQ(test, t->vfe.quarantined,
+			(size_t)(VFE_PIX_STAGING_NUM + 1) * (PIX_TEST_SIZE + PIX_TEST_RING2_SIZE));
+	mutex_lock(&vfe_pix_quarantine_lock);
+	list_for_each_entry(q, &vfe_pix_quarantine_list, list) {
+		if (q->dev != t->camss.dev)
+			continue;
+		entries++;
+		for (unsigned int i = 0; i <= VFE_PIX_STAGING_NUM; i++) {
+			unsigned int idx = (q->frame[i].dma - PIX_TEST_DMA(0)) / 0x01000000u;
+
+			KUNIT_EXPECT_NOT_NULL(test, q->frame[i].cpu);
+			if (idx < 2 * (VFE_PIX_STAGING_NUM + 1)) {
+				KUNIT_EXPECT_FALSE(test, test_bit(idx, &retained));
+				set_bit(idx, &retained);
+				KUNIT_EXPECT_EQ(test, q->size, t->dma_size[idx]);
+			} else {
+				KUNIT_FAIL(test, "unrecognized retained DMA target");
+			}
+		}
+	}
+	mutex_unlock(&vfe_pix_quarantine_lock);
+	KUNIT_EXPECT_EQ(test, entries, 2);
+	KUNIT_EXPECT_EQ(test, retained, GENMASK(2 * (VFE_PIX_STAGING_NUM + 1) - 1, 0));
+	KUNIT_EXPECT_TRUE(test, t->vfe.wedged);
+	pix_assert_released(test, t);
+	t->ack_reset = true;
+	KUNIT_EXPECT_EQ(test, pix_start(t, pix_line(t)), -EIO);
+	KUNIT_EXPECT_EQ(test, pix_start(t, &t->vfe.line[VFE_LINE_RDI0]), -EIO);
+	KUNIT_EXPECT_EQ(test, t->allocs, 2 * (VFE_PIX_STAGING_NUM + 1));
+}
+
+/* Shared CAMIF errors fail each ring's frame, then both recover next frame. */
+static void pix_test_two_ring_frame_error(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue(t, 1);
+	pix_queue2(t, 0);
+	pix_queue2(t, 1);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+	vfe_pix_error(&t->vfe, STATUS_1_CAMIF_ERROR, 0);
+	pix_two_frame(t, 100);
+	pix_two_frame(t, 200);
+	pix_expect_return(test, t, &t->buf[0], 0, 110, VB2_BUF_STATE_ERROR);
+	pix_expect_return(test, t, &t->buf2[0], 0, 120, VB2_BUF_STATE_ERROR);
+	pix_expect_return(test, t, &t->buf[1], 1, 210, VB2_BUF_STATE_DONE);
+	pix_expect_return(test, t, &t->buf2[1], 1, 220, VB2_BUF_STATE_DONE);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+}
+
+/* A common bus fault discards both ready FIFOs and forbids new delivery. */
+static void pix_test_two_ring_fault_fails_closed(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+	unsigned int i;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	pix_queue(t, 1);
+	pix_queue2(t, 0);
+	pix_queue2(t, 1);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+	t->block_copy = true;
+	t->block_copy2 = true;
+	pix_sof(t);
+	pix_ring2_done(t, &pix_st(t)->tok, 1);
+	pix_done(t);
+	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy_entered, HZ));
+	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy2_entered, HZ));
+	pix_sof(t);
+	pix_ring2_done(t, &pix_st(t)->tok, 2);
+	pix_done(t);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->nready, 1);
+	KUNIT_EXPECT_EQ(test, pix_ring2(t)->nready, 1);
+	vfe_pix_error(&t->vfe, 0, STATUS0_OVERFLOW);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->nready, 0);
+	KUNIT_EXPECT_EQ(test, pix_ring2(t)->nready, 0);
+	complete(&t->copy_release);
+	complete(&t->copy2_release);
+	flush_work(&pix_img(t)->copy_work);
+	flush_work(&pix_ring2(t)->copy_work);
+	/* Already selected, validated copies may finish, as they can in D. */
+	KUNIT_EXPECT_EQ(test, t->nreturned, 2);
+	for (i = 0; i < 4; i++)
+		pix_two_frame(t, 100 + i);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 2);
+	KUNIT_EXPECT_EQ(test, t->faults, 1);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->hw[0], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, pix_img(t)->hw[1], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, pix_ring2(t)->hw[0], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, pix_ring2(t)->hw[1], VFE_PIX_DROP);
+	KUNIT_EXPECT_EQ(test, t->bad_handoff, 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+	KUNIT_EXPECT_EQ(test, t->frees, t->allocs);
+}
+
+/* Failure to allocate a second ring cannot disturb the running image ring. */
+static void pix_test_two_ring_alloc_unwind(struct kunit *test)
+{
+	struct pix_test *t = test->priv;
+
+	t->ack_reset = true;
+	pix_queue(t, 0);
+	KUNIT_ASSERT_EQ(test, pix_start(t, pix_line(t)), 0);
+	t->fail_alloc_at = t->allocs + 3;
+	KUNIT_EXPECT_EQ(test, pix_ring2_start(t), -ENOMEM);
+	KUNIT_EXPECT_EQ(test, t->allocs, VFE_PIX_STAGING_NUM + 1 + 2);
+	KUNIT_EXPECT_EQ(test, t->frees, 2);
+	KUNIT_EXPECT_NULL(test, pix_ring2(t)->ops);
+	KUNIT_EXPECT_EQ(test, t->naddr2, 0);
+	pix_frame(t);
+	KUNIT_EXPECT_EQ(test, t->nreturned, 1);
+	KUNIT_EXPECT_EQ(test, t->faults, 0);
+	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+	KUNIT_EXPECT_EQ(test, t->stops2, 0);
+	KUNIT_EXPECT_EQ(test, t->frees, t->allocs);
+	pix_assert_released(test, t);
+}
+
 static struct kunit_case pix_test_cases[] = {
+	KUNIT_CASE(pix_test_two_ring_consumers),
+	KUNIT_CASE(pix_test_two_ring_stats_copy_stalls),
+	KUNIT_CASE(pix_test_two_ring_image_copy_stalls),
+	KUNIT_CASE(pix_test_two_ring_stop_during_copy),
+	KUNIT_CASE(pix_test_two_ring_failed_reset_during_copy),
+	KUNIT_CASE(pix_test_two_ring_reset_unconfirmed),
+	KUNIT_CASE(pix_test_two_ring_frame_error),
+	KUNIT_CASE(pix_test_two_ring_fault_fails_closed),
+	KUNIT_CASE(pix_test_two_ring_alloc_unwind),
 	KUNIT_CASE(pix_test_diag_counter_observation),
 	KUNIT_CASE(pix_test_pix_then_rdi),
 	KUNIT_CASE(pix_test_rdi_then_pix),
