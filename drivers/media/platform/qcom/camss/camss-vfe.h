@@ -26,6 +26,9 @@
 #define MSM_VFE_IMAGE_MASTERS_NUM 7
 #define MSM_VFE_COMPOSITE_IRQ_NUM 4
 
+/* VFE reset acknowledge timeout (polled) */
+#define VFE_RESET_TIMEOUT_US (50 * USEC_PER_MSEC)
+
 /* VFE halt timeout */
 #define VFE_HALT_TIMEOUT_MS 100
 /* Frame drop value. VAL + UPDATES - 1 should not exceed 31 */
@@ -56,6 +59,53 @@ enum vfe_line_id {
 	VFE_LINE_NUM_MAX = 4
 };
 
+/* Frames the PIX write masters may target; the last one is the drop frame */
+#define VFE_PIX_STAGING_NUM	3
+#define VFE_PIX_DROP		VFE_PIX_STAGING_NUM
+
+/*
+ * Identity of a frame: stream generation, PIX SOF sequence and host SOF
+ * time. The SOF time is not an exposure start (rolling shutter, offset not
+ * calibrated) and is not the vb2 timestamp; userspace gets it from the
+ * FRAME_SYNC event of the same sequence.
+ */
+struct vfe_pix_token {
+	u32 generation;
+	u32 sequence;
+	u64 timestamp;
+	bool valid;
+};
+
+struct vfe_pix_frame {
+	void *cpu;
+	dma_addr_t dma;
+	struct vfe_pix_token token;
+	u64 done_ts;		/* composite done: vb2 timestamp, V4L2 EOF meaning */
+	bool error;
+};
+
+/*
+ * Titan 170 PIX staging: the hardware writes only driver allocations; a
+ * worker copies completed frames into vb2 buffers. A frame is handed back
+ * to the hardware only after its copy finished. All fields but the frame
+ * contents are protected by vfe->output_lock.
+ */
+struct vfe_pix_staging {
+	struct vfe_pix_frame frame[VFE_PIX_STAGING_NUM + 1];
+	size_t size;		/* NV12 bytes per frame */
+	u32 c_offset;		/* CbCr plane offset */
+	u8 hw[2];		/* frames in the two programmed address slots */
+	struct vfe_pix_token tok;	/* frame started in hw[0], not retired */
+	u32 generation;		/* stream starts, never reset */
+	u32 sof_sequence;	/* next PIX SOF sequence of this generation */
+	unsigned long free;	/* staging frames the hardware may get */
+	u8 ready[VFE_PIX_STAGING_NUM];	/* completed, in order, to copy */
+	u8 nready;
+	bool frame_error;	/* a bus or CAMIF error hit the frame in hw[0] */
+	bool faulted;		/* completions no longer trusted, see vfe_pix_error() */
+	struct work_struct copy_work;
+};
+
 struct vfe_output {
 	u8 wm_num;
 	u8 wm_idx[3];
@@ -65,6 +115,9 @@ struct vfe_output {
 	struct list_head pending_bufs;
 
 	unsigned int drop_update_idx;
+
+	/* Titan 170 PIX: DMA only ever targets these driver frames */
+	struct vfe_pix_staging pix;
 
 	union {
 		struct {
@@ -106,6 +159,8 @@ struct vfe_hw_ops {
 	void (*isr_read)(struct vfe_device *vfe, u32 *value0, u32 *value1);
 	void (*pm_domain_off)(struct vfe_device *vfe);
 	int (*pm_domain_on)(struct vfe_device *vfe);
+	/* serialized reset, used instead of vfe_reset()'s IRQ wait with titan170_pix */
+	int (*reset)(struct vfe_device *vfe);
 	void (*reg_update)(struct vfe_device *vfe, enum vfe_line_id line_id);
 	void (*reg_update_clear)(struct vfe_device *vfe,
 				 enum vfe_line_id line_id);
@@ -133,6 +188,8 @@ struct vfe_isr_ops {
 
 struct vfe_subdev_resources {
 	bool is_lite;
+	/* Line VFE_LINE_PIX is the real Bayer->YUV pipeline (Titan 170) */
+	bool has_pix;
 	u8 line_num;
 	bool has_pd;
 	char *pd_name;
@@ -158,6 +215,12 @@ struct vfe_device {
 	int power_count;
 	struct mutex stream_lock;
 	int stream_count;
+	/* PIX owns the VFE exclusively (titan170_pix), under stream_lock */
+	bool pix_active;
+	/* A reset was not acknowledged; sticky until reboot (titan170_pix) */
+	bool wedged;
+	/* PIX DMA frames retained after an unconfirmed reset */
+	size_t quarantined;
 	spinlock_t output_lock;
 	enum vfe_line_id wm_output_map[MSM_VFE_IMAGE_MASTERS_NUM];
 	struct vfe_line line[VFE_LINE_NUM_MAX];
@@ -262,6 +325,15 @@ void vfe_put(struct vfe_device *vfe);
  * Return whether VFE is VFE lite
  */
 bool vfe_is_lite(struct vfe_device *vfe);
+
+/*
+ * vfe_line_is_pix - Return if a line drives the hardware pixel pipeline
+ * @line: VFE line
+ *
+ * Only true for the PIX line of a VFE with has_pix while the experimental
+ * titan170_pix module parameter is set.
+ */
+bool vfe_line_is_pix(struct vfe_line *line);
 
 /*
  * vfe_hw_version - Process write master done interrupt

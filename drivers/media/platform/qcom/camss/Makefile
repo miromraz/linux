@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Makefile for Qualcomm CAMSS driver
 
+# camss-vfe-17x-trace.h
+CFLAGS_camss-vfe-17x.o := -I$(src)
+
 qcom-camss-objs += \
 		camss.o \
 		camss-csid.o \

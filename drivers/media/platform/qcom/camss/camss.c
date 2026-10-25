@@ -2029,6 +2029,7 @@ static const struct camss_subdev_resources csid_res_sc7180[] = {
 		.reg = { "csid0" },
 		.interrupt = { "csid0" },
 		.csid = {
+			.has_ipp = true,
 			.hw_ops = &csid_ops_gen2,
 			.parent_dev_ops = &vfe_parent_dev_ops,
 			.formats = &csid_formats_gen2
@@ -2045,6 +2046,7 @@ static const struct camss_subdev_resources csid_res_sc7180[] = {
 		.reg = { "csid1" },
 		.interrupt = { "csid1" },
 		.csid = {
+			.has_ipp = true,
 			.hw_ops = &csid_ops_gen2,
 			.parent_dev_ops = &vfe_parent_dev_ops,
 			.formats = &csid_formats_gen2
@@ -2087,6 +2089,7 @@ static const struct camss_subdev_resources vfe_res_sc7180[] = {
 			.line_num = 4,
 			.has_pd = true,
 			.pd_name = "ife0",
+			.has_pix = true,
 			.hw_ops = &vfe_ops_170,
 			.formats_rdi = &vfe_formats_rdi_845,
 			.formats_pix = &vfe_formats_pix_845
@@ -2109,6 +2112,7 @@ static const struct camss_subdev_resources vfe_res_sc7180[] = {
 			.line_num = 4,
 			.has_pd = true,
 			.pd_name = "ife1",
+			.has_pix = true,
 			.hw_ops = &vfe_ops_170,
 			.formats_rdi = &vfe_formats_rdi_845,
 			.formats_pix = &vfe_formats_pix_845
@@ -6081,6 +6085,11 @@ static const struct of_device_id camss_dt_match[] = {
 
 MODULE_DEVICE_TABLE(of, camss_dt_match);
 
+bool camss_titan170_pix;
+module_param_named(titan170_pix, camss_titan170_pix, bool, 0444);
+MODULE_PARM_DESC(titan170_pix,
+		 "Experimental: route the full CSID IPP into the Titan 170 VFE pixel pipeline (SC7180 family)");
+
 static int __maybe_unused camss_runtime_suspend(struct device *dev)
 {
 	struct camss *camss = dev_get_drvdata(dev);
@@ -6130,7 +6139,24 @@ static struct platform_driver qcom_camss_driver = {
 	},
 };
 
-module_platform_driver(qcom_camss_driver);
+static int __init camss_init(void)
+{
+	/*
+	 * With the experimental pixel path an unacknowledged VFE reset leaves
+	 * DMA this driver must keep owning: no sysfs unbind (the module also
+	 * pins itself in that case, see vfe_pix_release_frames()).
+	 */
+	qcom_camss_driver.driver.suppress_bind_attrs = camss_titan170_pix;
+
+	return platform_driver_register(&qcom_camss_driver);
+}
+module_init(camss_init);
+
+static void __exit camss_exit(void)
+{
+	platform_driver_unregister(&qcom_camss_driver);
+}
+module_exit(camss_exit);
 
 MODULE_DESCRIPTION("Qualcomm Camera Subsystem driver");
 MODULE_AUTHOR("Todor Tomov <todor.tomov@linaro.org>");
