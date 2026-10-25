@@ -10,6 +10,7 @@
 #include <linux/mfd/mt6397/core.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/nvmem-provider.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/reboot-mode.h>
@@ -18,6 +19,20 @@
 #include <linux/string.h>
 #include <linux/mfd/mt6397/rtc.h>
 #include <linux/mod_devicetable.h>
+#include <linux/unaligned.h>
+
+/*
+ * One always-on RTC spare register (RTC_SPAR1), exposed as a 2-byte nvmem
+ * device. U-Boot keeps its CONFIG_BOOTCOUNT_LIMIT counter here because it
+ * survives the RGU watchdog reset; a root-only userspace oneshot zeroes it once
+ * a boot reaches userspace, so a healthy boot clears the failure streak and
+ * U-Boot stops falling back to fastboot. The offset matches the U-Boot board
+ * code (RTC addr_base + 0x32).
+ *
+ * TODO(hw-verify): confirm RTC_SPAR1 is unused by LK/kernel reboot-mode and the
+ * RTC alarm on this unit (see docs/uboot-boot-fallback.md).
+ */
+#define MTK_RTC_SPARE_BOOTCOUNT		0x32
 
 static int mtk_rtc_write_trigger(struct mt6397_rtc *rtc)
 {
@@ -300,6 +315,56 @@ static int mtk_rtc_reboot_mode_register(struct mt6397_rtc *rtc,
 }
 #endif
 
+static int mtk_rtc_nvmem_read(void *priv, unsigned int offset,
+			      void *val, size_t bytes)
+{
+	struct mt6397_rtc *rtc = priv;
+	u32 v;
+	int ret;
+
+	ret = regmap_read(rtc->regmap,
+			  rtc->addr_base + MTK_RTC_SPARE_BOOTCOUNT, &v);
+	if (ret)
+		return ret;
+
+	put_unaligned_le16(v, val);
+	return 0;
+}
+
+static int mtk_rtc_nvmem_write(void *priv, unsigned int offset,
+			       void *val, size_t bytes)
+{
+	struct mt6397_rtc *rtc = priv;
+	int ret;
+
+	/* Share the RTC lock with time/alarm commits touching the same block. */
+	mutex_lock(&rtc->lock);
+	ret = regmap_write(rtc->regmap,
+			   rtc->addr_base + MTK_RTC_SPARE_BOOTCOUNT,
+			   get_unaligned_le16(val));
+	mutex_unlock(&rtc->lock);
+
+	return ret;
+}
+
+static int mtk_rtc_nvmem_register(struct mt6397_rtc *rtc)
+{
+	struct nvmem_config cfg = {
+		.name		= "mt6397-rtc-bootcount",
+		.id		= NVMEM_DEVID_NONE,
+		.type		= NVMEM_TYPE_BATTERY_BACKED,
+		.size		= 2,
+		.word_size	= 2,
+		.stride		= 2,
+		.root_only	= true,
+		.reg_read	= mtk_rtc_nvmem_read,
+		.reg_write	= mtk_rtc_nvmem_write,
+		.priv		= rtc,
+	};
+
+	return devm_rtc_nvmem_register(rtc->rtc_dev, &cfg);
+}
+
 static int mtk_rtc_probe(struct platform_device *pdev)
 {
 	struct resource *res;
@@ -354,6 +419,12 @@ static int mtk_rtc_probe(struct platform_device *pdev)
 	ret = mtk_rtc_reboot_mode_register(rtc, &pdev->dev);
 	if (ret)
 		dev_warn(&pdev->dev, "failed to register reboot mode: %d\n", ret);
+
+	/* Likewise the bootcount nvmem: best-effort, never fatal. */
+	ret = mtk_rtc_nvmem_register(rtc);
+	if (ret)
+		dev_warn(&pdev->dev, "failed to register bootcount nvmem: %d\n",
+			 ret);
 
 	return devm_rtc_register_device(rtc->rtc_dev);
 }
