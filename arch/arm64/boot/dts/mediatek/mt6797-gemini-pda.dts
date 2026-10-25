@@ -851,6 +851,18 @@
 };
 
 /*
+ * Describe the TOPRGU bark interrupt (GIC SPI 137). The mtk_wdt driver marks
+ * MT6797 no_pretimeout, so it leaves the watchdog in single mode with a plain
+ * reset and never requests this line or arms dual/pretimeout mode; on this SoC
+ * the bark is taken by the secure firmware as an FIQ that halts every CPU, so
+ * Linux must not drive it. Describing the interrupt keeps the DT faithful to
+ * the hardware while the driver declines to use it.
+ */
+&watchdog {
+	interrupts = <GIC_SPI 137 IRQ_TYPE_LEVEL_LOW>;
+};
+
+/*
  * Panel backlight driven by the MT6797 display PWM. The vendor backlight
  * node (aeon6797_6m_n.dts led6, "mediatek,lcd-backlight") selects
  * led_mode = <5>, i.e. the display PWM source.
