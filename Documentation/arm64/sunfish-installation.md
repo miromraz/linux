@@ -89,7 +89,7 @@ section separately records checks of the available image.
 | --- | --- | --- |
 | Maintainer root SSH access | `debug-usbnet` embeds the maintainer's public key and installs it into root's authorized keys; its README says never to ship it. The local build wrapper explicitly includes this profile. | Exclude the maintainer's key. If USB SSH is required, provision only the recipient's chosen key and document the access policy. |
 | Development account in the generic device profile | `device-sm7150` ships `seed-user.sh`, its service and a static wants symlink; it creates a fixed development account with a known PIN, bypassing the first-boot wizard. | Remove development-account seeding from the recipient profile and verify account creation on a fresh root filesystem. |
-| Build inputs not fully identified | The kernel packaging uses a reused package version, while OBS and the release snapshot differ. | Pin the kernel, recipe and package sources and record artifact hashes. |
+| System-image inputs not fully identified | The old system image lacks a complete source identity. New kernel packages now have unique versions, GCC 14 enforcement and embedded provenance. | Rebuild the system image from recorded recipe/package inputs and verify live OBS synchronization. |
 | Existing flash helper is handset-specific | `sunfish-ums.sh` asserts the maintainer's custom partition 15, label `linux` and exact size. | Do not use it on a stock recipient phone. Validate a stock-userdata path separately. |
 | Firmware/userspace are separate from these repos | Kernel and U-Boot alone do not provide device firmware, UCM, sensor services, camera stack or a root filesystem. | Supply a reproducible distribution recipe and a documented source for each dependency. |
 
