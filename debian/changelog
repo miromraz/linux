@@ -1,9 +1,11 @@
-linux-sunfish (7.1.0-sm7150-20261026.1+git473d9fb95156) trixie; urgency=medium
+linux-sunfish (7.1.0-sm7150-20261026.2+git473d9fb95156) trixie; urgency=medium
 
   * Align OBS with release/sunfish-0.26.1024.1, including all five lens and
     charger fixes missing from the previous OBS branch.
   * Require GCC 14 for both target and host tools and reject another compiler
     major before compiling. Keep the kernel release at 7.1.0-sm7150.
+  * Preserve the GCC 14 selection when rebuilding installed header helpers
+    for the target architecture during cross-packaging.
   * Use a release-specific package version and include source, compiler and
     artifact provenance in each binary package.
 
