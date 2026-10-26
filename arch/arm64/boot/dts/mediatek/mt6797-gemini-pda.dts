@@ -712,6 +712,20 @@
 				 <MT6797_GPIO251__FUNC_GPIO251>;
 		};
 	};
+
+	bmi160_irq_pins: bmi160-irq-pins {
+		pins-int {
+			/*
+			 * BMI160 data-ready on GPIO65. The pad must be muxed
+			 * to its EINT function for the external interrupt
+			 * controller to see the line - this state was missing
+			 * before, so EINT4 never counted. The chip drives the
+			 * INT pin push-pull active-high, so no bias is needed.
+			 */
+			pinmux = <MT6797_GPIO65__FUNC_EINT4>;
+			bias-disable;
+		};
+	};
 };
 
 &i2c1 {
@@ -720,32 +734,30 @@
 	status = "okay";
 
 	/*
-	 * Bosch BMI160 accelerometer/gyroscope. The vendor rewrites its logical
-	 * 0x68 client to 0x69 in probe, which is the I2C1 address used on the
-	 * board. The
-	 * mount-matrix is the vendor coordinate direction 7 (aeon6797_6m_n.dts
-	 * cust_accel@1/cust_gyro@1) expanded through the MediaTek hwmsen
-	 * conversion table (sign {-1,-1,-1}, axis map {1,0,2}).
+	 * Bosch BMI160 accelerometer/gyroscope at I2C1 0x69. The mount-matrix
+	 * is the vendor coordinate direction 7 (sign {-1,-1,-1}, axis map
+	 * {1,0,2}).
 	 *
-	 * The data-ready interrupt is not described: it is wired to GPIO65,
-	 * but the earlier interrupts-extended = <&pio 4> (EINT4) /
-	 * interrupt-names = "INT1" never fired under a buffered capture (EINT4
-	 * count stayed 0). Two things are still unproven on hardware and must
-	 * be settled before the IRQ is re-added (see docs/integ-next7.md):
-	 * GPIO65 needs its pinctrl muxed to EINT4 (the working keyboard EINT10
-	 * node selects MT6797_GPIO87__FUNC_EINT10; fix34 added no such state),
-	 * and which physical BMI160 pin (INT1 or INT2) the board routes to
-	 * GPIO65 is not established by the vendor tree (it polled and
-	 * programmed neither INT output). Until both are confirmed the driver
-	 * uses polled reads, which work. No supply is described either: the
-	 * vendor cust_accel@1/cust_gyro@1 both use power_id = <0xffff> (no
-	 * switchable MT6351 LDO), so the chip runs off a fixed always-on rail
-	 * whose identity is not established here (the dummy regulator covers it).
+	 * The data-ready interrupt is on GPIO65 (EINT function EINT4). It needs
+	 * bmi160_irq_pins to mux the pad to EINT4; without that mux the pad
+	 * keeps its default function and the EINT controller never sees the
+	 * line. interrupt-names = "INT1" assumes the board routes the BMI160
+	 * INT1 pad to GPIO65; a wrong guess only disables triggered buffering,
+	 * direct sysfs reads keep working either way.
+	 *
+	 * No supply is described: the vendor uses power_id = <0xffff> (no
+	 * switchable LDO), so the chip runs off a fixed always-on rail (the
+	 * dummy regulator covers it).
 	 */
 	bmi160: imu@69 {
 		compatible = "bosch,bmi160";
 		reg = <0x69>;
 		label = "accel-base";
+		pinctrl-names = "default";
+		pinctrl-0 = <&bmi160_irq_pins>;
+		interrupt-parent = <&pio>;
+		interrupts = <4 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "INT1";
 		mount-matrix = "0", "-1", "0",
 			       "-1", "0", "0",
 			       "0", "0", "-1";
