@@ -70,6 +70,10 @@ properties:
       This property should point to the respective IOMMU block with master port as argument,
       see Documentation/devicetree/bindings/iommu/mediatek,iommu.yaml for details.
 
+  resets:
+    description: reset controller for the engine's MMSYS software reset
+    maxItems: 1
+
   mediatek,rdma-fifo-size:
     description:
       rdma fifo size may be different even in same SOC, add this property to the
