@@ -3,6 +3,11 @@
 Developer handoff, 2026-10-26. This is a work-in-progress SM7150 kernel port,
 not a complete phone distribution or an installer.
 
+For installation on another phone, see the
+[stock-layout installation status and preparation guide](Documentation/arm64/sunfish-installation.md).
+The target is an unlocked Pixel 4a with permission to erase Android userdata.
+No recipient-ready system image is published by this branch.
+
 ## Start here
 
 ```sh
