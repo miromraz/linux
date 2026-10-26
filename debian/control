@@ -6,6 +6,7 @@ Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 12)
 Build-Depends-Arch: bc, bison, flex,
  gcc-14:native, gcc-14-aarch64-linux-gnu,
+ libc6-dev <!pkg.linux-sunfish.nokernelheaders>,
  kmod, libdw-dev:native, libelf-dev:native,
  libssl-dev:native, libssl-dev <!pkg.linux-sunfish.nokernelheaders>,
  python3:native, rsync
