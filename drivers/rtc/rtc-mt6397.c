@@ -342,6 +342,14 @@ static int mtk_rtc_nvmem_write(void *priv, unsigned int offset,
 	ret = regmap_write(rtc->regmap,
 			   rtc->addr_base + MTK_RTC_SPARE_BOOTCOUNT,
 			   get_unaligned_le16(val));
+	/*
+	 * A bare regmap_write only stages the value; like the time and alarm
+	 * setters it must be latched into the always-on RTC with a write
+	 * trigger, otherwise the register keeps its previous contents and the
+	 * bootcount clear silently no-ops (U-Boot then never sees the reset).
+	 */
+	if (!ret)
+		ret = mtk_rtc_write_trigger(rtc);
 	mutex_unlock(&rtc->lock);
 
 	return ret;
