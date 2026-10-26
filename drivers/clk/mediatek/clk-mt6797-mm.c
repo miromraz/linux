@@ -68,10 +68,23 @@ static const struct mtk_gate mm_clks[] = {
 	GATE_MM1(CLK_MM_DPI_MM_CLOCK, "mm_dpi_mm_clock", "mm_sel", 4),
 	GATE_MM1(CLK_MM_DPI_INTERFACE_CLOCK, "mm_dpi_interface_clock",
 		 "dpi0_sel", 5),
-	GATE_MM1(CLK_MM_LARB4_AXI_ASIF_MM_CLOCK, "mm_larb4_axi_asif_mm_clock",
-		 "mm_sel", 6),
-	GATE_MM1(CLK_MM_LARB4_AXI_ASIF_MJC_CLOCK, "mm_larb4_axi_asif_mjc_clock",
-		 "mjc_sel", 7),
+	/*
+	 * These two gates clock the larb4 AXI async bridge that straddles the
+	 * always-on MM SMI fabric and the MJC (motion-judder) island. The MJC
+	 * power domain is kept off at boot and has no mainline driver, so the
+	 * bridge must stay clocked exactly as the bootloader left it: gating it
+	 * drives an AXI handshake into the unpowered MJC island, which never
+	 * acks and wedges the bus (clk_disable_unused() hangs here with
+	 * clk_ignore_unused dropped -- a clk_disable trace ends at
+	 * "mm_larb4_ax" with no completion). Both parents (mm_sel, mjc_sel) are
+	 * always-on topckgen muxes, so marking the gates critical is safe.
+	 */
+	GATE_MTK_FLAGS(CLK_MM_LARB4_AXI_ASIF_MM_CLOCK,
+		       "mm_larb4_axi_asif_mm_clock", "mm_sel", &mm1_cg_regs, 6,
+		       &mtk_clk_gate_ops_setclr, CLK_IS_CRITICAL),
+	GATE_MTK_FLAGS(CLK_MM_LARB4_AXI_ASIF_MJC_CLOCK,
+		       "mm_larb4_axi_asif_mjc_clock", "mjc_sel", &mm1_cg_regs, 7,
+		       &mtk_clk_gate_ops_setclr, CLK_IS_CRITICAL),
 	GATE_MM1(CLK_MM_DISP_OVL0_MOUT_CLOCK, "mm_disp_ovl0_mout_clock",
 		 "mm_sel", 8),
 	GATE_MM1(CLK_MM_FAKE_ENG2, "mm_fake_eng2", "mm_sel", 9),
