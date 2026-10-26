@@ -492,11 +492,28 @@ static const struct mtk_gate_regs infra2_cg_regs = {
  * We mark them as critical as otherwise the system will hang after boot.
  */
 static const struct mtk_gate infra_clks[] = {
-	GATE_ICG0(CLK_INFRA_PMIC_TMR, "infra_pmic_tmr", "ulposc", 0),
+	/*
+	 * PMIC wrapper timer and its modem/connsys channels, and the system
+	 * companion processor (firmware loaded by the bootloader), are driven
+	 * by non-AP masters that Linux has no driver for. The pwrap driver
+	 * claims only the AP channel (infra_pmic_ap). The vendor 3.18 clock
+	 * driver keeps all four running (INFRA_PDN_SET0 mask 0x87BFFD00 leaves
+	 * bits 0, 2, 3 and 4 clear), so nothing in Linux can hold them; mark
+	 * them critical.
+	 */
+	GATE_MTK_FLAGS(CLK_INFRA_PMIC_TMR, "infra_pmic_tmr", "ulposc",
+		       &infra0_cg_regs, 0, &mtk_clk_gate_ops_setclr,
+		       CLK_IS_CRITICAL),
 	GATE_ICG0(CLK_INFRA_PMIC_AP, "infra_pmic_ap", "pmicspi_sel", 1),
-	GATE_ICG0(CLK_INFRA_PMIC_MD, "infra_pmic_md", "pmicspi_sel", 2),
-	GATE_ICG0(CLK_INFRA_PMIC_CONN, "infra_pmic_conn", "pmicspi_sel", 3),
-	GATE_ICG0(CLK_INFRA_SCP, "infra_scp", "scp_sel", 4),
+	GATE_MTK_FLAGS(CLK_INFRA_PMIC_MD, "infra_pmic_md", "pmicspi_sel",
+		       &infra0_cg_regs, 2, &mtk_clk_gate_ops_setclr,
+		       CLK_IS_CRITICAL),
+	GATE_MTK_FLAGS(CLK_INFRA_PMIC_CONN, "infra_pmic_conn", "pmicspi_sel",
+		       &infra0_cg_regs, 3, &mtk_clk_gate_ops_setclr,
+		       CLK_IS_CRITICAL),
+	GATE_MTK_FLAGS(CLK_INFRA_SCP, "infra_scp", "scp_sel",
+		       &infra0_cg_regs, 4, &mtk_clk_gate_ops_setclr,
+		       CLK_IS_CRITICAL),
 	GATE_ICG0(CLK_INFRA_SEJ, "infra_sej", "axi_sel", 5),
 	GATE_ICG0(CLK_INFRA_APXGPT, "infra_apxgpt", "axi_sel", 6),
 	GATE_ICG0(CLK_INFRA_SEJ_13M, "infra_sej_13m", "clk26m", 7),
