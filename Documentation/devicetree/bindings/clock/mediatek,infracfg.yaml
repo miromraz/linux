@@ -39,6 +39,8 @@ properties:
               - mediatek,mt8183-infracfg
               - mediatek,mt8516-infracfg
           - const: syscon
+          - const: simple-mfd
+        minItems: 2
       - items:
           - const: mediatek,mt7623-infracfg
           - const: mediatek,mt2701-infracfg
@@ -52,6 +54,12 @@ properties:
 
   '#reset-cells':
     const: 1
+
+patternProperties:
+  # On-SoC CPU SRAM LDO regulator (MT6797 only); its registers live in this
+  # infracfg block, so it is described as a child node.
+  "^regulator-":
+    $ref: /schemas/regulator/mediatek,mt6797-cpu-sram.yaml#
 
 required:
   - compatible
