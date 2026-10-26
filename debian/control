@@ -11,13 +11,13 @@ Build-Depends-Arch: bc, bison, flex,
  python3:native, rsync
 Homepage: https://www.kernel.org/
 
-Package: linux-image-7.1.3-mt6797-next25
+Package: linux-image-7.1.3-mt6797-clkbisect
 Architecture: arm64
-Description: Linux kernel, version 7.1.3-mt6797-next25
+Description: Linux kernel, version 7.1.3-mt6797-clkbisect
  Linux kernel for the Planet Computers Gemini PDA (MediaTek MT6797).
 
-Package: linux-headers-7.1.3-mt6797-next25
+Package: linux-headers-7.1.3-mt6797-clkbisect
 Architecture: arm64
 Build-Profiles: <!pkg.linux-gemini.nokernelheaders>
-Description: Linux kernel headers for 7.1.3-mt6797-next25 on arm64
- This package provides kernel header files for 7.1.3-mt6797-next25 on arm64.
+Description: Linux kernel headers for 7.1.3-mt6797-clkbisect on arm64
+ This package provides kernel header files for 7.1.3-mt6797-clkbisect on arm64.
