@@ -585,8 +585,10 @@ static const struct mtk_gate infra_clks[] = {
 	GATE_ICG2(CLK_INFRA_MODEM_TEMP_SHARE, "infra_modem_temp_share",
 		  "axi_sel", 28),
 	GATE_ICG2(CLK_INFRA_VAD_WRAP_SOC, "infra_vad_wrap_soc", "axi_sel", 29),
-	GATE_ICG2(CLK_INFRA_DRAMC_CONF, "infra_dramc_conf", "axi_sel", 30),
-	GATE_ICG2(CLK_INFRA_DRAMC_B_CONF, "infra_dramc_b_conf", "axi_sel", 31),
+	GATE_ICG2_FLAGS(CLK_INFRA_DRAMC_CONF, "infra_dramc_conf", "axi_sel",
+			30, CLK_IS_CRITICAL),
+	GATE_ICG2_FLAGS(CLK_INFRA_DRAMC_B_CONF, "infra_dramc_b_conf",
+			"axi_sel", 31, CLK_IS_CRITICAL),
 	GATE_ICG1(CLK_INFRA_MFG_VCG, "infra_mfg_vcg", "mfg_52m_sel", 14),
 };
 
