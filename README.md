@@ -70,9 +70,9 @@ Then, from the repository root:
 ```sh
 aarch64-linux-gnu-gcc-14 --version
 make O=../sunfish-build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-  CC=aarch64-linux-gnu-gcc-14 sunfish_defconfig bengalos.config
+  CC=aarch64-linux-gnu-gcc-14 LOCALVERSION= sunfish_defconfig bengalos.config
 make O=../sunfish-build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-  CC=aarch64-linux-gnu-gcc-14 -j"$(nproc)" Image modules dtbs
+  CC=aarch64-linux-gnu-gcc-14 LOCALVERSION= -j"$(nproc)" Image modules dtbs
 ```
 
 Relevant outputs:
@@ -81,14 +81,24 @@ Relevant outputs:
 - `../sunfish-build/arch/arm64/boot/dts/qcom/sm7150-google-sunfish.dtb`
 - Kernel modules, which must be installed for the **same kernel build**.
 
+Keep `LOCALVERSION=` on subsequent build and module-install commands too.
+Despite `CONFIG_LOCALVERSION_AUTO=n`, an untagged Git checkout otherwise adds
+`+` to the release string. The explicit empty value keeps it at
+`7.1.0-sm7150`, matching the packaging convention; that name alone still
+does not identify a unique source build.
+
 The in-tree `debian/` directory supports OBS package builds. It merges
 `sunfish_defconfig` and `bengalos.config` and emits packages for
 `7.1.0-sm7150`. Package versioning is not yet a unique identifier for each
 source revision: keep the full Git SHA with every build artifact.
 
-The commands above describe the existing build configuration. They have
-not been rerun for this documentation-only handoff. In the maintainer's
-environment, builds and test suites run on `llumik`, never on the `dev` host.
+A fresh GCC 14 build completed on `llumik` on 2026-10-26: Image, DTBs and all
+764 configured modules, with no compiler or DT warnings. The initial build
+exposed the `LOCALVERSION=` requirement above; after correcting it, the Image
+was rebuilt and all module release strings checked against `7.1.0-sm7150`.
+See the [build record](Documentation/arm64/sunfish-build-20261026.md).
+No hardware boot test or recipient system-image build was performed. In the
+maintainer's environment, builds and test suites run on `llumik`, never on `dev`.
 
 ## Boot and userspace
 
