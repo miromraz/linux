@@ -496,6 +496,31 @@ static void mtu3_remove(struct platform_device *pdev)
 	pm_runtime_set_suspended(&pdev->dev);
 }
 
+static void mtu3_shutdown(struct platform_device *pdev)
+{
+	struct ssusb_mtk *ssusb = platform_get_drvdata(pdev);
+	struct mtu3 *mtu = ssusb->u3d;
+	unsigned long flags;
+
+	/* Only the device role asserts the D+ pull-up, nothing to do as host */
+	if (!mtu || ssusb->dr_mode == USB_DR_MODE_HOST ||
+	    (ssusb->dr_mode == USB_DR_MODE_OTG && ssusb->is_host))
+		return;
+
+	/*
+	 * On reboot the TOPRGU external-reset path resets the SoC while the
+	 * gadget is still connected. If the D+ pull-up is left asserted the
+	 * host keeps the stale device across the reset and the following
+	 * enumeration times out reading the device descriptor (-110). Stop the
+	 * controller so the pull-up drops and the host sees a clean disconnect.
+	 */
+	pm_runtime_get_sync(&pdev->dev);
+	spin_lock_irqsave(&mtu->lock, flags);
+	mtu3_stop(mtu);
+	spin_unlock_irqrestore(&mtu->lock, flags);
+	pm_runtime_put_noidle(&pdev->dev);
+}
+
 static int resume_ip_and_ports(struct ssusb_mtk *ssusb, pm_message_t msg)
 {
 	switch (ssusb->dr_mode) {
@@ -630,6 +655,7 @@ MODULE_DEVICE_TABLE(of, mtu3_of_match);
 static struct platform_driver mtu3_driver = {
 	.probe = mtu3_probe,
 	.remove = mtu3_remove,
+	.shutdown = mtu3_shutdown,
 	.driver = {
 		.name = MTU3_DRIVER_NAME,
 		.pm = DEV_PM_OPS,
