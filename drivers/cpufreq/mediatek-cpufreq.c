@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/regulator/consumer.h>
+#include <linux/units.h>
 
 struct mtk_cpufreq_platform_data {
 	int min_volt_shift;
@@ -33,6 +34,21 @@ struct mtk_cpufreq_platform_data {
 	 * raises Vsram; see mtk_cpufreq_voltage_tracking().
 	 */
 	bool vproc_floored;
+	/*
+	 * The cluster ARMPLL is driven by firmware (an SMC/SiP call) rather than
+	 * by register writes, so clk_set_rate() cannot report a rate the firmware
+	 * silently refused. Only such a platform needs the post-set rate readback
+	 * and the .init-time initial-OPP sync below; register-PLL SoCs are left
+	 * untouched.
+	 */
+	bool firmware_pll;
+	/*
+	 * The SoC .dtsi may describe a cluster that a given board does not
+	 * power (e.g. the MT6797 Cortex-A72). On such a platform a cluster
+	 * whose board wired no cpu-supply is skipped at probe instead of
+	 * failing the whole driver; elsewhere a missing supply stays an error.
+	 */
+	bool clusters_may_lack_supply;
 };
 
 /*
@@ -323,6 +339,42 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		dev_err(cpu_dev,
 			"cpu%d: failed to re-parent cpu clock!\n", policy->cpu);
 		mtk_cpufreq_set_voltage(info, inter_vproc);
+		goto out;
+	}
+
+	/*
+	 * A firmware-backed ARMPLL (see mtk_cpufreq_platform_data.firmware_pll)
+	 * can silently refuse a rate change: the clk core discards .set_rate()'s
+	 * return value, so clk_set_rate() above returned 0 even if the SMC failed
+	 * and the PLL stayed at its old, higher rate. Read the rate back before
+	 * scaling Vproc down -- the clock reports its last good rate, so a large
+	 * mismatch means the PLL is still fast and lowering Vproc now would
+	 * undervolt the cluster. Restore the rate and voltage and bail out.
+	 *
+	 * A whole-OPP mismatch (tens to hundreds of MHz) is a genuinely unapplied
+	 * rate; the firmware PLL caches the exact programmed MHz, so a success
+	 * matches within the sub-MHz window.
+	 */
+	if (info->soc_data->firmware_pll &&
+	    abs((long)clk_get_rate(cpu_clk) - freq_hz) >= HZ_PER_MHZ) {
+		dev_err(cpu_dev, "cpu%d: cpu clock rate was not applied!\n",
+			policy->cpu);
+		clk_set_parent(cpu_clk, info->inter_clk);
+		/*
+		 * Restore the rate only if the previous one is known. A
+		 * firmware PLL reads back as 0 until its first .set_rate()
+		 * (see clk-mt6797-mcu), so on the policy-init OPP sync -- the
+		 * only transition that runs before that first set -- pre_freq_hz
+		 * is 0, and clk_set_rate(armpll, 0) would be clamped up to the
+		 * PLL minimum (250 MHz), not restore anything. Skip it and leave
+		 * the PLL at the rate firmware last set; init drops the policy on
+		 * this failure, so the cluster is not left live at a wrong rate.
+		 */
+		if (pre_freq_hz > 0)
+			clk_set_rate(armpll, pre_freq_hz);
+		clk_set_parent(cpu_clk, armpll);
+		mtk_cpufreq_set_voltage(info, pre_vproc);
+		ret = -EIO;
 		goto out;
 	}
 
@@ -669,10 +721,27 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 {
 	struct mtk_cpu_dvfs_info *info;
 	struct cpufreq_frequency_table *freq_table;
-	int ret;
+	struct clk *parent;
+	unsigned int cur_khz;
+	int ret, idx, i;
 
 	info = mtk_cpu_dvfs_info_lookup(policy->cpu);
 	if (!info) {
+		struct device *cpu_dev = get_cpu_device(policy->cpu);
+
+		/*
+		 * A cluster deliberately skipped at probe -- its board wired no
+		 * cpu-supply (clusters_may_lack_supply, see mtk_cpufreq_probe)
+		 * -- has no dvfs info. Report it as simply unmanaged (-ENODEV)
+		 * rather than as a failure, so an unpowered cluster does not log
+		 * an error for every CPU in it.
+		 */
+		if (cpu_dev &&
+		    of_property_present(cpu_dev->of_node, "operating-points-v2") &&
+		    !of_property_present(cpu_dev->of_node, "cpu-supply") &&
+		    !of_property_present(cpu_dev->of_node, "proc-supply"))
+			return -ENODEV;
+
 		pr_err("dvfs info for cpu%d is not initialized.\n",
 			policy->cpu);
 		return -EINVAL;
@@ -691,7 +760,65 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 	policy->driver_data = info;
 	policy->clk = info->cpu_clk;
 
+	if (info->soc_data->firmware_pll) {
+		/*
+		 * .set_target() takes clk_get_parent(cpu_clk) as the cluster
+		 * ARMPLL and calls clk_set_rate() on it, so the CPU clock must
+		 * boot parented to the ARMPLL. Refuse a mux left on an
+		 * undescribed source (reads back as no parent) or on the
+		 * intermediate clock (clk26m, whose rate requests can propagate
+		 * into a system PLL) -- either would retune the wrong clock.
+		 */
+		parent = clk_get_parent(policy->clk);
+		if (!parent || clk_is_match(parent, info->inter_clk)) {
+			dev_err(info->cpu_dev,
+				"cpu%d: CPU clock not parented to the cluster PLL\n",
+				policy->cpu);
+			ret = -ENODEV;
+			goto free_table;
+		}
+
+		/*
+		 * cpufreq_online() uses CPUFREQ_NEED_INITIAL_FREQ_CHECK to force
+		 * the CPU onto a listed OPP when it boots at an unlisted rate,
+		 * but it BUG_ON()s if that forced transition fails. A
+		 * firmware-backed ARMPLL can fail its first setpoint, and its
+		 * rate reads back unknown until the first .set_rate(), so do the
+		 * sync here, where a failure drops the policy cleanly. Program
+		 * the lowest OPP at or above the boot rate (as
+		 * CPUFREQ_RELATION_L would); skip it only when the boot rate is
+		 * already within sub-MHz rounding of a table frequency.
+		 */
+		cur_khz = clk_get_rate(policy->clk) / 1000;
+		idx = -1;
+		for (i = 0; freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
+			if (freq_table[i].frequency == CPUFREQ_ENTRY_INVALID)
+				continue;
+			if (abs((int)freq_table[i].frequency - (int)cur_khz) <
+			    KHZ_PER_MHZ) {
+				idx = -1;
+				break;
+			}
+			idx = i;
+			if (freq_table[i].frequency >= cur_khz)
+				break;
+		}
+		if (idx >= 0) {
+			ret = mtk_cpufreq_set_target(policy, idx);
+			if (ret) {
+				dev_err(info->cpu_dev,
+					"cpu%d: failed to apply an initial OPP: %d\n",
+					policy->cpu, ret);
+				goto free_table;
+			}
+		}
+	}
+
 	return 0;
+
+free_table:
+	dev_pm_opp_free_cpufreq_table(info->cpu_dev, &policy->freq_table);
+	return ret;
 }
 
 static void mtk_cpufreq_exit(struct cpufreq_policy *policy)
@@ -733,15 +860,31 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 			continue;
 
 		/*
-		 * Skip CPUs that have no OPP table, such as clusters not yet
-		 * supported for DVFS (the MT6797 Cortex-A72 cluster in stage 1).
-		 * Otherwise raising nr_cpus would make this driver fail probe
-		 * and silently drop DVFS for the clusters that do work.
+		 * Skip a CPU whose node has no "operating-points-v2": its
+		 * cluster is not wired for DVFS (pre-existing behaviour).
 		 */
 		cpu_dev = get_cpu_device(cpu);
 		if (cpu_dev &&
 		    !of_property_present(cpu_dev->of_node, "operating-points-v2"))
 			continue;
+
+		/*
+		 * On a platform whose .dtsi may describe a cluster a given board
+		 * does not power (clusters_may_lack_supply, e.g. the MT6797
+		 * Cortex-A72), skip a cluster for which the board wired no
+		 * cpu-supply, so one unpowered cluster never fails the whole
+		 * probe and drops DVFS for the clusters that do work. Other
+		 * platforms keep the old behaviour, where a missing supply later
+		 * fails probe.
+		 */
+		if (cpu_dev && data->clusters_may_lack_supply &&
+		    !of_property_present(cpu_dev->of_node, "cpu-supply") &&
+		    !of_property_present(cpu_dev->of_node, "proc-supply")) {
+			dev_info(&pdev->dev,
+				 "cpu%d: no cpu-supply, leaving its cluster unmanaged\n",
+				 cpu);
+			continue;
+		}
 
 		info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
 		if (!info) {
@@ -799,6 +942,8 @@ static const struct mtk_cpufreq_platform_data mt6797_platform_data = {
 	.sram_max_volt = 1200000,
 	.ccifreq_supported = false,
 	.vproc_floored = true,
+	.firmware_pll = true,
+	.clusters_may_lack_supply = true,
 };
 
 static const struct mtk_cpufreq_platform_data mt7622_platform_data = {
