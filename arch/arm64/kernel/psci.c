@@ -21,8 +21,88 @@
 #include <asm/errno.h>
 #include <asm/smp_plat.h>
 
+/*
+ * Some closed EL3 firmware advertises the PSCI CPU_OFF function but cannot
+ * actually power a given CPU down. On the MediaTek MT6797 the Cortex-A72 "B"
+ * cluster is powered up out-of-band by the bootloader, and the vendor TF-A it
+ * ships (there is no upstream replacement) has no pwr_domain_off for it, yet
+ * still exposes standard CPU_OFF. Issuing CPU_OFF to such a CPU wedges it in
+ * EL3 and hangs the SoC until the watchdog resets it.
+ *
+ * There is no PSCI-level or firmware-level way to discover this, so the
+ * affected CPUs are keyed off the SoC root compatible: on a matching machine
+ * every CPU in the named MPIDR affinity-level-1 cluster is flagged. The set is
+ * computed once at init into a cpumask, so the hotplug and crash paths only
+ * test a mask and never walk the device tree (which takes devtree_lock and
+ * could deadlock in NMI/crash context). Flagged CPUs are kept non-removable
+ * and are never CPU_OFF'd.
+ *
+ * This is deliberately narrow and self-contained -- no DT binding and no
+ * generic PSCI property -- because the proper home for the power sequence is
+ * firmware (TF-A pwr_domain_off); this only works around an unreplaceable
+ * firmware's limitation on one SoC.
+ */
+struct psci_cpu_off_broken_soc {
+	const char	*compatible;
+	u32		aff1;	/* MPIDR affinity level 1 of the broken cluster */
+};
+
+static const struct psci_cpu_off_broken_soc psci_cpu_off_broken_socs[] __initconst = {
+	{ "mediatek,mt6797", 2 },	/* Cortex-A72 "B" cluster (cpu@200/@201) */
+	{ /* sentinel */ }
+};
+
+static cpumask_t psci_cpu_off_broken_mask __ro_after_init;
+
+static void __init psci_init_cpu_off_broken(void)
+{
+	const struct psci_cpu_off_broken_soc *soc;
+	unsigned int cpu;
+
+	for (soc = psci_cpu_off_broken_socs; soc->compatible; soc++) {
+		if (!of_machine_is_compatible(soc->compatible))
+			continue;
+
+		/*
+		 * This runs from cpu_psci_cpu_init() during smp_init_cpus(),
+		 * before the CPUs are added to the possible mask, so iterate
+		 * the logical map directly (of_parse_and_init_cpus() has
+		 * already populated it).
+		 */
+		for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
+			u64 mpidr = cpu_logical_map(cpu);
+
+			if (mpidr == INVALID_HWID)
+				continue;
+			if (MPIDR_AFFINITY_LEVEL(mpidr, 1) == soc->aff1)
+				cpumask_set_cpu(cpu, &psci_cpu_off_broken_mask);
+		}
+	}
+
+	if (!cpumask_empty(&psci_cpu_off_broken_mask))
+		pr_info("firmware cannot CPU_OFF CPUs %*pbl; keeping them non-removable\n",
+			cpumask_pr_args(&psci_cpu_off_broken_mask));
+}
+
+/*
+ * True if any currently-online CPU cannot be powered off by firmware. A regular
+ * kexec offlines every secondary CPU before the jump, which such a CPU cannot
+ * survive, so the kexec load is refused (see machine_kexec_prepare()).
+ */
+bool psci_broken_cpu_off_online(void)
+{
+	return cpumask_intersects(cpu_online_mask, &psci_cpu_off_broken_mask);
+}
+
 static int __init cpu_psci_cpu_init(unsigned int cpu)
 {
+	static bool parsed;
+
+	if (!parsed) {
+		psci_init_cpu_off_broken();
+		parsed = true;
+	}
+
 	return 0;
 }
 
@@ -47,9 +127,14 @@ static int cpu_psci_cpu_boot(unsigned int cpu)
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
+static bool psci_cpu_off_broken(unsigned int cpu)
+{
+	return cpumask_test_cpu(cpu, &psci_cpu_off_broken_mask);
+}
+
 static bool cpu_psci_cpu_can_disable(unsigned int cpu)
 {
-	return !psci_tos_resident_on(cpu);
+	return !psci_tos_resident_on(cpu) && !psci_cpu_off_broken(cpu);
 }
 
 static int cpu_psci_cpu_disable(unsigned int cpu)
@@ -62,17 +147,32 @@ static int cpu_psci_cpu_disable(unsigned int cpu)
 	if (psci_tos_resident_on(cpu))
 		return -EPERM;
 
+	/* Firmware cannot power this CPU down; CPU_OFF would hang it */
+	if (psci_cpu_off_broken(cpu))
+		return -EOPNOTSUPP;
+
 	return 0;
 }
 
 static void cpu_psci_cpu_die(unsigned int cpu)
 {
+	u32 state;
+
+	/*
+	 * Firmware cannot power this CPU down. Return without issuing CPU_OFF so
+	 * the caller drops into cpu_park_loop(). The regular hotplug path never
+	 * reaches here for such a CPU (cpu_disable() refuses it first); this
+	 * guards the crash-stop path (__cpu_try_die()).
+	 */
+	if (psci_cpu_off_broken(cpu))
+		return;
+
 	/*
 	 * There are no known implementations of PSCI actually using the
 	 * power state field, pass a sensible default for now.
 	 */
-	u32 state = PSCI_POWER_STATE_TYPE_POWER_DOWN <<
-		    PSCI_0_2_POWER_STATE_TYPE_SHIFT;
+	state = PSCI_POWER_STATE_TYPE_POWER_DOWN <<
+		PSCI_0_2_POWER_STATE_TYPE_SHIFT;
 
 	psci_ops.cpu_off(state);
 }
