@@ -31,7 +31,24 @@ static const struct mtk_gate_regs mm1_cg_regs = {
 
 static const struct mtk_gate mm_clks[] = {
 	GATE_DUMMY(CLK_DUMMY, "mm_dummy"),
-	GATE_MM0(CLK_MM_SMI_COMMON, "mm_smi_common", "mm_sel", 0),
+	/*
+	 * mm_smi_common gates the MM SMI common block, the shared arbiter that
+	 * funnels every multimedia local arbiter (larb0/larb5, the display and
+	 * MDP masters) out to the EMI memory bus. The bootloader hands the panel
+	 * over already lit, so OVL/RDMA keep scanning out framebuffer traffic
+	 * through the SMI fabric to DRAM before any Linux driver owns the
+	 * display. The smi-larb driver holds the per-larb gates (mm_smi_larb0/5
+	 * stay enabled), but nothing in Linux holds the common gate, so
+	 * clk_disable_unused() turns it off last (mm_sel's children are swept in
+	 * reverse registration order) and the in-flight MM->EMI transactions
+	 * wedge the bus -- a clk_disable trace with clk_ignore_unused dropped
+	 * ends at "mm_smi_common" with no completion and the SoC hangs. The
+	 * parent mm_sel is an always-on topckgen mux, so keep the common SMI bus
+	 * clock running by marking it critical.
+	 */
+	GATE_MTK_FLAGS(CLK_MM_SMI_COMMON, "mm_smi_common", "mm_sel",
+		       &mm0_cg_regs, 0, &mtk_clk_gate_ops_setclr,
+		       CLK_IS_CRITICAL),
 	GATE_MM0(CLK_MM_SMI_LARB0, "mm_smi_larb0", "mm_sel", 1),
 	GATE_MM0(CLK_MM_SMI_LARB5, "mm_smi_larb5", "mm_sel", 2),
 	GATE_MM0(CLK_MM_CAM_MDP, "mm_cam_mdp", "mm_sel", 3),
