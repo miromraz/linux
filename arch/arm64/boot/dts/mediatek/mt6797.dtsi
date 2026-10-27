@@ -30,13 +30,6 @@
 	psci {
 		compatible = "arm,psci-0.2";
 		method = "smc";
-		/*
-		 * The Cortex-A72 "B" cluster is powered up out-of-band by the
-		 * bootloader; the closed ATF advertises PSCI CPU_OFF but cannot
-		 * power it down, so offlining an A72 wedges the SoC. Keep both
-		 * A72 cores non-removable.
-		 */
-		mediatek,broken-cpu-off-cpus = <&cpu8>, <&cpu9>;
 	};
 
 	cpus {
@@ -264,9 +257,10 @@
 		 * The Cortex-A72 ("big") cluster. It is clocked by the
 		 * SMC-backed A72 ARMPLL in the MCUMIXED controller (cell
 		 * CLK_MCU_ARMPLLDIV_B is the CPU-clock mux, with clk26m as the
-		 * cpufreq intermediate). The cluster is off at boot and its
-		 * cpu-supply lives on the board, so a board enables DVFS by
-		 * adding the supply once the bootloader has powered the cluster.
+		 * cpufreq intermediate). Its cpu-supply lives on the board, so a
+		 * board enables DVFS by wiring the supply once the rail that
+		 * powers the cluster is up; on this SoC's boards the bootloader
+		 * brings that rail up before Linux.
 		 * cpu8 is the cluster-2 cpufreq policy leader and so the
 		 * cluster's cpufreq cooling device.
 		 */
@@ -288,7 +282,7 @@
 			d-cache-sets = <256>;
 			next-level-cache = <&l2_2>;
 			capacity-dmips-mhz = <1024>;
-			dynamic-power-coefficient = <375>;
+			dynamic-power-coefficient = <366>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster2_opp>;
@@ -310,7 +304,7 @@
 			d-cache-sets = <256>;
 			next-level-cache = <&l2_2>;
 			capacity-dmips-mhz = <1024>;
-			dynamic-power-coefficient = <375>;
+			dynamic-power-coefficient = <366>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster2_opp>;
@@ -743,32 +737,32 @@
 		};
 		opp-1378000000 {
 			opp-hz = /bits/ 64 <1378000000>;
-			opp-microvolt = <980000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-1248000000 {
 			opp-hz = /bits/ 64 <1248000000>;
-			opp-microvolt = <950000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-1131000000 {
 			opp-hz = /bits/ 64 <1131000000>;
-			opp-microvolt = <930000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-1001000000 {
 			opp-hz = /bits/ 64 <1001000000>;
-			opp-microvolt = <900000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-845000000 {
 			opp-hz = /bits/ 64 <845000000>;
-			opp-microvolt = <880000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-676000000 {
 			opp-hz = /bits/ 64 <676000000>;
-			opp-microvolt = <850000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x7fad>;
 		};
 
@@ -790,27 +784,27 @@
 		};
 		opp-1378000000-1 {
 			opp-hz = /bits/ 64 <1378000000>;
-			opp-microvolt = <980000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x0052>;
 		};
 		opp-1131000000-1 {
 			opp-hz = /bits/ 64 <1131000000>;
-			opp-microvolt = <930000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x0052>;
 		};
 		opp-1001000000-1 {
 			opp-hz = /bits/ 64 <1001000000>;
-			opp-microvolt = <900000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x0052>;
 		};
 		opp-845000000-1 {
 			opp-hz = /bits/ 64 <845000000>;
-			opp-microvolt = <880000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x0052>;
 		};
 		opp-676000000-1 {
 			opp-hz = /bits/ 64 <676000000>;
-			opp-microvolt = <850000>;
+			opp-microvolt = <1000000>;
 			opp-supported-hw = <0x0052>;
 		};
 	};

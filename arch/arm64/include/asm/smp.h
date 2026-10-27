@@ -152,7 +152,7 @@ static inline void __noreturn cpu_panic_kernel(void)
  */
 bool cpus_are_stuck_in_kernel(void);
 
-bool psci_has_broken_cpu_off_online(void);
+bool psci_broken_cpu_off_online(void);
 
 extern void crash_smp_send_stop(void);
 extern bool smp_crash_stop_failed(void);
