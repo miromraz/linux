@@ -62,6 +62,25 @@
 			enable-method = "psci";
 			reg = <0x000>;
 			mem-supply = <&cpu_sram>;
+			/*
+			 * L1 geometry as configured on the MT6797 LL/L
+			 * Cortex-A53 clusters (the A53 L1 is implementation-
+			 * configurable): 32 KiB 2-way L1-I and 32 KiB 4-way
+			 * L1-D, 64-byte lines, per the vendor DT and Arm
+			 * Cortex-A53 TRM r0p4, matching mt8183.dtsi's A53 cores.
+			 * The per-cluster unified L2 is described by the
+			 * l2-cacheN nodes with no cache-size: no MT6797 datasheet
+			 * value could be cited, and arm64 cacheinfo reads only
+			 * the cache level and type from the nodes, so the L2
+			 * simply reports no size.
+			 */
+			i-cache-size = <32768>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			next-level-cache = <&l2_0>;
 			capacity-dmips-mhz = <578>;
 			dynamic-power-coefficient = <69>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
@@ -78,6 +97,13 @@
 			enable-method = "psci";
 			reg = <0x001>;
 			mem-supply = <&cpu_sram>;
+			i-cache-size = <32768>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			next-level-cache = <&l2_0>;
 			capacity-dmips-mhz = <578>;
 			dynamic-power-coefficient = <69>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
@@ -94,6 +120,13 @@
 			enable-method = "psci";
 			reg = <0x002>;
 			mem-supply = <&cpu_sram>;
+			i-cache-size = <32768>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			next-level-cache = <&l2_0>;
 			capacity-dmips-mhz = <578>;
 			dynamic-power-coefficient = <69>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
@@ -110,6 +143,13 @@
 			enable-method = "psci";
 			reg = <0x003>;
 			mem-supply = <&cpu_sram>;
+			i-cache-size = <32768>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			next-level-cache = <&l2_0>;
 			capacity-dmips-mhz = <578>;
 			dynamic-power-coefficient = <69>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_LL>, <&clk26m>;
@@ -126,6 +166,13 @@
 			enable-method = "psci";
 			reg = <0x100>;
 			mem-supply = <&cpu_sram>;
+			i-cache-size = <32768>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			next-level-cache = <&l2_1>;
 			capacity-dmips-mhz = <578>;
 			dynamic-power-coefficient = <111>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
@@ -142,6 +189,13 @@
 			enable-method = "psci";
 			reg = <0x101>;
 			mem-supply = <&cpu_sram>;
+			i-cache-size = <32768>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			next-level-cache = <&l2_1>;
 			capacity-dmips-mhz = <578>;
 			dynamic-power-coefficient = <111>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
@@ -158,6 +212,13 @@
 			enable-method = "psci";
 			reg = <0x102>;
 			mem-supply = <&cpu_sram>;
+			i-cache-size = <32768>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			next-level-cache = <&l2_1>;
 			capacity-dmips-mhz = <578>;
 			dynamic-power-coefficient = <111>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
@@ -174,6 +235,13 @@
 			enable-method = "psci";
 			reg = <0x103>;
 			mem-supply = <&cpu_sram>;
+			i-cache-size = <32768>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			next-level-cache = <&l2_1>;
 			capacity-dmips-mhz = <578>;
 			dynamic-power-coefficient = <111>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_L>, <&clk26m>;
@@ -199,6 +267,18 @@
 			compatible = "arm,cortex-a72";
 			enable-method = "psci";
 			reg = <0x200>;
+			/*
+			 * Cortex-A72 fixed L1 geometry: 48 KiB 3-way L1-I and
+			 * 32 KiB 2-way L1-D, 64-byte lines (Arm Cortex-A72 TRM
+			 * r0p3, 6.1 "About the L1 memory system").
+			 */
+			i-cache-size = <49152>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <256>;
+			next-level-cache = <&l2_2>;
 			capacity-dmips-mhz = <1024>;
 			dynamic-power-coefficient = <366>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
@@ -214,6 +294,13 @@
 			compatible = "arm,cortex-a72";
 			enable-method = "psci";
 			reg = <0x201>;
+			i-cache-size = <49152>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			d-cache-size = <32768>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <256>;
+			next-level-cache = <&l2_2>;
 			capacity-dmips-mhz = <1024>;
 			dynamic-power-coefficient = <366>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
@@ -222,6 +309,35 @@
 			nvmem-cells = <&cpu_speed_bin>;
 			nvmem-cell-names = "speed_grade";
 			#cooling-cells = <2>;
+		};
+
+		/*
+		 * One unified L2 per cluster: l2_0 the Cortex-A53 "LL" cluster
+		 * (cpu0-3), l2_1 the Cortex-A53 "L" cluster (cpu4-7), l2_2 the
+		 * Cortex-A72 "B" cluster (cpu8-9). The three clusters do not
+		 * share an outer cache, so no next-level-cache is set on the L2
+		 * nodes. cache-size/cache-sets are omitted: no MT6797 datasheet
+		 * value could be cited, so these L2 nodes report no size.
+		 */
+		l2_0: l2-cache0 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-line-size = <64>;
+			cache-unified;
+		};
+
+		l2_1: l2-cache1 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-line-size = <64>;
+			cache-unified;
+		};
+
+		l2_2: l2-cache2 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-line-size = <64>;
+			cache-unified;
 		};
 	};
 
