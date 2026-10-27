@@ -24,6 +24,15 @@ struct mtk_cpufreq_platform_data {
 	int sram_min_volt;
 	int sram_max_volt;
 	bool ccifreq_supported;
+	/*
+	 * On this SoC the proc regulator can enforce a minimum that holds the
+	 * real Vproc above the value cpufreq requested (a floored or shared
+	 * buck rail). The voltage-tracking loop tracks the requested Vproc, so
+	 * after it settles the real Vproc -- and the Vsram the cluster SRAM
+	 * needs -- can be higher. Only such a platform re-reads the rails and
+	 * raises Vsram; see mtk_cpufreq_voltage_tracking().
+	 */
+	bool vproc_floored;
 };
 
 /*
@@ -157,6 +166,32 @@ static int mtk_cpufreq_voltage_tracking(struct mtk_cpu_dvfs_info *info,
 			return -EINVAL;
 		}
 	} while (vproc != new_vproc || vsram != new_vsram);
+
+	/*
+	 * A floored proc regulator (vproc_floored) can hold the real Vproc
+	 * above the value the loop just tracked to, leaving Vsram below real
+	 * Vproc + min_volt_shift. Re-read both rails and raise Vsram back to
+	 * the invariant. The target is clamped to [sram_min_volt, sram_max_volt]:
+	 * if the floor pushes real Vproc so high that real Vproc + min_volt_shift
+	 * would exceed sram_max_volt, Vsram is held at sram_max_volt (the SRAM
+	 * rail ceiling, the highest it may legally go). This only ever raises
+	 * Vsram, and runs only where the proc rail can be floored.
+	 */
+	if (soc_data->vproc_floored) {
+		pre_vproc = regulator_get_voltage(proc_reg);
+		pre_vsram = regulator_get_voltage(sram_reg);
+		if (pre_vproc > 0 && pre_vsram > 0) {
+			vsram = clamp(pre_vproc + soc_data->min_volt_shift,
+				      soc_data->sram_min_volt,
+				      soc_data->sram_max_volt);
+			if (vsram > pre_vsram) {
+				ret = regulator_set_voltage(sram_reg, vsram,
+							    soc_data->sram_max_volt);
+				if (ret)
+					return ret;
+			}
+		}
+	}
 
 	return 0;
 }
@@ -763,6 +798,7 @@ static const struct mtk_cpufreq_platform_data mt6797_platform_data = {
 	.sram_min_volt = 1000000,
 	.sram_max_volt = 1200000,
 	.ccifreq_supported = false,
+	.vproc_floored = true,
 };
 
 static const struct mtk_cpufreq_platform_data mt7622_platform_data = {
