@@ -146,29 +146,17 @@ static const struct mtk_pll_data mcu_plls[] = {
 #define MT6797_ARMPLL_B_FMAX_MHZ	3000U
 
 /*
- * Rate reported before cpufreq programs the first setpoint. The real power-on
- * rate is whatever the bootloader left and cannot be read back (the iDVFS
- * GetFreq SIP is unreliable here, and no SMC may be issued at probe -- the
- * cluster can be unpowered when maxcpus<=8 leaves cpu8/cpu9 offline). Seed with
- * the PLL floor, which is deliberately *not* one of the cluster OPPs: it is
- * non-zero, so clk_get_rate() never trips cpufreq_online()'s ->get() check and
- * drops the A72 policy, and because it is absent from the OPP table cpufreq's
- * CPUFREQ_NEED_INITIAL_FREQ_CHECK forces a real .set_rate() at policy init. That
- * init only runs once the cluster is online (policy8 exists), i.e. provably
- * powered, so the first SMC lands safely and syncs the cache -- and Vproc -- to
- * the hardware without any probe-time SMC or a bootloader rate contract.
- */
-#define MT6797_ARMPLL_B_DEFAULT_HZ	(MT6797_ARMPLL_B_FMIN_MHZ * HZ_PER_MHZ)
-
-/*
  * The A72 ARMPLL has no Linux-visible register (it lives in the iDVFS block,
  * reachable only through the secure SIP calls), so its rate cannot be computed
- * from hardware like the register-mapped A53/CCI PLLs. The iDVFS GetFreq SIP is
- * unreliable here -- it returns a live rate only once firmware has enabled
- * iDVFS, which a bootloader-powered cluster has not -- so .recalc_rate reports
- * the last rate programmed through .set_rate instead, seeded at the power-on
- * rate. The only way the rate changes under Linux is .set_rate, so the cache
- * mirrors the hardware.
+ * from hardware like the register-mapped A53/CCI PLLs, and the iDVFS GetFreq
+ * SIP is unreliable here (it returns a live rate only once firmware has enabled
+ * iDVFS, which a bootloader-powered cluster has not). So .recalc_rate reports
+ * the last rate programmed through .set_rate, cached here. The rate is unknown
+ * until the first .set_rate -- the cache starts at 0 (reported honestly, rather
+ * than inventing a boot rate) and the mediatek-cpufreq driver programs a real
+ * OPP at policy .init, so a CPU clock backing a live A72 policy is never read
+ * back as 0. The only thing that changes the rate under Linux is .set_rate, so
+ * from then on the cache mirrors the hardware.
  */
 struct mt6797_armpll_b {
 	struct clk_hw	hw;
@@ -252,15 +240,15 @@ static int mt6797_register_armpll_b(struct device *dev,
 		return -ENOMEM;
 
 	/*
-	 * Seed the cache before registering: the clock core calls .recalc_rate
-	 * during registration and reports this cached value. No SMC is issued
-	 * here -- the cluster may still be off (firmware/bootloader powers it,
-	 * not this driver). The seed is a non-OPP rate on purpose, so cpufreq's
-	 * initial-frequency check forces a real .set_rate() (the first SMC) once
-	 * the cluster is online, which is what makes the cache mirror the
-	 * hardware; see MT6797_ARMPLL_B_DEFAULT_HZ.
+	 * Start with the rate unknown (0): the clock core calls .recalc_rate
+	 * during registration, and no SMC may be issued here -- the cluster may
+	 * still be off (firmware/the bootloader powers it, not this driver), and
+	 * the iDVFS GetFreq SIP is unreliable, so the power-on rate cannot be
+	 * read back. mediatek-cpufreq forces a real .set_rate() (the first SMC)
+	 * at policy .init, once the cluster is online, which is what makes the
+	 * cache start mirroring the hardware.
 	 */
-	armpll->rate = MT6797_ARMPLL_B_DEFAULT_HZ;
+	armpll->rate = 0;
 	armpll->hw.init = &init;
 
 	ret = devm_clk_hw_register(dev, &armpll->hw);
