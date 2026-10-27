@@ -23,6 +23,37 @@
 
 	chosen {
 		stdout-path = "serial0:921600n8";
+
+		/*
+		 * The MT6797 bootloader (LK) brings up the internal 1080x2160
+		 * MIPI-DSI panel and leaves it scanning out an ARGB8888
+		 * framebuffer at 0x7dfb0000 (reserved below). Describe it as a
+		 * simple-framebuffer so simpledrm keeps that image live from early
+		 * boot until a native MediaTek DRM driver binds (none exists for
+		 * mt6797 yet). The clocks are the MMSYS gates on the live
+		 * OVL0 -> RDMA0 -> DSI0 scan-out path plus the SMI common/larb
+		 * fabric; simpledrm prepare_enables them and attaches the MM power
+		 * domain, holding both across clk_disable_unused() and
+		 * genpd_power_off_unused(). That is what lets the kernel boot
+		 * without clk_ignore_unused/pd_ignore_unused: in particular
+		 * mm_smi_common is the shared MM->EMI arbiter, and gating it while
+		 * the panel is still scanning out wedges the MM bus and hangs boot.
+		 */
+		framebuffer0: framebuffer@7dfb0000 {
+			compatible = "simple-framebuffer";
+			reg = <0 0x7dfb0000 0 0x01f90000>;
+			width = <1080>;
+			height = <2160>;
+			stride = <4352>;
+			format = "a8r8g8b8";
+			clocks = <&mmsys CLK_MM_SMI_COMMON>,
+				 <&mmsys CLK_MM_SMI_LARB0>,
+				 <&mmsys CLK_MM_DISP_OVL0>,
+				 <&mmsys CLK_MM_DISP_RDMA0>,
+				 <&mmsys CLK_MM_DSI0_MM_CLOCK>,
+				 <&mmsys CLK_MM_DSI0_INTERFACE_CLOCK>;
+			power-domains = <&scpsys MT6797_POWER_DOMAIN_MM>;
+		};
 	};
 
 	/*
@@ -172,6 +203,17 @@
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
+
+		/*
+		 * The LK-initialised framebuffer that /chosen/framebuffer scans
+		 * out. Keep Linux from mapping or allocating it (no-map) so the
+		 * boot image survives until simpledrm (or a native DRM driver)
+		 * owns it. 0x7dfb0000 + 0x01f90000 is the vendor-measured region.
+		 */
+		framebuffer@7dfb0000 {
+			reg = <0 0x7dfb0000 0 0x01f90000>;
+			no-map;
+		};
 
 		/*
 		 * Fixed firmware reservations carried over from the vendor
