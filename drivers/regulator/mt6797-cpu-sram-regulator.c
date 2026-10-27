@@ -37,6 +37,14 @@
 
 #define MT6797_CPULDO_EN_MASK		GENMASK(7, 0)
 #define MT6797_CPULDO_VOLT_MASK		GENMASK(3, 0)
+/*
+ * One CTRL word packs four per-LDO VOLT fields, each in bits [3:0] of its byte.
+ * Update only those fields; a full-word write would clobber the [7:4] nibbles.
+ */
+#define MT6797_CPULDO_VOLT_FIELDS_MASK	(MT6797_CPULDO_VOLT_MASK | \
+					 (MT6797_CPULDO_VOLT_MASK << 8) | \
+					 (MT6797_CPULDO_VOLT_MASK << 16) | \
+					 (MT6797_CPULDO_VOLT_MASK << 24))
 
 /* Voltage code 7 == 1.00 V, 25 mV per code, up to code 15 == 1.20 V. */
 #define MT6797_CPULDO_MIN_SEL		7
@@ -51,11 +59,13 @@ static int mt6797_cpu_sram_set_voltage_sel(struct regulator_dev *rdev,
 	unsigned int packed = code | (code << 8) | (code << 16) | (code << 24);
 	int ret;
 
-	ret = regmap_write(rdev->regmap, MT6797_CPULDO_CTRL_1, packed);
+	ret = regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_1,
+				 MT6797_CPULDO_VOLT_FIELDS_MASK, packed);
 	if (ret)
 		return ret;
 
-	return regmap_write(rdev->regmap, MT6797_CPULDO_CTRL_2, packed);
+	return regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_2,
+				  MT6797_CPULDO_VOLT_FIELDS_MASK, packed);
 }
 
 static int mt6797_cpu_sram_get_voltage_sel(struct regulator_dev *rdev)

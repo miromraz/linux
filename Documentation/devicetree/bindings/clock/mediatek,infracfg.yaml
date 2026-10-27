@@ -43,6 +43,8 @@ properties:
           - const: mediatek,mt7623-infracfg
           - const: mediatek,mt2701-infracfg
           - const: syscon
+      # The MT6797 infracfg may additionally be a simple-mfd so its on-SoC
+      # CPU SRAM LDO regulator child is populated (see the allOf below).
       - items:
           - const: mediatek,mt6797-infracfg
           - const: syscon
@@ -57,37 +59,45 @@ properties:
   '#reset-cells':
     const: 1
 
-  regulator-cpu-sram:
-    type: object
-    description:
-      On-SoC CPU SRAM LDO regulator (MT6797 only); its registers live in this
-      infracfg block. See
-      Documentation/devicetree/bindings/regulator/mediatek,mt6797-cpu-sram.yaml.
-
 required:
   - compatible
   - reg
   - '#clock-cells'
 
-if:
-  properties:
-    compatible:
-      contains:
-        enum:
-          - mediatek,mt2701-infracfg
-          - mediatek,mt2712-infracfg
-          - mediatek,mt6795-infracfg
-          - mediatek,mt6797-infracfg
-          - mediatek,mt7622-infracfg
-          - mediatek,mt7986-infracfg
-          - mediatek,mt8135-infracfg
-          - mediatek,mt8173-infracfg
-          - mediatek,mt8183-infracfg
-then:
-  required:
-    - '#reset-cells'
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - mediatek,mt2701-infracfg
+              - mediatek,mt2712-infracfg
+              - mediatek,mt6795-infracfg
+              - mediatek,mt6797-infracfg
+              - mediatek,mt7622-infracfg
+              - mediatek,mt7986-infracfg
+              - mediatek,mt8135-infracfg
+              - mediatek,mt8173-infracfg
+              - mediatek,mt8183-infracfg
+    then:
+      required:
+        - '#reset-cells'
 
-additionalProperties: false
+  # The MT6797 infracfg block also hosts the on-SoC CPU SRAM LDO regulator,
+  # whose registers live in this block, so it is a child node. No other
+  # infracfg variant has it; a "^regulator-" child elsewhere is rejected by
+  # unevaluatedProperties below, so no explicit "else" is needed here.
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt6797-infracfg
+    then:
+      patternProperties:
+        "^regulator-":
+          $ref: /schemas/regulator/mediatek,mt6797-cpu-sram.yaml#
+
+unevaluatedProperties: false
 
 examples:
   - |

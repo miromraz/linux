@@ -14,7 +14,6 @@
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/reset/mt6797-resets.h>
 #include <dt-bindings/thermal/thermal.h>
-#include <dt-bindings/reset/mediatek,mt6797-wdt.h>
 
 / {
 	compatible = "mediatek,mt6797";
@@ -30,13 +29,6 @@
 	psci {
 		compatible = "arm,psci-0.2";
 		method = "smc";
-		/*
-		 * The Cortex-A72 "B" cluster is powered up out-of-band by the
-		 * bootloader; the closed ATF advertises PSCI CPU_OFF but cannot
-		 * power it down, so offlining an A72 wedges the SoC. Keep both
-		 * A72 cores non-removable.
-		 */
-		mediatek,broken-cpu-off-cpus = <&cpu8>, <&cpu9>;
 	};
 
 	cpus {
@@ -264,9 +256,10 @@
 		 * The Cortex-A72 ("big") cluster. It is clocked by the
 		 * SMC-backed A72 ARMPLL in the MCUMIXED controller (cell
 		 * CLK_MCU_ARMPLLDIV_B is the CPU-clock mux, with clk26m as the
-		 * cpufreq intermediate). The cluster is off at boot and its
-		 * cpu-supply lives on the board, so a board enables DVFS by
-		 * adding the supply once the bootloader has powered the cluster.
+		 * cpufreq intermediate). Its cpu-supply lives on the board, so a
+		 * board enables DVFS by wiring the supply once the rail that
+		 * powers the cluster is up; on this SoC's boards the bootloader
+		 * brings that rail up before Linux.
 		 * cpu8 is the cluster-2 cpufreq policy leader and so the
 		 * cluster's cpufreq cooling device.
 		 */
@@ -288,7 +281,7 @@
 			d-cache-sets = <256>;
 			next-level-cache = <&l2_2>;
 			capacity-dmips-mhz = <1024>;
-			dynamic-power-coefficient = <375>;
+			dynamic-power-coefficient = <366>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster2_opp>;
@@ -310,7 +303,7 @@
 			d-cache-sets = <256>;
 			next-level-cache = <&l2_2>;
 			capacity-dmips-mhz = <1024>;
-			dynamic-power-coefficient = <375>;
+			dynamic-power-coefficient = <366>;
 			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
 			clock-names = "cpu", "intermediate";
 			operating-points-v2 = <&cluster2_opp>;
@@ -391,16 +384,14 @@
 					trip = <&cpu_passive>;
 					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
 							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 
 				map1 {
 					trip = <&cpu_hot>;
 					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
 							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -416,8 +407,13 @@
 	 *   M   (func 2,7)                  = 0x0084
 	 *   L   (func 0xf)                  = 0x8000
 	 * The little cluster shares one FY/M/L frequency table (mask 0xffad),
-	 * with SB separate. Entries are capped at 1.09 V so Vproc stays below
-	 * the fixed 1.10 V SRAM LDO, and stop above the point where a /4 post
+	 * with SB separate. Vproc is the DA9214 buck A rail; Vsram is the CPU
+	 * SRAM LDO (cpu_sram, constrained 1.15-1.20 V). The top entries now
+	 * reach 1.15 V and so need the SRAM LDO (mem-supply) for Vsram to track
+	 * Vproc. Nominally Vsram >= Vproc + 100 mV (min_volt_shift); at the
+	 * 1.20 V Vsram ceiling the 1.15 V top OPP narrows that to 50 mV, as in
+	 * the vendor driver, which clamps Vsram at MAX_VSRAM = 1.20 V and lets
+	 * Vproc approach it. Entries stop above the point where a /4 post
 	 * divider would be needed (no CKDIV model yet). A numeric suffix on an
 	 * OPP node name only keeps duplicate frequencies unique; the active
 	 * OPP is chosen by opp-supported-hw.
@@ -428,9 +424,9 @@
 
 		/*
 		 * FY / M / L bins (shared little-cluster table). The entries
-		 * above 1.09 V need the CPU SRAM LDO (mem-supply) for Vsram
-		 * tracking; they are capped at 1.15 V here, below the vendor
-		 * top (1.20 V), pending hardware validation of the tracking.
+		 * above the fixed-LDO 1.09 V level need the CPU SRAM LDO
+		 * (mem-supply) for Vsram tracking; the top entry is 1.15 V, the
+		 * ceiling of this table.
 		 */
 		opp-1287000000 {
 			opp-hz = /bits/ 64 <1287000000>;
@@ -542,8 +538,8 @@
 
 		/*
 		 * FY / M bins (shared big-cluster table). As for the little
-		 * cluster, the entries above 1.09 V need the CPU SRAM LDO and
-		 * are capped at 1.15 V pending hardware validation.
+		 * cluster, the entries above the fixed-LDO 1.09 V level need the
+		 * CPU SRAM LDO for Vsram tracking; the top entry is 1.15 V.
 		 */
 		opp-1703000000 {
 			opp-hz = /bits/ 64 <1703000000>;
@@ -664,11 +660,11 @@
 		};
 
 		/*
-		 * L bin. The CCI shares buck A, is not a DVFS consumer, and on
-		 * the L bin needs 1.09 V at its bootloader frequency (~630 MHz,
-		 * CCI_L idx4 637 MHz). Pin every L-bin cluster OPP at 1.09 V so
-		 * the L-cluster consumer holds the shared rail at 1.09 V while
-		 * cpufreq runs, instead of relying only on the board floor.
+		 * L bin: the vendor VPROC1_L column pins every L-bin cluster OPP
+		 * at 1.09 V, so they are pinned here too. The CCI is on the same
+		 * buck A rail but is now its own devfreq consumer, with Vsram on
+		 * the CPU SRAM LDO, so it holds the rail at its own frequency's
+		 * voltage rather than depending on the cluster or the board floor.
 		 */
 		opp-1274000000-2 {
 			opp-hz = /bits/ 64 <1274000000>;
@@ -714,12 +710,22 @@
 
 	/*
 	 * Cortex-A72 ("big") cluster OPPs from the vendor per-bin iDVFS tables
-	 * (mt_cpufreq.c, legacy VPROC2 columns for this unit's 0119 date code:
-	 * B_FY0119 and B_SB0119). Entries are capped at 1.09 V, as for the
-	 * Cortex-A53 clusters, so Vproc stays below the fixed 1.10 V B SRAM LDO
-	 * the firmware programs (there is no Vsram tracking on the B cluster
-	 * yet). opp-supported-hw groups the efuse func codes per bin (FY/M
-	 * shared = 0x7fad, SB = 0x0052), matching the Cortex-A53 tables.
+	 * (mt_cpufreq.c, legacy VPROC2 columns; B_FY and B_SB are the per-bin
+	 * columns and opp-supported-hw selects the efuse bin). The B SRAM rail
+	 * is SMC-fixed at 1.10 V -- there is no Vsram tracking on the B cluster
+	 * yet -- so Vproc is capped below it, as for the Cortex-A53 clusters:
+	 * the top OPPs sit at 1.07 V (FY/M) and 1.08 V (SB), a 20-30 mV margin
+	 * that grows at lower OPPs. opp-supported-hw groups the efuse func codes
+	 * per bin (FY/M shared = 0x7fad, SB = 0x0052), matching the Cortex-A53
+	 * tables.
+	 *
+	 * The vendor Vproc values below the board buck-B 1.00 V floor are kept
+	 * as the honest energy-model input and written as <target target
+	 * 1090000> triplets: _opp_supported_by_regulators disables an OPP whose
+	 * whole [min, max] range is below the regulator minimum, so each range
+	 * must overlap buck B's [1.00, 1.09] V. The buck-B core then clamps the
+	 * delivered Vproc up to its 1.00 V floor at runtime; the voltage is not
+	 * pinned here.
 	 */
 	cluster2_opp: opp-table-cluster2 {
 		compatible = "operating-points-v2";
@@ -743,32 +749,32 @@
 		};
 		opp-1378000000 {
 			opp-hz = /bits/ 64 <1378000000>;
-			opp-microvolt = <980000>;
+			opp-microvolt = <980000 980000 1090000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-1248000000 {
 			opp-hz = /bits/ 64 <1248000000>;
-			opp-microvolt = <950000>;
+			opp-microvolt = <950000 950000 1090000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-1131000000 {
 			opp-hz = /bits/ 64 <1131000000>;
-			opp-microvolt = <930000>;
+			opp-microvolt = <930000 930000 1090000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-1001000000 {
 			opp-hz = /bits/ 64 <1001000000>;
-			opp-microvolt = <900000>;
+			opp-microvolt = <900000 900000 1090000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-845000000 {
 			opp-hz = /bits/ 64 <845000000>;
-			opp-microvolt = <880000>;
+			opp-microvolt = <880000 880000 1090000>;
 			opp-supported-hw = <0x7fad>;
 		};
 		opp-676000000 {
 			opp-hz = /bits/ 64 <676000000>;
-			opp-microvolt = <850000>;
+			opp-microvolt = <850000 850000 1090000>;
 			opp-supported-hw = <0x7fad>;
 		};
 
@@ -790,27 +796,27 @@
 		};
 		opp-1378000000-1 {
 			opp-hz = /bits/ 64 <1378000000>;
-			opp-microvolt = <980000>;
+			opp-microvolt = <980000 980000 1090000>;
 			opp-supported-hw = <0x0052>;
 		};
 		opp-1131000000-1 {
 			opp-hz = /bits/ 64 <1131000000>;
-			opp-microvolt = <930000>;
+			opp-microvolt = <930000 930000 1090000>;
 			opp-supported-hw = <0x0052>;
 		};
 		opp-1001000000-1 {
 			opp-hz = /bits/ 64 <1001000000>;
-			opp-microvolt = <900000>;
+			opp-microvolt = <900000 900000 1090000>;
 			opp-supported-hw = <0x0052>;
 		};
 		opp-845000000-1 {
 			opp-hz = /bits/ 64 <845000000>;
-			opp-microvolt = <880000>;
+			opp-microvolt = <880000 880000 1090000>;
 			opp-supported-hw = <0x0052>;
 		};
 		opp-676000000-1 {
 			opp-hz = /bits/ 64 <676000000>;
-			opp-microvolt = <850000>;
+			opp-microvolt = <850000 850000 1090000>;
 			opp-supported-hw = <0x0052>;
 		};
 	};
@@ -842,8 +848,9 @@
 	 * and CCI_SB columns). The CCI shares the DA9214 buck A rail with the
 	 * two Cortex-A53 clusters; making it a devfreq consumer lets it hold
 	 * that rail at the voltage its own frequency needs, instead of the
-	 * board pinning a fixed floor. Entries are capped at 1.09 V (Vproc
-	 * stays below the fixed 1.10 V SRAM LDO, as for the clusters) and stop
+	 * board pinning a fixed floor. Vsram here is the CPU SRAM LDO (cpu_sram,
+	 * tracked 1.15-1.20 V), not the fixed B SRAM LDO; entries take the vendor
+	 * CCI-table voltages (up to 1.09 V) and stop
 	 * near 500 MHz, below which the CCI PLL would need a /4 post divider the
 	 * MCUMIXED clock driver does not model. opp-supported-hw groups the
 	 * efuse func codes per bin, as in the cluster tables (FY/M, SB and the
@@ -1043,30 +1050,20 @@
 		#reset-cells = <1>;
 
 		/*
-		 * On-SoC CPU SRAM LDO bank in the always-on infracfg block. It
-		 * is the Vsram rail of the Cortex-A53 clusters and the CCI; the
-		 * CPU and CCI frequency drivers track it against the DA9214
-		 * Vproc rail. The range is the vendor MIN/MAX_VSRAM_VOLT
-		 * (1.00-1.20 V); it is always on because it powers live CPU
-		 * caches. The LDO registers live in this infracfg block, so the
-		 * regulator is a child of it and reaches the registers through
-		 * the parent syscon regmap.
+		 * On-SoC CPU SRAM LDO bank: the always-on Vsram rail of the
+		 * Cortex-A53 clusters and the CCI, tracked against the DA9214
+		 * Vproc rail by the CPU and CCI frequency drivers. Its registers
+		 * live in this infracfg block, so it is a child node and reaches
+		 * them through the parent syscon regmap.
 		 */
 		cpu_sram: regulator-cpu-sram {
 			compatible = "mediatek,mt6797-cpu-sram";
 			regulator-name = "vsram-cpu";
 			/*
-			 * The minimum is the board Vproc floor (DA9214 buck A,
-			 * 1.04 V) plus the vendor NORMAL_DIFF_VRSAM_VPROC of
-			 * 100 mV, rounded up to the 25 mV grid: 1.15 V. The
-			 * Vsram tracking in the CPU and CCI drivers computes
-			 * Vsram from the requested Vproc, which the buck A floor
-			 * can silently raise; enforcing the floor+100 mV minimum
-			 * here, at the regulator core, keeps Vsram >= Vproc on
-			 * the real rails at the lowest OPPs (where requested
-			 * Vproc is below the floor). The LK value is 1.10 V, so
-			 * the core raises it to 1.15 V at registration (an
-			 * upward, safe move).
+			 * Floor is the board Vproc minimum (DA9214 buck A,
+			 * 1.04 V) plus the vendor 100 mV Vsram/Vproc offset,
+			 * rounded up to the 25 mV grid, keeping Vsram >= Vproc
+			 * at the lowest OPPs.
 			 */
 			regulator-min-microvolt = <1150000>;
 			regulator-max-microvolt = <1200000>;
@@ -1218,12 +1215,6 @@
 				#power-domain-cells = <0>;
 			};
 
-			power-domain@MT6797_POWER_DOMAIN_CONN {
-				reg = <MT6797_POWER_DOMAIN_CONN>;
-				mediatek,infracfg = <&infrasys>;
-				#power-domain-cells = <0>;
-			};
-
 			mfg_async: power-domain@MT6797_POWER_DOMAIN_MFG_ASYNC {
 				reg = <MT6797_POWER_DOMAIN_MFG_ASYNC>;
 				clocks = <&topckgen CLK_TOP_MUX_MFG_52M>,
@@ -1299,91 +1290,12 @@
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE3>;
 		power-domain-names = "core0", "core1", "core2", "core3";
 		mediatek,infracfg = <&infrasys>;
-		/*
-		 * The GPU has no dedicated speed-bin efuse field. The vendor
-		 * 3.18 mt_gpufreq driver selects the GPU OPP table from
-		 * FUNC_CODE_1 (efuse word 22[3:0],
-		 * mt_gpufreq_get_dvfs_table_type()), the same raw index the CPU
-		 * speed bin uses, so reuse that cell. panfrost converts the
-		 * index to a BIT() mask (the speedbin_is_index compatible flag).
-		 */
-		nvmem-cells = <&cpu_speed_bin>;
-		nvmem-cell-names = "speed-bin";
-		#cooling-cells = <2>;
-		/*
-		 * Active dynamic-power coefficient (uW/MHz/V^2) for the IPA
-		 * (power_allocator) governor's Energy Model, which panfrost
-		 * registers for the GPU via devfreq_cooling_em_register().
-		 * Back-calculated from the vendor 3.18 mt_gpufreq active-power
-		 * model (mt_gpufreq_power_calculation(), GPU_ACT_REF_POWER
-		 * 1169 mW at GPU_ACT_REF_FREQ 800 MHz / GPU_ACT_REF_VOLT 1.0 V):
-		 * C = 1169000 uW / (800 MHz * 1.0^2 V^2) = 1461.
-		 */
-		dynamic-power-coefficient = <1461>;
 		status = "disabled";
 	};
 
 	watchdog: watchdog@10007000 {
 		compatible = "mediatek,mt6797-wdt", "mediatek,mt6589-wdt";
 		reg = <0 0x10007000 0 0x100>;
-		#reset-cells = <1>;
-	};
-
-	/*
-	 * Connectivity (Wi-Fi/BT combo, CONSYS). The CONSYS MCU control
-	 * block, the BTIF STP transport (serial@1100c000) and its AP-DMA
-	 * channels, and the Wi-Fi AHB HIF are described here; boards that fit
-	 * the combo add the supplies, the firmware carveout and status = "okay".
-	 */
-	consys: consys@18070000 {
-		compatible = "mediatek,mt6797-consys";
-		reg = <0 0x18070000 0 0x200>;
-		reg-names = "conn-mcu";
-		interrupts = <GIC_SPI 284 IRQ_TYPE_LEVEL_LOW>,
-			     <GIC_SPI 285 IRQ_TYPE_LEVEL_LOW>;
-		interrupt-names = "bgf", "wdt";
-		resets = <&watchdog MT6797_TOPRGU_CONMCU_SW_RST>;
-		reset-names = "con-mcu";
-		status = "disabled";
-	};
-
-	btif: serial@1100c000 {
-		compatible = "mediatek,mt6797-btif", "mediatek,mtk-btif";
-		reg = <0 0x1100c000 0 0x1000>;
-		interrupts = <GIC_SPI 130 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&infrasys CLK_INFRA_BTIF>;
-		clock-names = "main";
-		reg-shift = <2>;
-		reg-io-width = <4>;
-		status = "disabled";
-	};
-
-	btif_dma: dma-controller@11000a00 {
-		compatible = "mediatek,mt6797-uart-dma", "mediatek,mt6577-uart-dma";
-		reg = <0 0x11000a00 0 0x80>,
-		      <0 0x11000a80 0 0x80>;
-		interrupts = <GIC_SPI 116 IRQ_TYPE_LEVEL_LOW>,
-			     <GIC_SPI 117 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&infrasys CLK_INFRA_AP_DMA>;
-		clock-names = "apdma";
-		#dma-cells = <1>;
-		status = "disabled";
-	};
-
-	wifi: wifi@180f0000 {
-		compatible = "mediatek,mt6797-wlan";
-		reg = <0 0x180f0000 0 0x1100>;
-		interrupts = <GIC_SPI 283 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&infrasys CLK_INFRA_AP_DMA>;
-		clock-names = "wifi-dma";
-		status = "disabled";
-	};
-
-	timer: timer@10008000 {
-		compatible = "mediatek,mt6797-timer", "mediatek,mt6577-timer";
-		reg = <0 0x10008000 0 0x1000>;
-		interrupts = <GIC_SPI 169 IRQ_TYPE_LEVEL_LOW>;
-		clocks = <&infrasys CLK_INFRA_13M>;
 	};
 
 	apmixedsys: apmixed@1000c000 {

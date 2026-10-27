@@ -26,25 +26,11 @@
 	};
 
 	/*
-	 * GPU operating points for this board's MT6797. The 238-700 MHz grid
-	 * is the vendor 3.18 mt_gpufreq worst-segment voltages rounded up to
-	 * the RT5735 6.25 mV step. It is not correct for every MT6797 (the
-	 * vendor type 6 table lp_tbl_e1_2, FUNC_CODE_1 2/7 with ptp <= 5, and
-	 * type 11 v7_tbl_e1_3, FUNC_CODE_1 0xF, top out at 600 MHz), but this
-	 * board only ever ships FUNC_CODE_1 == 4 (a Speed Bin part), so the
-	 * grid stays enabled for every bin.
-	 *
-	 * panfrost reads the speed bin (FUNC_CODE_1), applies BIT(bin) as the
-	 * supported-hw value, and the OPP core then drops any OPP whose
-	 * opp-supported-hw does not match. The OPP core rejects the whole
-	 * table once supported_hw is set if any OPP lacks opp-supported-hw, so
-	 * the always-on grid carries opp-supported-hw = <0xffffffff> (match
-	 * every bin) rather than omitting the property. Only FUNC_CODE_1 == 4
-	 * (BIT(4) = 0x10) selects the vendor "Speed Bin" table (mt_gpufreq.c
-	 * mt_gpufreq_opp_plus_tbl_e1_1, type 12) that tops out at 900 MHz, so
-	 * the 900 MHz point alone is gated to opp-supported-hw = <0x10>. The
-	 * 900 MHz voltage is the vendor GPU_DVFS_VOLT0_S (1154.5 mV) rounded
-	 * up to the RT5735 step (1156250 uV).
+	 * GPU operating points for this board's MT6797 speed bin. The
+	 * frequency/voltage pairs are the vendor 3.18 mt_gpufreq non-M-bin
+	 * grid (238-700 MHz); M-bin parts use a disjoint grid topping out at
+	 * 600 MHz, so this table is not valid for every MT6797 and lives in
+	 * the board DTS rather than the shared SoC dtsi.
 	 */
 	gpu_opp_table: opp-table-gpu {
 		compatible = "operating-points-v2";
@@ -53,37 +39,26 @@
 		opp-238000000 {
 			opp-hz = /bits/ 64 <238000000>;
 			opp-microvolt = <862500>;
-			opp-supported-hw = <0xffffffff>;
 		};
 		opp-365000000 {
 			opp-hz = /bits/ 64 <365000000>;
 			opp-microvolt = <912500>;
-			opp-supported-hw = <0xffffffff>;
 		};
 		opp-442500000 {
 			opp-hz = /bits/ 64 <442500000>;
 			opp-microvolt = <975000>;
-			opp-supported-hw = <0xffffffff>;
 		};
 		opp-520000000 {
 			opp-hz = /bits/ 64 <520000000>;
 			opp-microvolt = <1006250>;
-			opp-supported-hw = <0xffffffff>;
 		};
 		opp-610000000 {
 			opp-hz = /bits/ 64 <610000000>;
 			opp-microvolt = <1081250>;
-			opp-supported-hw = <0xffffffff>;
 		};
 		opp-700000000 {
 			opp-hz = /bits/ 64 <700000000>;
 			opp-microvolt = <1131250>;
-			opp-supported-hw = <0xffffffff>;
-		};
-		opp-900000000 {
-			opp-hz = /bits/ 64 <900000000>;
-			opp-microvolt = <1156250>;
-			opp-supported-hw = <0x10>;
 		};
 	};
 
@@ -146,18 +121,9 @@
 	 */
 	battery: battery {
 		compatible = "simple-battery";
-		device-chemistry = "lithium-ion";
 		charge-full-design-microamp-hours = <4268000>;
 		voltage-min-design-microvolt = <3400000>;
 		voltage-max-design-microvolt = <4416000>;
-		/* Matches the BQ25896 ti,battery-regulation-voltage. */
-		constant-charge-voltage-max-microvolt = <4416000>;
-		/*
-		 * Seed value for the fuel gauge; refined at runtime from load
-		 * steps. Vendor 25 C pack resistance r_profile_t2[] is
-		 * ~90-190 mOhm (mt_battery_meter_table.h).
-		 */
-		factory-internal-resistance-micro-ohms = <110000>;
 		ocv-capacity-celsius = <25>;
 		ocv-capacity-table-0 =
 			<4357000 100>, <4301000 95>, <4248000 91>, <4196000 86>,
@@ -233,67 +199,10 @@
 			reg = <0 0x46000000 0 0x400000>;
 			no-map;
 		};
-
-		/*
-		 * No-map firmware carveout for the CONSYS Wi-Fi EMI window.
-		 * 0xbfa00000 is free System RAM and matches the vendor-proven
-		 * CONSYS EMI base; the connectivity driver copies the WLAN
-		 * firmware here and programs the EMI remap.
-		 */
-		consys_reserved: consys@bfa00000 {
-			reg = <0 0xbfa00000 0 0x200000>;
-			no-map;
-		};
 	};
-};
-
-/*
- * MT6797 connectivity (Wi-Fi/BT combo). The SoC blocks live in mt6797.dtsi;
- * the board adds the MT6351 VCN supplies, the firmware carveout and enables
- * them. power-domains = <&scpsys MT6797_POWER_DOMAIN_CONN> is intentionally
- * not set: the out-of-tree module drives the CONN island via SPM, and genpd
- * would otherwise power it on at attach before the module's rail sequence. The
- * CONN domain is instead shut down at boot (MTK_SCPD_OFF_AT_BOOT) so an
- * unclaimed island is safe; a future runtime-PM driver adds power-domains here.
- */
-&consys {
-	vcn18-supply = <&mt6351_vcn18_reg>;
-	vcn28-supply = <&mt6351_vcn28_reg>;
-	vcn33-bt-supply = <&mt6351_vcn33_reg>;
-	vcn33-wifi-supply = <&mt6351_vcn33_reg>;
-	memory-region = <&consys_reserved>;
-	status = "okay";
-};
-
-/*
- * The BTIF (serial@1100c000) and its AP-DMA channels stay disabled: the
- * out-of-tree connectivity module drives BTIF raw and only needs its interrupt
- * and clock, which it reads from the disabled node, so 8250_of / mtk-uart-apdma
- * must not claim them.
- */
-&wifi {
-	status = "okay";
 };
 
 &mt6351regulator {
-	mt6351_vcn18_reg: ldo-vcn18 {
-		regulator-name = "vcn18";
-		regulator-min-microvolt = <1800000>;
-		regulator-max-microvolt = <1800000>;
-	};
-
-	mt6351_vcn28_reg: ldo-vcn28 {
-		regulator-name = "vcn28";
-		regulator-min-microvolt = <2800000>;
-		regulator-max-microvolt = <2800000>;
-	};
-
-	mt6351_vcn33_reg: ldo-vcn33 {
-		regulator-name = "vcn33";
-		regulator-min-microvolt = <3300000>;
-		regulator-max-microvolt = <3300000>;
-	};
-
 	mt6351_vemc_reg: ldo-vemc {
 		regulator-name = "vemc_3v3";
 		regulator-min-microvolt = <3000000>;
@@ -402,17 +311,6 @@
 		};
 	};
 
-	/*
-	 * eMMC pads. drive-strength is a current in milliamps. The MSDC0 pads
-	 * (GPIO114-125) are DRV_GRP4 (2..16 mA in 2 mA steps, code = mA/2 - 1,
-	 * MT6797 Functional Spec v1.0 Table 2-7), so the vendor
-	 * aeon6797_6m_n.dts mmc0 register code 1 is 4 mA. CMD, DSL and RSTB
-	 * share one DRV field, so setting it on the cmd/dat group covers all
-	 * three. Because VCCQ (vqmmc) is a fixed 1.8 V rail, the core selects
-	 * this "state_uhs" pin state at the first power-up, so the drive
-	 * applies at every speed, as on the vendor kernel. Pulls are left as
-	 * the bootloader set them (the vendor driver hard-codes them instead).
-	 */
 	mmc0_pins_default: mmc0-default-pins {
 		pins-cmd-dat {
 			pinmux = <MT6797_GPIO114__FUNC_MSDC0_DAT0>,
@@ -424,12 +322,10 @@
 				 <MT6797_GPIO120__FUNC_MSDC0_DAT6>,
 				 <MT6797_GPIO121__FUNC_MSDC0_DAT7>,
 				 <MT6797_GPIO122__FUNC_MSDC0_CMD>;
-			drive-strength = <4>;
 		};
 
 		pins-clk {
 			pinmux = <MT6797_GPIO123__FUNC_MSDC0_CLK>;
-			drive-strength = <4>;
 		};
 
 		pins-ds {
@@ -442,17 +338,10 @@
 	};
 
 	/*
-	 * MSDC1 (microSD). cmd/dat get an internal pull-up and clk a
-	 * pull-down, as is usual for an SD bus (the vendor driver hard-codes
-	 * the same pulls). drive-strength is a current in milliamps: the
-	 * MSDC1 pads (GPIO129-134) are DRV_GRP4 (2..16 mA in 2 mA steps,
-	 * MT6797 Functional Spec v1.0 Table 2-7). The vendor aeon6797_6m_n.dts
-	 * mmc1 default register code is 6, i.e. 14 mA, which is not in the
-	 * pinctrl binding enum [2, 4, 8, 12, 16]; use the nearest valid value,
-	 * 12 mA (code 5). For the UHS state the vendor drops to 8 mA (SDR104
-	 * code 3), so state_uhs uses mmc1_pins_uhs below. The microSD slot is
-	 * untested (no card), so these are nominal values. Card detect is
-	 * GPIO67 (vendor EINT6), internal pull-up.
+	 * Pull and drive values follow the vendor aeon6797_6m_n.dts mmc1 groups
+	 * (cmd/dat pull-up, clk pull-down; drive-strength is written as a raw
+	 * MT6797 register code as on all MT6797 pads). Card detect is GPIO67
+	 * (vendor EINT6) with an internal pull-up.
 	 */
 	mmc1_pins_default: mmc1-default-pins {
 		pins-cmd-dat {
@@ -461,31 +350,13 @@
 				 <MT6797_GPIO132__FUNC_MSDC1_DAT2>,
 				 <MT6797_GPIO133__FUNC_MSDC1_DAT3>,
 				 <MT6797_GPIO129__FUNC_MSDC1_CMD>;
-			drive-strength = <12>;
+			drive-strength = <4>;
 			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
 		};
 
 		pins-clk {
 			pinmux = <MT6797_GPIO134__FUNC_MSDC1_CLK>;
-			drive-strength = <12>;
-			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
-		};
-	};
-
-	mmc1_pins_uhs: mmc1-uhs-pins {
-		pins-cmd-dat {
-			pinmux = <MT6797_GPIO130__FUNC_MSDC1_DAT0>,
-				 <MT6797_GPIO131__FUNC_MSDC1_DAT1>,
-				 <MT6797_GPIO132__FUNC_MSDC1_DAT2>,
-				 <MT6797_GPIO133__FUNC_MSDC1_DAT3>,
-				 <MT6797_GPIO129__FUNC_MSDC1_CMD>;
-			drive-strength = <8>;
-			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
-		};
-
-		pins-clk {
-			pinmux = <MT6797_GPIO134__FUNC_MSDC1_CLK>;
-			drive-strength = <8>;
+			drive-strength = <4>;
 			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
 		};
 	};
@@ -516,17 +387,7 @@
 	pinctrl-0 = <&mmc0_pins_default>;
 	pinctrl-1 = <&mmc0_pins_default>;
 	bus-width = <8>;
-	/*
-	 * HS DDR at 52 MHz, 1.8 V I/O (vqmmc is the fixed 1.8 V VIO18 rail).
-	 * DDR52 needs no read tuning - the mmc core selects it via
-	 * mmc_select_hs_ddr(), which never calls ->execute_tuning() - so this
-	 * mode sidesteps the HS200 192 MHz multi-block-read CRC/retune problem.
-	 * mtk-sd drives the MSDC_CFG CKMOD DDR mode (mode 0x2) for DDR52 on the
-	 * mt6797 12-bit clk-div layout, so this is the mainline-proper fallback.
-	 */
-	max-frequency = <52000000>;
-	cap-mmc-highspeed;
-	mmc-ddr-1_8v;
+	max-frequency = <25000000>;
 	vmmc-supply = <&mt6351_vemc_reg>;
 	vqmmc-supply = <&mt6351_vio18_reg>;
 	non-removable;
@@ -538,7 +399,7 @@
 &mmc1 {
 	pinctrl-names = "default", "state_uhs";
 	pinctrl-0 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
-	pinctrl-1 = <&mmc1_pins_uhs>, <&mmc1_cd_pins>;
+	pinctrl-1 = <&mmc1_pins_default>, <&mmc1_cd_pins>;
 	bus-width = <4>;
 	max-frequency = <200000000>;
 	cap-sd-highspeed;
@@ -628,8 +489,9 @@
 			 * active vsel register. The minimum is the voltage the
 			 * CCI needs at its bootloader frequency (~630 MHz -> the
 			 * 676 MHz / 1.04 V SB OPP), so the rail is not pulled
-			 * below what the CCI, which is not yet a DVFS consumer,
-			 * requires when the clusters scale down. The maximum is
+			 * below what the CCI needs when the clusters scale down -- the
+			 * CCI is now a devfreq consumer that otherwise holds buck A at
+			 * its own frequency's voltage. The maximum is
 			 * the vendor Vproc ceiling (MAX_VPROC_VOLT, 1.20 V): with
 			 * the on-SoC CPU SRAM LDO now wired as the Vsram supply,
 			 * the CPU and CCI drivers keep Vsram >= Vproc, so Vproc is
@@ -665,16 +527,18 @@
 			 * this unit the bootloader enables it (at the 1.00 V
 			 * boot value) and powers the cluster before booting
 			 * Linux, and the Cortex-A72 cores then run on it for the
-			 * whole boot. There is no CPU_OFF path for the A72 (the
-			 * vendor warns taking the last A72 offline can hang the
-			 * SoC), so the cores are never offlined and the rail must
-			 * never be disabled under them: it is therefore boot-on
-			 * and always-on. cpufreq still scales it between the
-			 * limits. The minimum is the bootloader value (1.00 V,
-			 * the floor the cluster boots at); the maximum is the
-			 * 1.09 V cap on the Cortex-A72 OPPs, kept below the fixed
-			 * 1.10 V B SRAM LDO so Vsram stays >= Vproc. The ramp
-			 * delay matches the DA9214 buck A rail.
+			 * whole boot. Keep the rail boot-on and always-on so it
+			 * stays up under the running cluster and the regulator core
+			 * never disables an apparently unused supply; cpufreq still
+			 * scales it between the limits. (The vendor warns that taking
+			 * the last A72 offline can hang the SoC; this board never
+			 * offlines it, and actually preventing a CPU_OFF is a separate
+			 * concern left to the follow-up PSCI patches, not relied on
+			 * here.) The minimum is the bootloader value (1.00 V, the
+			 * floor the cluster boots at); the maximum is the 1.09 V cap
+			 * on the Cortex-A72 OPPs, kept below the fixed 1.10 V B SRAM
+			 * LDO so Vsram stays >= Vproc. The ramp delay matches the
+			 * DA9214 buck A rail.
 			 */
 			da9214_buckb: BUCKB {
 				regulator-name = "vproc-big";
@@ -699,8 +563,7 @@
 		reg = <0x1c>;
 		regulator-name = "vgpu";
 		regulator-min-microvolt = <862500>;
-		/* Raised from the 700 MHz point to cover the 900 MHz bin OPP. */
-		regulator-max-microvolt = <1156250>;
+		regulator-max-microvolt = <1131250>;
 		regulator-ramp-delay = <32000>;
 	};
 };
@@ -726,21 +589,6 @@
 	 * mount-matrix is the vendor coordinate direction 7 (aeon6797_6m_n.dts
 	 * cust_accel@1/cust_gyro@1) expanded through the MediaTek hwmsen
 	 * conversion table (sign {-1,-1,-1}, axis map {1,0,2}).
-	 *
-	 * The data-ready interrupt is not described: it is wired to GPIO65,
-	 * but the earlier interrupts-extended = <&pio 4> (EINT4) /
-	 * interrupt-names = "INT1" never fired under a buffered capture (EINT4
-	 * count stayed 0). Two things are still unproven on hardware and must
-	 * be settled before the IRQ is re-added (see docs/integ-next7.md):
-	 * GPIO65 needs its pinctrl muxed to EINT4 (the working keyboard EINT10
-	 * node selects MT6797_GPIO87__FUNC_EINT10; fix34 added no such state),
-	 * and which physical BMI160 pin (INT1 or INT2) the board routes to
-	 * GPIO65 is not established by the vendor tree (it polled and
-	 * programmed neither INT output). Until both are confirmed the driver
-	 * uses polled reads, which work. No supply is described either: the
-	 * vendor cust_accel@1/cust_gyro@1 both use power_id = <0xffff> (no
-	 * switchable MT6351 LDO), so the chip runs off a fixed always-on rail
-	 * whose identity is not established here (the dummy regulator covers it).
 	 */
 	bmi160: imu@69 {
 		compatible = "bosch,bmi160";
@@ -805,7 +653,7 @@
 	 * polls. The port is sink-only here; DRP using the BQ25896 boost
 	 * (usb-otg-vbus) as vbus-supply is left for later.
 	 */
-	left_typec: typec@25 {
+	typec@25 {
 		compatible = "onnn,fusb301";
 		reg = <0x25>;
 
@@ -878,8 +726,6 @@
 
 		pins-irq {
 			pinmux = <MT6797_GPIO87__FUNC_EINT10>;
-			/* AW9523 INT is open-drain active-low */
-			bias-pull-up;
 		};
 	};
 };
@@ -928,8 +774,6 @@
 		pinctrl-names = "default";
 		gpio-activelow;
 		drive-inactive-cols;
-		debounce-delay-ms = <5>;
-		col-scan-delay-us = <2>;
 		pinctrl-0 = <&keyboard_matrix_row_pins
 				     &keyboard_matrix_col_pins>;
 		row-gpios = <&aw9523 0 GPIO_ACTIVE_HIGH>,
@@ -1000,14 +844,8 @@
 			MATRIX_KEY(4, 6, KEY_LEFTCTRL)
 			MATRIX_KEY(5, 6, KEY_L)
 			MATRIX_KEY(6, 6, KEY_0)>;
-		/*
-		 * The row lines are AW9523 inputs whose change-of-state
-		 * interrupt is multiplexed onto the expander INT pin
-		 * (SoC GPIO87 / EINT10). matrix_keypad takes the per-row
-		 * interrupts from the AW9523 nested irqchip, so the scan is
-		 * driven by key presses instead of being polled.
-		 */
-		wakeup-source;
+		/* The AW9523 interrupt (EINT10) never fires on key presses. */
+		poll-interval = <20>;
 	};
 };
 
@@ -1112,12 +950,9 @@
 	 * does not reprogram them. The 1.3 A boost current limit matches the
 	 * value the vendor firmware writes.
 	 *
-	 * The vendor kernel never resets the charger, so use linux,skip-reset to
-	 * keep the bootloader's setup. The BQ25896 has no D+/D- connection; a
-	 * register reset (REG_RST) instead reloads every register to its default
-	 * - IINLIM back to 500 mA, EN_HIZ, the I2C watchdog and CONV_RATE - and
-	 * restarts the converter, which can glitch VBUS and disturb an already
-	 * enumerated MTU3 gadget.
+	 * The vendor kernel never resets the charger. A register reset makes
+	 * the BQ25896 re-run D+/D- detection on the left USB-C data lines,
+	 * which knocks an already enumerated MTU3 gadget off the host.
 	 */
 	charger: charger@6b {
 		compatible = "ti,bq25896", "ti,bq25890";
@@ -1125,13 +960,6 @@
 		linux,skip-reset;
 
 		monitored-battery = <&battery>;
-
-		/*
-		 * PSEL is strapped high, so the BQ25896 reports USB SDP (500 mA)
-		 * for every source. Take the input current limit from the current
-		 * the left USB-C port's source advertises through its Rp resistor.
-		 */
-		power-supplies = <&left_typec>;
 
 		ti,battery-regulation-voltage = <4416000>;
 		ti,charge-current = <2048000>;
@@ -1366,7 +1194,6 @@
 			linux,code = <SW_LID>;
 			gpios = <&pio 66 GPIO_ACTIVE_LOW>;
 			debounce-interval = <64>;
-			wakeup-source;
 		};
 	};
 };
@@ -1456,37 +1283,16 @@
 		mediatek,pwm-deb-setting = <0x500 0x500 1 0x1f0 0x800 0x800 0x20>;
 		mediatek,three-key-thr = <0 80 220 400>;
 	};
-
-	fuel-gauge {
-		compatible = "mediatek,mt6351-fuel-gauge";
-		/*
-		 * Power-path design: the battery voltage is the AUXADC ISENSE
-		 * channel (battery side of the BQ25896), which is also the
-		 * channel the vendor OCV profile was built against.
-		 */
-		io-channels = <&pmic_adc MT6351_AUXADC_ISENSE>;
-		io-channel-names = "vbat";
-		monitored-battery = <&battery>;
-		power-supplies = <&charger>;
-		/* R_FG 10 mOhm / CAR_TUNE 1.15 (battery_meter_hal.c). */
-		shunt-resistor-micro-ohms = <8696>;
-	};
 };
 
 &rtc {
 	/*
-	 * Forward boot-mode requests through the RTC PDN1 spare bits, which
-	 * survive a warm reset. "reboot recovery" sets the factory-reset /
-	 * recovery field, which LK reads to boot the recovery partition.
-	 *
-	 * "reboot bootloader" sets the fast-boot bit (0x2000). This device's
-	 * LK compiles its own bit-13 reader out (fastboot support off, verified
-	 * on hardware), but the chainloaded U-Boot runs after LK, reads the bit
-	 * and enters fastboot, then clears it - so describing it here makes
-	 * unattended "reboot bootloader" land in fastboot with no key presses.
+	 * Forward "reboot recovery" to LK through the RTC PDN1 factory-reset /
+	 * recovery field. The fast-boot bit (0x2000, "reboot bootloader") is
+	 * not described because this device's LK does not read it (fastboot
+	 * support is compiled out), verified on hardware.
 	 */
 	mode-recovery = <0x10>;
-	mode-bootloader = <0x2000>;
 };
 
 &{/} {

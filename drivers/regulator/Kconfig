@@ -890,18 +890,6 @@ config REGULATOR_MT6311
 	  This driver supports the control of different power rails of device
 	  through regulator interface.
 
-config REGULATOR_MT6797_CPU_SRAM
-	tristate "MediaTek MT6797 CPU SRAM LDO"
-	depends on ARCH_MEDIATEK || COMPILE_TEST
-	depends on OF
-	select REGMAP
-	select MFD_SYSCON
-	help
-	  Say y here to enable the on-SoC CPU SRAM LDO regulator of the
-	  MediaTek MT6797. It controls the Vsram rail of the Cortex-A53
-	  clusters and the CCI, which lives in the always-on infracfg block,
-	  and lets the CPU and CCI frequency drivers do Vsram/Vproc tracking.
-
 config REGULATOR_MT6315
 	tristate "MediaTek MT6315 PMIC"
 	depends on SPMI
@@ -1030,6 +1018,18 @@ config REGULATOR_MT6397
 	  MediaTek MT6397 PMIC.
 	  This driver supports the control of different power rails of device
 	  through regulator interface.
+
+config REGULATOR_MT6797_CPU_SRAM
+	tristate "MediaTek MT6797 CPU SRAM LDO"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	select REGMAP
+	select MFD_SYSCON
+	help
+	  Say y here to enable the on-SoC CPU SRAM LDO regulator of the
+	  MediaTek MT6797. It controls the Vsram rail of the Cortex-A53
+	  clusters and the CCI, which lives in the always-on infracfg block,
+	  and lets the CPU and CCI frequency drivers do Vsram/Vproc tracking.
 
 config REGULATOR_MTK_DVFSRC
 	tristate "MediaTek DVFSRC regulator driver"
