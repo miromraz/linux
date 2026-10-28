@@ -1224,17 +1224,25 @@
 
 			mfg_async: power-domain@MT6797_POWER_DOMAIN_MFG_ASYNC {
 				reg = <MT6797_POWER_DOMAIN_MFG_ASYNC>;
+				/*
+				 * CLK_TOP_MUX_MFG (mfg_sel) is the MFGSYS register-
+				 * interface clock; genpd enables the basic (dash-free)
+				 * clocks on power-on, so list it here to keep the MFG
+				 * register bus alive while the domain is accessed.
+				 */
 				clocks = <&topckgen CLK_TOP_MUX_MFG_52M>,
-					 <&infrasys CLK_INFRA_MFG_VCG>;
-				clock-names = "mfg", "mfg_vcg";
+					 <&infrasys CLK_INFRA_MFG_VCG>,
+					 <&topckgen CLK_TOP_MUX_MFG>;
+				clock-names = "mfg", "mfg_vcg", "mfg_mux";
 				#address-cells = <1>;
 				#size-cells = <0>;
 				#power-domain-cells = <1>;
 
 				power-domain@MT6797_POWER_DOMAIN_MFG {
 					reg = <MT6797_POWER_DOMAIN_MFG>;
-					clocks = <&topckgen CLK_TOP_MUX_MFG_52M>;
-					clock-names = "mfg";
+					clocks = <&topckgen CLK_TOP_MUX_MFG_52M>,
+						 <&topckgen CLK_TOP_MUX_MFG>;
+					clock-names = "mfg", "mfg_mux";
 					#address-cells = <1>;
 					#size-cells = <0>;
 					#power-domain-cells = <1>;
