@@ -59,6 +59,19 @@ int machine_kexec_prepare(struct kimage *kimage)
 		return -EBUSY;
 	}
 
+	/*
+	 * A regular kexec offlines every secondary CPU via
+	 * smp_shutdown_nonboot_cpus() before the jump. A CPU whose firmware
+	 * cannot power it off cannot be offlined, so that path would BUG_ON()
+	 * once it fails to bring the CPU down. Refuse the load instead. A crash
+	 * kexec parks CPUs in a loop rather than calling CPU_OFF, so it is still
+	 * allowed.
+	 */
+	if (kimage->type != KEXEC_TYPE_CRASH && psci_broken_cpu_off_online()) {
+		pr_err("Can't kexec: online CPUs cannot be powered off by firmware.\n");
+		return -EBUSY;
+	}
+
 	return 0;
 }
 
