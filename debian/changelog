@@ -1,5 +1,5 @@
-linux-gemini (7.1.3-mt6797-1) trixie; urgency=low
+linux-gemini-dtcheck-c06 (1~dtcheck1) unstable; urgency=low
 
-  * Gemini PDA kernel built on OBS.
+  * MT6797 cpufreq v8 per-commit DT binding check (c06).
 
- -- Miroslav Mraz <mraz.miro@seznam.cz>  Sun, 04 Oct 2026 12:00:00 +0200
+ -- Miroslav Mraz <miroslav.mraz@techmania.cz>  Wed, 28 Oct 2026 00:00:00 +0000
