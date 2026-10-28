@@ -176,12 +176,29 @@
 			#cooling-cells = <2>;
 		};
 
+		/*
+		 * The Cortex-A72 ("big") cluster. It is clocked by the
+		 * SMC-backed A72 ARMPLL in the MCUMIXED controller (cell
+		 * CLK_MCU_ARMPLLDIV_B is the CPU-clock mux, with clk26m as the
+		 * cpufreq intermediate). Its cpu-supply lives on the board, so a
+		 * board enables DVFS by wiring the supply once the rail that
+		 * powers the cluster is up; on this SoC's boards the bootloader
+		 * brings that rail up before Linux.
+		 * cpu8 is the cluster-2 cpufreq policy leader and so the
+		 * cluster's cpufreq cooling device.
+		 */
 		cpu8: cpu@200 {
 			device_type = "cpu";
 			compatible = "arm,cortex-a72";
 			enable-method = "psci";
 			reg = <0x200>;
 			capacity-dmips-mhz = <1024>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster2_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 
 		cpu9: cpu@201 {
@@ -190,6 +207,12 @@
 			enable-method = "psci";
 			reg = <0x201>;
 			capacity-dmips-mhz = <1024>;
+			clocks = <&mcumixed CLK_MCU_ARMPLLDIV_B>, <&clk26m>;
+			clock-names = "cpu", "intermediate";
+			operating-points-v2 = <&cluster2_opp>;
+			nvmem-cells = <&cpu_speed_bin>;
+			nvmem-cell-names = "speed_grade";
+			#cooling-cells = <2>;
 		};
 	};
 
@@ -233,13 +256,15 @@
 				map0 {
 					trip = <&cpu_passive>;
 					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 
 				map1 {
 					trip = <&cpu_hot>;
 					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -508,11 +533,11 @@
 		};
 
 		/*
-		 * L bin. The CCI shares buck A, is not a DVFS consumer, and on
-		 * the L bin needs 1.09 V at its bootloader frequency (~630 MHz,
-		 * CCI_L idx4 637 MHz). Pin every L-bin cluster OPP at 1.09 V so
-		 * the L-cluster consumer holds the shared rail at 1.09 V while
-		 * cpufreq runs, instead of relying only on the board floor.
+		 * L bin: the vendor VPROC1_L column pins every L-bin cluster OPP
+		 * at 1.09 V, so they are pinned here too. The CCI is on the same
+		 * buck A rail but is now its own devfreq consumer, with Vsram on
+		 * the CPU SRAM LDO, so it holds the rail at its own frequency's
+		 * voltage rather than depending on the cluster or the board floor.
 		 */
 		opp-1274000000-2 {
 			opp-hz = /bits/ 64 <1274000000>;
@@ -557,6 +582,170 @@
 	};
 
 	/*
+	 * Cortex-A72 ("big") cluster OPPs from the vendor per-bin iDVFS tables
+	 * (mt_cpufreq.c, legacy VPROC2 columns; B_FY, B_SB and B_L are the
+	 * per-bin frequency columns and opp-supported-hw selects the efuse bin).
+	 * The B SRAM rail is SMC-fixed at 1.10 V -- there is no Vsram tracking on
+	 * the B cluster yet -- so Vproc is capped below it, as for the Cortex-A53
+	 * clusters: the top OPPs sit at 1.07 V (FY/M and L) and 1.08 V (SB), a
+	 * 20-30 mV margin that grows at lower OPPs. opp-supported-hw groups the
+	 * efuse func codes per bin (FY/M shared = 0x7fad, SB = 0x0052, L = 0x8000),
+	 * matching the Cortex-A53 tables. Unlike the A53 L cluster -- whose vendor
+	 * VPROC1_L column pins every OPP at 1.09 V -- the A72 VPROC2_L column has
+	 * its own per-frequency voltages, so the L-bin OPPs below carry them (the
+	 * B_L frequencies that stay <= 1.09 V, dropping the deepest idle point as
+	 * the FY/M and SB tables do), not a flat pin.
+	 *
+	 * The vendor Vproc values below the board buck-B 1.00 V floor are kept
+	 * as the honest energy-model input and written as <target target
+	 * 1090000> triplets: _opp_supported_by_regulators disables an OPP whose
+	 * whole [min, max] range is below the regulator minimum, so each range
+	 * must overlap buck B's [1.00, 1.09] V. The buck-B core then clamps the
+	 * delivered Vproc up to its 1.00 V floor at runtime; the voltage is not
+	 * pinned here.
+	 */
+	cluster2_opp: opp-table-cluster2 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		/* FY / M bins (shared) */
+		opp-1781000000 {
+			opp-hz = /bits/ 64 <1781000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1677000000 {
+			opp-hz = /bits/ 64 <1677000000>;
+			opp-microvolt = <1050000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1495000000 {
+			opp-hz = /bits/ 64 <1495000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1378000000 {
+			opp-hz = /bits/ 64 <1378000000>;
+			opp-microvolt = <980000 980000 1090000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1248000000 {
+			opp-hz = /bits/ 64 <1248000000>;
+			opp-microvolt = <950000 950000 1090000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1131000000 {
+			opp-hz = /bits/ 64 <1131000000>;
+			opp-microvolt = <930000 930000 1090000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-1001000000 {
+			opp-hz = /bits/ 64 <1001000000>;
+			opp-microvolt = <900000 900000 1090000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-845000000 {
+			opp-hz = /bits/ 64 <845000000>;
+			opp-microvolt = <880000 880000 1090000>;
+			opp-supported-hw = <0x7fad>;
+		};
+		opp-676000000 {
+			opp-hz = /bits/ 64 <676000000>;
+			opp-microvolt = <850000 850000 1090000>;
+			opp-supported-hw = <0x7fad>;
+		};
+
+		/* SB bin */
+		opp-1885000000-1 {
+			opp-hz = /bits/ 64 <1885000000>;
+			opp-microvolt = <1080000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1677000000-1 {
+			opp-hz = /bits/ 64 <1677000000>;
+			opp-microvolt = <1040000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1495000000-1 {
+			opp-hz = /bits/ 64 <1495000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1378000000-1 {
+			opp-hz = /bits/ 64 <1378000000>;
+			opp-microvolt = <980000 980000 1090000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1131000000-1 {
+			opp-hz = /bits/ 64 <1131000000>;
+			opp-microvolt = <930000 930000 1090000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-1001000000-1 {
+			opp-hz = /bits/ 64 <1001000000>;
+			opp-microvolt = <900000 900000 1090000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-845000000-1 {
+			opp-hz = /bits/ 64 <845000000>;
+			opp-microvolt = <880000 880000 1090000>;
+			opp-supported-hw = <0x0052>;
+		};
+		opp-676000000-1 {
+			opp-hz = /bits/ 64 <676000000>;
+			opp-microvolt = <850000 850000 1090000>;
+			opp-supported-hw = <0x0052>;
+		};
+
+		/* L bin */
+		opp-1339000000-2 {
+			opp-hz = /bits/ 64 <1339000000>;
+			opp-microvolt = <1070000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-1261000000-2 {
+			opp-hz = /bits/ 64 <1261000000>;
+			opp-microvolt = <1050000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-1092000000-2 {
+			opp-hz = /bits/ 64 <1092000000>;
+			opp-microvolt = <1000000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-949000000-2 {
+			opp-hz = /bits/ 64 <949000000>;
+			opp-microvolt = <980000 980000 1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-897000000-2 {
+			opp-hz = /bits/ 64 <897000000>;
+			opp-microvolt = <950000 950000 1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-793000000-2 {
+			opp-hz = /bits/ 64 <793000000>;
+			opp-microvolt = <930000 930000 1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-702000000-2 {
+			opp-hz = /bits/ 64 <702000000>;
+			opp-microvolt = <900000 900000 1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-598000000-2 {
+			opp-hz = /bits/ 64 <598000000>;
+			opp-microvolt = <880000 880000 1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+		opp-507000000-2 {
+			opp-hz = /bits/ 64 <507000000>;
+			opp-microvolt = <850000 850000 1090000>;
+			opp-supported-hw = <0x8000>;
+		};
+	};
+
+	/*
 	 * The "intermediate" clock the CCI parks on while its PLL relocks is
 	 * the 26 MHz oscillator (the only alternate parent the CCI ARMPLLDIV
 	 * mux exposes). The vendor instead parks on mainpll (mt_cpufreq.c
@@ -583,8 +772,9 @@
 	 * and CCI_SB columns). The CCI shares the DA9214 buck A rail with the
 	 * two Cortex-A53 clusters; making it a devfreq consumer lets it hold
 	 * that rail at the voltage its own frequency needs, instead of the
-	 * board pinning a fixed floor. Entries are capped at 1.09 V (Vproc
-	 * stays below the fixed 1.10 V SRAM LDO, as for the clusters) and stop
+	 * board pinning a fixed floor. Vsram here is the CPU SRAM LDO (cpu_sram,
+	 * tracked 1.15-1.20 V), not the fixed B SRAM LDO; entries take the vendor
+	 * CCI-table voltages (up to 1.09 V) and stop
 	 * near 500 MHz, below which the CCI PLL would need a /4 post divider the
 	 * MCUMIXED clock driver does not model. opp-supported-hw groups the
 	 * efuse func codes per bin, as in the cluster tables (FY/M, SB and the
