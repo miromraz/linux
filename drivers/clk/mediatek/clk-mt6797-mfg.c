@@ -19,9 +19,19 @@ static const struct mtk_gate mfg_clks[] = {
 	/*
 	 * Propagate rate requests to mfg_sel/MFGPLL so the GPU devfreq OPPs
 	 * reach the PLL, matching the MT8183 MFG gate.
+	 *
+	 * CLK_IGNORE_UNUSED: this gate lives in the MFGSYS register block,
+	 * which sits behind the MFG power domain. That domain is brought up
+	 * by the Mali GPU driver (with its Vgpu supply) only at runtime.
+	 * clk_disable_unused() runs at late_initcall, before the GPU driver
+	 * binds, so the MFG domain is not guaranteed powered; clk_core_is_enabled()
+	 * then reads this gate's register over a dead APB bus and the read
+	 * never returns, wedging the boot. (This is why the board needed
+	 * clk_ignore_unused.) Leave the gate to the GPU driver.
 	 */
 	GATE_MTK_FLAGS(CLK_MFG_BG3D, "mfg_bg3d", "mfg_sel", &mfg_cg_regs, 0,
-		       &mtk_clk_gate_ops_setclr, CLK_SET_RATE_PARENT),
+		       &mtk_clk_gate_ops_setclr,
+		       CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED),
 };
 
 static const struct mtk_clk_desc mfg_desc = {
