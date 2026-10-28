@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/regulator/consumer.h>
+#include <linux/units.h>
 
 struct mtk_cpufreq_platform_data {
 	int min_volt_shift;
@@ -24,6 +25,14 @@ struct mtk_cpufreq_platform_data {
 	int sram_min_volt;
 	int sram_max_volt;
 	bool ccifreq_supported;
+	/*
+	 * The cluster ARMPLL is driven by firmware (an SMC/SiP call) rather than
+	 * by register writes, so clk_set_rate() cannot report a rate the firmware
+	 * silently refused. Only such a platform needs the post-set rate readback
+	 * in .set_target() and the initial-OPP sync in .init below; register-PLL
+	 * SoCs are left untouched.
+	 */
+	bool firmware_pll;
 };
 
 /*
@@ -288,6 +297,33 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		dev_err(cpu_dev,
 			"cpu%d: failed to re-parent cpu clock!\n", policy->cpu);
 		mtk_cpufreq_set_voltage(info, inter_vproc);
+		goto out;
+	}
+
+	/*
+	 * A firmware-backed ARMPLL (see mtk_cpufreq_platform_data.firmware_pll)
+	 * can silently refuse a rate change: the clk core discards .set_rate()'s
+	 * return value, so clk_set_rate() above returned 0 even if the SMC failed
+	 * and the PLL stayed at its old, higher rate. Read the rate back before
+	 * scaling Vproc down -- the clock reports its last good rate, so a large
+	 * mismatch means the PLL is still fast and lowering Vproc now would
+	 * undervolt the cluster.
+	 *
+	 * No clock recovery is needed: the firmware set_rate was the no-op, so the
+	 * PLL is already at that last-good rate and cpu_clk is still parented to
+	 * it. Just restore Vproc and bail; the policy-init OPP sync (the only
+	 * caller that can hit this) drops the policy on the error.
+	 *
+	 * A whole-OPP mismatch (tens to hundreds of MHz) is a genuinely unapplied
+	 * rate; the firmware PLL caches the exact programmed MHz, so a success
+	 * matches within the sub-MHz window.
+	 */
+	if (info->soc_data->firmware_pll &&
+	    abs((long)clk_get_rate(cpu_clk) - freq_hz) >= HZ_PER_MHZ) {
+		dev_err(cpu_dev, "cpu%d: cpu clock rate was not applied!\n",
+			policy->cpu);
+		mtk_cpufreq_set_voltage(info, pre_vproc);
+		ret = -EIO;
 		goto out;
 	}
 
@@ -763,6 +799,7 @@ static const struct mtk_cpufreq_platform_data mt6797_platform_data = {
 	.sram_min_volt = 1000000,
 	.sram_max_volt = 1200000,
 	.ccifreq_supported = false,
+	.firmware_pll = true,
 };
 
 static const struct mtk_cpufreq_platform_data mt7622_platform_data = {
