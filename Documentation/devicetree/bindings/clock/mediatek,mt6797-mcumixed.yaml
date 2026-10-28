@@ -25,9 +25,12 @@ description:
 
   Scaling the Cortex-A72 ARMPLL therefore depends on the platform secure
   firmware (ARM Trusted Firmware) implementing the MediaTek iDVFS SIP
-  calls. On an MT6797 whose firmware does not provide them the A72 ARMPLL
-  cannot be driven; the register-mapped Cortex-A53 and CCI clocks do not
-  need any firmware support.
+  calls. The set-frequency call is MTK_SIP_SMC_CMD(0x3B8) (the vendor
+  BigiDVFSPllSetFreq, frequency in MHz); there is no reliable read-back SIP,
+  so the programmed rate is not recoverable from firmware once set. On an
+  MT6797 whose firmware does not provide these calls the A72 ARMPLL cannot
+  be driven; the register-mapped Cortex-A53 and CCI clocks do not need any
+  firmware support.
 
   The clock indices are defined in
   include/dt-bindings/clock/mt6797-clk.h.

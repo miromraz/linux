@@ -22,55 +22,62 @@
 #include <asm/smp_plat.h>
 
 /*
- * CPUs whose firmware advertises PSCI CPU_OFF but cannot actually power them
- * down (listed in the PSCI node's "mediatek,broken-cpu-off-cpus" phandle
- * list). Issuing CPU_OFF to such a CPU wedges it instead of parking it and
- * hangs the SoC; these CPUs are therefore never offlined and never CPU_OFF'd.
- * Parsed once at init so the hotplug/crash paths only test a cpumask and never
- * walk the device tree (which takes devtree_lock and could deadlock in NMI /
- * crash context).
+ * Some closed EL3 firmware advertises the PSCI CPU_OFF function but cannot
+ * actually power a given CPU down. On the MediaTek MT6797 the Cortex-A72 "B"
+ * cluster is powered up out-of-band by the bootloader, and the vendor TF-A it
+ * ships (there is no upstream replacement) has no pwr_domain_off for it, yet
+ * still exposes standard CPU_OFF. Issuing CPU_OFF to such a CPU wedges it in
+ * EL3 and hangs the SoC until the watchdog resets it.
+ *
+ * There is no PSCI-level or firmware-level way to discover this, so the
+ * affected CPUs are keyed off the SoC root compatible: on a matching machine
+ * every CPU in the named MPIDR affinity-level-1 cluster is flagged. The set is
+ * computed once at init into a cpumask, so the hotplug and crash paths only
+ * test a mask and never walk the device tree (which takes devtree_lock and
+ * could deadlock in NMI/crash context). Flagged CPUs are kept non-removable
+ * and are never CPU_OFF'd.
+ *
+ * This is deliberately narrow and self-contained -- no DT binding and no
+ * generic PSCI property -- because the proper home for the power sequence is
+ * firmware (TF-A pwr_domain_off); this only works around an unreplaceable
+ * firmware's limitation on one SoC.
  */
+struct psci_cpu_off_broken_soc {
+	const char	*compatible;
+	u32		aff1;	/* MPIDR affinity level 1 of the broken cluster */
+};
+
+static const struct psci_cpu_off_broken_soc psci_cpu_off_broken_socs[] __initconst = {
+	{ "mediatek,mt6797", 2 },	/* Cortex-A72 "B" cluster (cpu@200/@201) */
+	{ /* sentinel */ }
+};
+
 static cpumask_t psci_cpu_off_broken_mask __ro_after_init;
 
 static void __init psci_init_cpu_off_broken(void)
 {
-	struct device_node *np, *cpu_np;
-	int i, n;
+	const struct psci_cpu_off_broken_soc *soc;
+	unsigned int cpu;
 
-	np = of_find_node_with_property(NULL, "mediatek,broken-cpu-off-cpus");
-	if (!np)
-		return;
-
-	n = of_count_phandle_with_args(np, "mediatek,broken-cpu-off-cpus", NULL);
-	for (i = 0; i < n; i++) {
-		u64 hwid;
-		int cpu;
-
-		cpu_np = of_parse_phandle(np, "mediatek,broken-cpu-off-cpus", i);
-		if (!cpu_np)
+	for (soc = psci_cpu_off_broken_socs; soc->compatible; soc++) {
+		if (!of_machine_is_compatible(soc->compatible))
 			continue;
 
 		/*
 		 * This runs from cpu_psci_cpu_init() during smp_init_cpus(),
-		 * before the CPUs are added to the possible mask, so
-		 * of_cpu_node_to_id() (which walks for_each_possible_cpu())
-		 * cannot resolve them yet. Match the MPIDR against the logical
-		 * map, which of_parse_and_init_cpus() has already populated.
+		 * before the CPUs are added to the possible mask, so iterate
+		 * the logical map directly (of_parse_and_init_cpus() has
+		 * already populated it).
 		 */
-		hwid = of_get_cpu_hwid(cpu_np, 0);
-		of_node_put(cpu_np);
-		if (hwid == INVALID_HWID)
-			continue;
-
 		for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
-			if (cpu_logical_map(cpu) == hwid) {
+			u64 mpidr = cpu_logical_map(cpu);
+
+			if (mpidr == INVALID_HWID)
+				continue;
+			if (MPIDR_AFFINITY_LEVEL(mpidr, 1) == soc->aff1)
 				cpumask_set_cpu(cpu, &psci_cpu_off_broken_mask);
-				break;
-			}
 		}
 	}
-
-	of_node_put(np);
 
 	if (!cpumask_empty(&psci_cpu_off_broken_mask))
 		pr_info("firmware cannot CPU_OFF CPUs %*pbl; keeping them non-removable\n",
@@ -82,7 +89,7 @@ static void __init psci_init_cpu_off_broken(void)
  * kexec offlines every secondary CPU before the jump, which such a CPU cannot
  * survive, so the kexec load is refused (see machine_kexec_prepare()).
  */
-bool psci_has_broken_cpu_off_online(void)
+bool psci_broken_cpu_off_online(void)
 {
 	return cpumask_intersects(cpu_online_mask, &psci_cpu_off_broken_mask);
 }

@@ -1,3 +1,15 @@
+linux-gemini (7.1.3-mt6797-next39) trixie; urgency=low
+
+  * MT6797 cpufreq series v8 (v7 review rework).
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Wed, 28 Oct 2026 00:00:00 +0000
+
+linux-gemini (7.1.3-mt6797-next37) trixie; urgency=low
+
+  * MT6797 cpufreq series v7 (v6 review rework).
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Wed, 28 Oct 2026 00:00:00 +0000
+
 linux-gemini (7.1.3-mt6797-1) trixie; urgency=low
 
   * Gemini PDA kernel built on OBS.

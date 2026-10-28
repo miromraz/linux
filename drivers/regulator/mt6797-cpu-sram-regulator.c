@@ -37,6 +37,14 @@
 
 #define MT6797_CPULDO_EN_MASK		GENMASK(7, 0)
 #define MT6797_CPULDO_VOLT_MASK		GENMASK(3, 0)
+/*
+ * One CTRL word packs four per-LDO VOLT fields, each in bits [3:0] of its byte.
+ * Update only those fields; a full-word write would clobber the [7:4] nibbles.
+ */
+#define MT6797_CPULDO_VOLT_FIELDS_MASK	(MT6797_CPULDO_VOLT_MASK | \
+					 (MT6797_CPULDO_VOLT_MASK << 8) | \
+					 (MT6797_CPULDO_VOLT_MASK << 16) | \
+					 (MT6797_CPULDO_VOLT_MASK << 24))
 
 /* Voltage code 7 == 1.00 V, 25 mV per code, up to code 15 == 1.20 V. */
 #define MT6797_CPULDO_MIN_SEL		7
@@ -51,11 +59,13 @@ static int mt6797_cpu_sram_set_voltage_sel(struct regulator_dev *rdev,
 	unsigned int packed = code | (code << 8) | (code << 16) | (code << 24);
 	int ret;
 
-	ret = regmap_write(rdev->regmap, MT6797_CPULDO_CTRL_1, packed);
+	ret = regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_1,
+				 MT6797_CPULDO_VOLT_FIELDS_MASK, packed);
 	if (ret)
 		return ret;
 
-	return regmap_write(rdev->regmap, MT6797_CPULDO_CTRL_2, packed);
+	return regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_2,
+				  MT6797_CPULDO_VOLT_FIELDS_MASK, packed);
 }
 
 static int mt6797_cpu_sram_get_voltage_sel(struct regulator_dev *rdev)
@@ -63,6 +73,11 @@ static int mt6797_cpu_sram_get_voltage_sel(struct regulator_dev *rdev)
 	unsigned int val, code;
 	int ret;
 
+	/*
+	 * Only CTRL_1 is read: this driver and the vendor firmware always
+	 * program the LDO fields of CTRL_1 and CTRL_2 in lockstep to the same
+	 * code (see set_voltage_sel()), so CTRL_1 field 0 is representative.
+	 */
 	ret = regmap_read(rdev->regmap, MT6797_CPULDO_CTRL_1, &val);
 	if (ret)
 		return ret;
@@ -71,8 +86,15 @@ static int mt6797_cpu_sram_get_voltage_sel(struct regulator_dev *rdev)
 	/* The vendor maps code 0 to 1.05 V (get_cur_volt_sram_l); report it. */
 	if (code == 0)
 		return (1050000 - MT6797_CPULDO_MIN_UV) / MT6797_CPULDO_STEP_UV;
+	/*
+	 * Codes 1..6 are below this regulator's 1.00 V table minimum and can be
+	 * left by the bootloader. The rail is always-on with a >= 1.15 V
+	 * constraint, so get_voltage_sel() must return a valid selector or
+	 * registration fails; report the nearest in-table value (selector 0,
+	 * 1.00 V) and let the core raise the rail into its constraint.
+	 */
 	if (code < MT6797_CPULDO_MIN_SEL)
-		return -EINVAL;
+		return 0;
 
 	return code - MT6797_CPULDO_MIN_SEL;
 }
