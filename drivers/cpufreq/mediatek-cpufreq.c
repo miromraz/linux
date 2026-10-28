@@ -670,7 +670,9 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 {
 	struct mtk_cpu_dvfs_info *info;
 	struct cpufreq_frequency_table *freq_table;
-	int ret;
+	struct clk *parent;
+	unsigned int cur_khz;
+	int ret, idx, i;
 
 	info = mtk_cpu_dvfs_info_lookup(policy->cpu);
 	if (!info) {
@@ -692,7 +694,60 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 	policy->driver_data = info;
 	policy->clk = info->cpu_clk;
 
+	if (info->soc_data->firmware_pll) {
+		/*
+		 * .set_target() takes clk_get_parent(cpu_clk) as the cluster
+		 * ARMPLL and calls clk_set_rate() on it, so the CPU clock must
+		 * boot parented to the ARMPLL. Refuse a mux left on an
+		 * undescribed source (reads back as no parent) or on the
+		 * intermediate clock (clk26m, whose rate requests can propagate
+		 * into a system PLL) -- either would retune the wrong clock.
+		 */
+		parent = clk_get_parent(policy->clk);
+		if (!parent || clk_is_match(parent, info->inter_clk)) {
+			dev_err(info->cpu_dev,
+				"cpu%d: CPU clock not parented to the cluster PLL\n",
+				policy->cpu);
+			ret = -ENODEV;
+			goto free_table;
+		}
+
+		/*
+		 * cpufreq_online() uses CPUFREQ_NEED_INITIAL_FREQ_CHECK to force
+		 * the CPU onto a listed OPP when it boots at an unlisted rate,
+		 * but it BUG_ON()s if that forced transition fails. A
+		 * firmware-backed ARMPLL can fail its first setpoint, so do the
+		 * sync here, where a failure drops the policy cleanly. Program
+		 * the lowest OPP at or above the boot rate (as
+		 * CPUFREQ_RELATION_L would). The firmware PLL reads back as 0
+		 * until its first .set_rate() (see clk-mt6797-mcu), so at init
+		 * cur_khz is 0 and this always selects the lowest listed OPP.
+		 */
+		cur_khz = clk_get_rate(policy->clk) / 1000;
+		idx = -1;
+		for (i = 0; freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
+			if (freq_table[i].frequency == CPUFREQ_ENTRY_INVALID)
+				continue;
+			idx = i;
+			if (freq_table[i].frequency >= cur_khz)
+				break;
+		}
+		if (idx >= 0) {
+			ret = mtk_cpufreq_set_target(policy, idx);
+			if (ret) {
+				dev_err(info->cpu_dev,
+					"cpu%d: failed to apply an initial OPP: %d\n",
+					policy->cpu, ret);
+				goto free_table;
+			}
+		}
+	}
+
 	return 0;
+
+free_table:
+	dev_pm_opp_free_cpufreq_table(info->cpu_dev, &policy->freq_table);
+	return ret;
 }
 
 static void mtk_cpufreq_exit(struct cpufreq_policy *policy)
