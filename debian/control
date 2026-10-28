@@ -1,23 +1,22 @@
-Source: linux-gemini
+Source: linux-gemini-dtcheck-c02
 Section: kernel
 Priority: optional
-Maintainer: Miroslav Mraz <mraz.miro@seznam.cz>
-Rules-Requires-Root: no
-Build-Depends: debhelper-compat (= 12)
-Build-Depends-Arch: bc, bison, flex,
- gcc-aarch64-linux-gnu <!pkg.linux-gemini.nokernelheaders>,
- kmod, libdw-dev:native, libelf-dev:native,
- libssl-dev:native, libssl-dev <!pkg.linux-gemini.nokernelheaders>,
- python3:native, rsync
-Homepage: https://www.kernel.org/
+Maintainer: Miroslav Mraz <miroslav.mraz@techmania.cz>
+Build-Depends: debhelper-compat (= 13),
+ dt-schema,
+ device-tree-compiler,
+ yamllint,
+ python3,
+ python3-libfdt,
+ bc,
+ bison,
+ flex,
+ libssl-dev,
+ libyaml-dev,
+ pkg-config
+Standards-Version: 4.6.2
 
-Package: linux-image-7.1.3-mt6797
+Package: linux-gemini-dtcheck-c02
 Architecture: arm64
-Description: Linux kernel, version 7.1.3-mt6797
- Linux kernel for the Planet Computers Gemini PDA (MediaTek MT6797).
-
-Package: linux-headers-7.1.3-mt6797
-Architecture: arm64
-Build-Profiles: <!pkg.linux-gemini.nokernelheaders>
-Description: Linux kernel headers for 7.1.3-mt6797 on arm64
- This package provides kernel header files for 7.1.3-mt6797 on arm64.
+Description: MT6797 per-commit DT binding schema check (c02)
+ Runs dt_binding_check at the c02 binding commit of the v8 series. OBS-only.
