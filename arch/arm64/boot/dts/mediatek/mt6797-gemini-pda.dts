@@ -200,6 +200,31 @@
 			       "0", "0", "-1";
 		status = "disabled";
 	};
+
+	/*
+	 * ON Semi FUSB301 autonomous Type-C controller for the left USB-C
+	 * port. The vendor firmware programs it Source-only (MODES = 0x01,
+	 * fusb301/usb_typec.c InitializeFUSB301()), so a USB-C source such as
+	 * a wall charger that presents Rp never detects a sink and does not
+	 * enable VBUS. Describe it as a sink: the controller then presents Rd
+	 * so a source can detect a sink and enable VBUS. The interrupt line is
+	 * not routed on this port, so the driver polls. The port is sink-only
+	 * here; DRP using the BQ25896 OTG boost (usb-otg-vbus) as the
+	 * connector vbus-supply is left for later.
+	 */
+	typec@25 {
+		compatible = "onnn,fusb301";
+		reg = <0x25>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C left";
+			power-role = "sink";
+			data-role = "device";
+			typec-power-opmode = "default";
+			pd-disable;
+		};
+	};
 };
 
 &watchdog {
