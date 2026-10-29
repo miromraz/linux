@@ -1946,3 +1946,13 @@ config REGULATOR_MT6797_HANDOVER_KUNIT_TEST
 	  They do not exercise MT6797 hardware or consumer driver lifecycles.
 
 endif
+
+config REGULATOR_DA9211_KUNIT_TEST
+	bool "DA9211 independent buck registration tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y && REGULATOR_DA9211=y
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise the actual buck probe and regulator core against a memory
+	  regmap, including guarded A failure/defer and independent B lifetime.
+	  Also check sparse physical buck IDs and non-Gemini callbacks.
+	  These tests do not access real hardware.

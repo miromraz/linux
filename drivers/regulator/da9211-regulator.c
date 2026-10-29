@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regmap.h>
@@ -35,7 +36,7 @@ struct da9211 {
 	struct regmap *regmap;
 	struct da9211_pdata *pdata;
 	struct regulator_dev *rdev[DA9211_MAX_REGULATORS];
-	int num_regulator;
+	unsigned long present;
 	int chip_irq;
 	int chip_id;
 	bool boot_barrier;
@@ -317,7 +318,7 @@ static const struct regulator_desc da9211_regulators[] = {
 };
 
 #ifdef CONFIG_OF
-static struct of_regulator_match da9211_matches[] = {
+static const struct of_regulator_match da9211_match_template[] = {
 	[DA9211_ID_BUCKA] = {
 		.name = "BUCKA",
 		.desc = &da9211_regulators[DA9211_ID_BUCKA],
@@ -329,11 +330,18 @@ static struct of_regulator_match da9211_matches[] = {
 	};
 
 static struct da9211_pdata *da9211_parse_regulators_dt(
-		struct device *dev)
+		struct da9211 *chip)
 {
+	struct device *dev = chip->dev;
+	struct of_regulator_match *matches;
 	struct da9211_pdata *pdata;
 	struct device_node *node;
-	int i, num, n;
+	int i, num;
+
+	matches = devm_kmemdup(dev, da9211_match_template,
+			       sizeof(da9211_match_template), GFP_KERNEL);
+	if (!matches)
+		return ERR_PTR(-ENOMEM);
 
 	node = of_get_child_by_name(dev->of_node, "regulators");
 	if (!node) {
@@ -341,12 +349,12 @@ static struct da9211_pdata *da9211_parse_regulators_dt(
 		return ERR_PTR(-ENODEV);
 	}
 
-	num = of_regulator_match(dev, node, da9211_matches,
-				 ARRAY_SIZE(da9211_matches));
+	num = of_regulator_match(dev, node, matches,
+				 ARRAY_SIZE(da9211_match_template));
 	of_node_put(node);
 	if (num < 0) {
 		dev_err(dev, "Failed to match regulators\n");
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(num);
 	}
 
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
@@ -355,33 +363,19 @@ static struct da9211_pdata *da9211_parse_regulators_dt(
 
 	pdata->num_buck = num;
 
-	n = 0;
-	for (i = 0; i < ARRAY_SIZE(da9211_matches); i++) {
-		if (!da9211_matches[i].init_data)
+	for (i = 0; i < ARRAY_SIZE(da9211_match_template); i++) {
+		if (!matches[i].of_node)
 			continue;
-
-		pdata->init_data[n] = da9211_matches[i].init_data;
-		pdata->reg_node[n] = da9211_matches[i].of_node;
-		/* Never assert an external enable before shared-rail preflight. */
-		if (mt6797_boot_barrier_supply(pdata->reg_node[n], "cpu-supply") &&
-		    of_find_property(pdata->reg_node[n], "enable-gpios", NULL))
-			return ERR_PTR(-EOPNOTSUPP);
-		pdata->gpiod_ren[n] = devm_fwnode_gpiod_get(dev,
-					of_fwnode_handle(pdata->reg_node[n]),
-					"enable",
-					GPIOD_OUT_HIGH |
-						GPIOD_FLAGS_BIT_NONEXCLUSIVE,
-					"da9211-enable");
-		if (IS_ERR(pdata->gpiod_ren[n]))
-			pdata->gpiod_ren[n] = NULL;
-		n++;
+		chip->present |= BIT(i);
+		pdata->init_data[i] = matches[i].init_data;
+		pdata->reg_node[i] = matches[i].of_node;
 	}
 
 	return pdata;
 }
 #else
 static struct da9211_pdata *da9211_parse_regulators_dt(
-		struct device *dev)
+		struct da9211 *chip)
 {
 	return ERR_PTR(-ENODEV);
 }
@@ -397,8 +391,12 @@ static irqreturn_t da9211_irq_handler(int irq, void *data)
 		goto error_i2c;
 
 	if (reg_val & DA9211_E_OV_CURR_A) {
-		regulator_notifier_call_chain(chip->rdev[0],
-			REGULATOR_EVENT_OVER_CURRENT, NULL);
+		/* Pair with publication after regulator initialization. */
+		struct regulator_dev *rdev = smp_load_acquire(&chip->rdev[0]);
+
+		if (rdev)
+			regulator_notifier_call_chain(rdev,
+				REGULATOR_EVENT_OVER_CURRENT, NULL);
 
 		err = regmap_write(chip->regmap, DA9211_REG_EVENT_B,
 			DA9211_E_OV_CURR_A);
@@ -409,8 +407,12 @@ static irqreturn_t da9211_irq_handler(int irq, void *data)
 	}
 
 	if (reg_val & DA9211_E_OV_CURR_B) {
-		regulator_notifier_call_chain(chip->rdev[1],
-			REGULATOR_EVENT_OVER_CURRENT, NULL);
+		/* Pair with publication after regulator initialization. */
+		struct regulator_dev *rdev = smp_load_acquire(&chip->rdev[1]);
+
+		if (rdev)
+			regulator_notifier_call_chain(rdev,
+				REGULATOR_EVENT_OVER_CURRENT, NULL);
 
 		err = regmap_write(chip->regmap, DA9211_REG_EVENT_B,
 			DA9211_E_OV_CURR_B);
@@ -427,81 +429,123 @@ error_i2c:
 	return IRQ_NONE;
 }
 
-static int da9211_regulator_init(struct da9211 *chip)
+/* Clear publication and drain IRQ readers before devres frees the rdev. */
+static void da9211_buck_unpublish(void *data)
 {
-	struct regulator_config config = { };
-	int i, ret;
-	unsigned int data;
+	struct platform_device *pdev = data;
+	struct da9211 *chip = dev_get_drvdata(pdev->dev.parent);
+	int id = *(int *)dev_get_platdata(&pdev->dev);
 
-	ret = regmap_read(chip->regmap, DA9211_REG_CONFIG_E, &data);
-	if (ret < 0) {
-		dev_err(chip->dev, "Failed to read CONFIG_E reg: %d\n", ret);
-		return ret;
-	}
+	if (chip->chip_irq)
+		regmap_update_bits(chip->regmap, DA9211_REG_MASK_B,
+				   DA9211_M_OV_CURR_A << id,
+				   DA9211_M_OV_CURR_A << id);
+	/* Stop new IRQ readers before draining readers of the old pointer. */
+	smp_store_release(&chip->rdev[id], NULL);
+	if (chip->chip_irq)
+		synchronize_irq(chip->chip_irq);
+}
 
-	data &= DA9211_SLAVE_SEL;
-	/* If configuration for 1/2 bucks is different between platform data
-	 * and the register, driver should exit.
-	 */
-	if (chip->pdata->num_buck == 1 && data == 0x00)
-		chip->num_regulator = 1;
-	else if (chip->pdata->num_buck == 2 && data != 0x00)
-		chip->num_regulator = 2;
-	else {
-		dev_err(chip->dev, "Configuration is mismatched\n");
-		return -EINVAL;
-	}
+static int da9211_buck_probe(struct platform_device *pdev)
+{
+	struct da9211 *chip = dev_get_drvdata(pdev->dev.parent);
+	int id = *(int *)dev_get_platdata(&pdev->dev);
+	struct regulator_config config = {
+		.dev = &pdev->dev,
+		.driver_data = chip,
+		.regmap = chip->regmap,
+		.init_data = chip->pdata->init_data[id],
+		.of_node = chip->pdata->reg_node[id],
+		.ena_gpiod = chip->pdata->gpiod_ren[id],
+	};
+	struct regulator_dev *rdev;
+	unsigned int control;
+	int ret;
 
-	chip->boot_barrier = mt6797_boot_barrier_supply(
-		chip->pdata->reg_node[DA9211_ID_BUCKA], "cpu-supply");
-
-	if (chip->boot_barrier) {
-		ret = regmap_read(chip->regmap, DA9211_REG_BUCKA_CONT, &data);
+	if (chip->boot_barrier && id == DA9211_ID_BUCKA) {
+		/* Both names are accepted by OF GPIO lookup. Reject before get. */
+		if (config.ena_gpiod ||
+		    of_property_present(config.of_node, "enable-gpio") ||
+		    of_property_present(config.of_node, "enable-gpios"))
+			return -EOPNOTSUPP;
+		ret = regmap_read(chip->regmap, DA9211_REG_BUCKA_CONT, &control);
 		if (ret)
 			return ret;
-		if (!(data & DA9211_BUCKA_EN) ||
-		    (data & (DA9211_VBUCKA_SEL | DA9211_VBUCKA_GPI_MASK |
-			     DA9211_BUCKA_GPI_MASK)))
+		if (!(control & DA9211_BUCKA_EN) ||
+		    (control & (DA9211_VBUCKA_SEL | DA9211_VBUCKA_GPI_MASK |
+				DA9211_BUCKA_GPI_MASK)))
 			return -EIO;
 	}
 
-	for (i = 0; i < chip->num_regulator; i++) {
-		config.init_data = chip->pdata->init_data[i];
-		config.dev = chip->dev;
-		config.driver_data = chip;
-		config.regmap = chip->regmap;
-		config.of_node = chip->pdata->reg_node[i];
-
-		if (chip->pdata->gpiod_ren[i])
-			config.ena_gpiod = chip->pdata->gpiod_ren[i];
-		else
+	if (config.ena_gpiod)
+		devm_gpiod_unhinge(chip->dev, config.ena_gpiod);
+	if (!config.ena_gpiod && config.of_node) {
+		config.ena_gpiod = devm_fwnode_gpiod_get(&pdev->dev,
+				of_fwnode_handle(config.of_node), "enable",
+				GPIOD_OUT_HIGH | GPIOD_FLAGS_BIT_NONEXCLUSIVE,
+				"da9211-enable");
+		if (IS_ERR(config.ena_gpiod)) {
+			ret = PTR_ERR(config.ena_gpiod);
+			if (ret != -ENOENT)
+				return dev_err_probe(&pdev->dev, ret, "enable GPIO\n");
 			config.ena_gpiod = NULL;
-
-		/*
-		 * Hand the GPIO descriptor management over to the regulator
-		 * core, remove it from GPIO devres management.
-		 */
-		if (config.ena_gpiod)
-			devm_gpiod_unhinge(chip->dev, config.ena_gpiod);
-		chip->rdev[i] = devm_regulator_register(chip->dev,
-			&da9211_regulators[i], &config);
-		if (IS_ERR(chip->rdev[i])) {
-			dev_err(chip->dev,
-				"Failed to register DA9211 regulator\n");
-			return PTR_ERR(chip->rdev[i]);
-		}
-
-		if (chip->chip_irq != 0) {
-			ret = regmap_update_bits(chip->regmap,
-				DA9211_REG_MASK_B, DA9211_M_OV_CURR_A << i, 0);
-			if (ret < 0) {
-				dev_err(chip->dev,
-					"Failed to update mask reg: %d\n", ret);
-				return ret;
-			}
+		} else {
+			devm_gpiod_unhinge(&pdev->dev, config.ena_gpiod);
 		}
 	}
+	rdev = devm_regulator_register(&pdev->dev, &da9211_regulators[id], &config);
+	if (IS_ERR(rdev))
+		return dev_err_probe(&pdev->dev, PTR_ERR(rdev), "register buck\n");
 
+	/* IRQ acquire loads must observe the fully initialized regulator. */
+	smp_store_release(&chip->rdev[id], rdev);
+	ret = devm_add_action_or_reset(&pdev->dev, da9211_buck_unpublish, pdev);
+	if (ret)
+		return ret;
+	if (chip->chip_irq)
+		return regmap_update_bits(chip->regmap, DA9211_REG_MASK_B,
+					  DA9211_M_OV_CURR_A << id, 0);
+	return 0;
+}
+
+static struct platform_driver da9211_buck_driver = {
+	.probe = da9211_buck_probe,
+	.driver.name = "da9211-buck",
+};
+
+static void da9211_buck_unregister(void *data)
+{
+	platform_device_unregister(data);
+}
+
+static int da9211_regulator_init(struct da9211 *chip)
+{
+	struct platform_device *buck;
+	unsigned int data;
+	int id, ret;
+
+	ret = regmap_read(chip->regmap, DA9211_REG_CONFIG_E, &data);
+	if (ret)
+		return ret;
+	if (!chip->present)
+		return -ENODEV;
+	/* Physical B does not exist in four-phase single-buck mode. */
+	if (!(data & DA9211_SLAVE_SEL) && (chip->present & BIT(DA9211_ID_BUCKB)))
+		return -EINVAL;
+
+	chip->boot_barrier = mt6797_boot_barrier_supply(
+		chip->pdata->reg_node[DA9211_ID_BUCKA], "cpu-supply");
+	for (id = 0; id < DA9211_MAX_REGULATORS; id++) {
+		if (!(chip->present & BIT(id)))
+			continue;
+		buck = platform_device_register_data(chip->dev, "da9211-buck",
+				PLATFORM_DEVID_AUTO, &id, sizeof(id));
+		if (IS_ERR(buck))
+			return PTR_ERR(buck);
+		ret = devm_add_action_or_reset(chip->dev, da9211_buck_unregister, buck);
+		if (ret)
+			return ret;
+	}
 	return 0;
 }
 
@@ -552,8 +596,14 @@ static int da9211_i2c_probe(struct i2c_client *i2c)
 		return -ENODEV;
 	}
 
-	if (!chip->pdata)
-		chip->pdata = da9211_parse_regulators_dt(chip->dev);
+	if (!chip->pdata) {
+		chip->pdata = da9211_parse_regulators_dt(chip);
+	} else {
+		if (chip->pdata->num_buck < 1 ||
+		    chip->pdata->num_buck > DA9211_MAX_REGULATORS)
+			return -EINVAL;
+		chip->present = BIT(chip->pdata->num_buck) - 1;
+	}
 
 	if (IS_ERR(chip->pdata)) {
 		dev_err(chip->dev, "No regulators defined for the platform\n");
@@ -562,13 +612,13 @@ static int da9211_i2c_probe(struct i2c_client *i2c)
 
 	chip->chip_irq = i2c->irq;
 
-	ret = da9211_regulator_init(chip);
-	if (ret < 0) {
-		dev_err(chip->dev, "Failed to initialize regulator: %d\n", ret);
-		return ret;
-	}
-
 	if (chip->chip_irq != 0) {
+		/* Children unmask only after publishing a successfully registered rdev. */
+		ret = regmap_update_bits(chip->regmap, DA9211_REG_MASK_B,
+				DA9211_M_OV_CURR_A | DA9211_M_OV_CURR_B,
+				DA9211_M_OV_CURR_A | DA9211_M_OV_CURR_B);
+		if (ret)
+			return ret;
 		ret = devm_request_threaded_irq(chip->dev, chip->chip_irq, NULL,
 					da9211_irq_handler,
 					IRQF_TRIGGER_LOW|IRQF_ONESHOT,
@@ -582,7 +632,7 @@ static int da9211_i2c_probe(struct i2c_client *i2c)
 		dev_warn(chip->dev, "No IRQ configured\n");
 	}
 
-	return ret;
+	return da9211_regulator_init(chip);
 }
 
 static const struct i2c_device_id da9211_i2c_id[] = {
@@ -623,8 +673,31 @@ static struct i2c_driver da9211_regulator_driver = {
 	.id_table = da9211_i2c_id,
 };
 
-module_i2c_driver(da9211_regulator_driver);
+static int __init da9211_init(void)
+{
+	int ret;
+
+	ret = platform_driver_register(&da9211_buck_driver);
+	if (ret)
+		return ret;
+	ret = i2c_add_driver(&da9211_regulator_driver);
+	if (ret)
+		platform_driver_unregister(&da9211_buck_driver);
+	return ret;
+}
+module_init(da9211_init);
+
+static void __exit da9211_exit(void)
+{
+	i2c_del_driver(&da9211_regulator_driver);
+	platform_driver_unregister(&da9211_buck_driver);
+}
+module_exit(da9211_exit);
 
 MODULE_AUTHOR("James Ban <James.Ban.opensource@diasemi.com>");
 MODULE_DESCRIPTION("DA9211/DA9212/DA9213/DA9223/DA9214/DA9224/DA9215/DA9225 regulator driver");
 MODULE_LICENSE("GPL");
+
+#if IS_ENABLED(CONFIG_REGULATOR_DA9211_KUNIT_TEST)
+#include "da9211-regulator-test.c"
+#endif
