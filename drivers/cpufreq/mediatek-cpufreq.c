@@ -312,8 +312,9 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 	 *
 	 * No clock recovery is needed: the firmware set_rate was the no-op, so the
 	 * PLL is already at that last-good rate and cpu_clk is still parented to
-	 * it. Just restore Vproc and bail; the policy-init OPP sync (the only
-	 * caller that can hit this) drops the policy on the error.
+	 * it. Just restore Vproc and bail. During policy initialization the
+	 * initial-OPP sync drops the policy on this error; later transitions
+	 * report the failure to the cpufreq core.
 	 *
 	 * A whole-OPP mismatch (tens to hundreds of MHz) is a genuinely unapplied
 	 * rate; the firmware PLL caches the exact programmed MHz, so a success
@@ -337,6 +338,17 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		if (ret) {
 			dev_err(cpu_dev,
 				"cpu%d: failed to scale down voltage!\n", policy->cpu);
+			/*
+			 * A firmware PLL has no known rate before its first set.
+			 * Do not pass that zero to clk_set_rate(): the provider
+			 * would clamp it to its minimum, inventing a rollback rate.
+			 * Keep the successfully programmed target PLL instead. The
+			 * voltage operation failed, so retain the error and let
+			 * policy initialization reject this policy.
+			 */
+			if (!pre_freq_hz && info->soc_data->firmware_pll)
+				goto out;
+
 			clk_set_parent(cpu_clk, info->inter_clk);
 			clk_set_rate(armpll, pre_freq_hz);
 			clk_set_parent(cpu_clk, armpll);
