@@ -1964,9 +1964,15 @@ config REGULATOR_MT6797_RAIL_COORDINATOR
 	  Durable provider-side requirements and checked conversion engine for
 	  the Gemini A53/CCI rail pair. Board discovery and consumer admission
 	  must supply validated requirements before conversion is possible.
+	  This engine alone does not enable CPU or CCI voltage transitions.
 
 config REGULATOR_MT6797_RAIL_COORDINATOR_KUNIT_TEST
 	tristate "MT6797 shared rail coordinator tests" if !KUNIT_ALL_TESTS
 	depends on KUNIT
 	select REGULATOR_MT6797_RAIL_COORDINATOR
 	default KUNIT_ALL_TESTS
+	help
+	  Exercise both provider arrival orders and supported selector grids.
+	  Check retained requirements, stale generation rejection and failed
+	  replacement votes using synthetic raw provider callbacks. These tests
+	  do not establish board discovery or consumer lifecycle correctness.
