@@ -182,18 +182,21 @@ int mt6797_rail_vote(struct mt6797_rail_coordinator *c, u64 generation,
 		ret = -EBUSY;
 		goto out;
 	}
-	for (i = 0; i < MT6797_RAIL_USERS; i++)
-		target = max(target, i == user ? uv : c->floor[i]);
-	target = roundup(target, c->rail[MT6797_PROC].step_uv);
-	ret = mt6797_rail_read(c, actual);
-	if (ret)
-		goto out;
 	/* The old user's vote remains until the replacement is verified. This
 	 * primitive therefore only raises votes; returning/lowering ownership
 	 * requires a separately validated live-clock transaction.
 	 */
 	if (uv < c->floor[user]) {
 		ret = -EBUSY;
+		goto out;
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		target = max(target, i == user ? uv : c->floor[i]);
+	target = roundup(target, c->rail[MT6797_PROC].step_uv);
+	ret = mt6797_rail_read(c, actual);
+	if (ret) {
+		c->requirements_valid = false;
+		c->converted = false;
 		goto out;
 	}
 	ret = mt6797_rail_step(c, MT6797_PROC, target, actual);

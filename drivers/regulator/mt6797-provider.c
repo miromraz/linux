@@ -46,6 +46,54 @@ static struct device_node *supply(struct device_node *user, const char *a,
 	return first ?: ERR_PTR(-EINVAL);
 }
 
+/* Reject legacy aliases and duplicate physical matches on Gemini. This is
+ * called for BOTH children before registration, including an unguarded B.
+ * Checking each child separately preserves an unrelated B when A is malformed.
+ */
+int mt6797_provider_buck_match(struct device_node *provider, unsigned int id)
+{
+	struct device_node *parent, *child, *users[3], *np;
+	const char *name = id ? "BUCKB" : "BUCKA", *match;
+	const char * const props[] = { "cpu-supply", "proc-supply" };
+	int i, j, count = 0, ret = 0;
+
+	if (!of_machine_is_compatible("planet,gemini-pda"))
+		return 0;
+	if (!provider || id > 1 || !of_device_is_available(provider) ||
+	    !of_node_name_eq(provider, name) ||
+	    of_property_present(provider, "regulator-compatible"))
+		return -EINVAL;
+	parent = of_get_parent(provider);
+	for_each_child_of_node(parent, child) {
+		if (of_property_read_string(child, "regulator-compatible", &match))
+			match = child->name;
+		if (!strcmp(match, name))
+			count++;
+	}
+	of_node_put(parent);
+	if (count != 1)
+		return -EINVAL;
+	if (!id)
+		return 0;
+	/* Even a canonically named B must not receive a shared user's phandle.
+	 * Inspect each alias independently: malformed A must not hide a B alias.
+	 */
+	users[0] = of_get_cpu_node(0, NULL);
+	users[1] = of_get_cpu_node(4, NULL);
+	users[2] = of_find_compatible_node(NULL, NULL, "mediatek,mt6797-cci");
+	for (i = 0; i < ARRAY_SIZE(users); i++) {
+		for (j = 0; j < ARRAY_SIZE(props); j++) {
+			np = of_parse_phandle(users[i], props[j], 0);
+			if (np == provider)
+				ret = -EINVAL;
+			of_node_put(np);
+		}
+		of_node_put(users[i]);
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_provider_buck_match);
+
 /* owner_lock protects retained identities, including across absent peers. */
 static int topology(void)
 {
@@ -75,13 +123,18 @@ static int topology(void)
 	}
 	parent = of_get_parent(found[0]);
 	chip = of_get_parent(parent);
-	if (!of_node_name_eq(found[0], "BUCKA") ||
+	if (mt6797_provider_buck_match(found[0], 0) ||
 	    !of_node_name_eq(parent, "regulators") ||
 	    !of_device_is_compatible(chip, "dlg,da9214") ||
 	    !of_device_is_available(chip) ||
 	    !of_device_is_compatible(found[1], "mediatek,mt6797-cpu-sram"))
 		ret = -EINVAL;
 	of_node_put(chip);
+	of_node_put(parent);
+	parent = of_get_parent(found[1]);
+	if (!of_device_is_compatible(parent, "mediatek,mt6797-infracfg") ||
+	    !of_device_is_available(parent))
+		ret = -EINVAL;
 	of_node_put(parent);
 	for (j = 0; !ret && j < 2; j++)
 		if (rails[j] && rails[j] != found[j])

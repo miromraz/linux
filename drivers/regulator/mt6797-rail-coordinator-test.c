@@ -144,6 +144,35 @@ static void rail_reprepare(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, status.ready);
 	KUNIT_EXPECT_EQ(test, status.floor[0], 1040000);
 	floor[0] = 1040000;
+	/* Accepted vote failures revoke readiness without touching hardware. */
+	KUNIT_EXPECT_EQ(test, mt6797_rail_vote(&f.coordinator, generation - 1,
+					    0, 1040000), -ESTALE);
+	KUNIT_EXPECT_EQ(test, mt6797_rail_vote(&f.coordinator, generation,
+					    3, 1040000), -EINVAL);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_TRUE(test, status.ready);
+	f.read_error = -EIO;
+	KUNIT_EXPECT_EQ(test, mt6797_rail_vote(&f.coordinator, generation,
+					    0, 1030000), -EINVAL);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_TRUE(test, status.ready);
+	KUNIT_EXPECT_EQ(test, mt6797_rail_vote(&f.coordinator, generation,
+					    0, 1040000), -EIO);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_FALSE(test, status.ready);
+	KUNIT_EXPECT_FALSE(test, status.fault);
+	KUNIT_EXPECT_EQ(test, status.floor[0], 1040000);
+	KUNIT_EXPECT_EQ(test, f.writes, 0);
+	f.read_error = 0;
+	KUNIT_ASSERT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), 0);
+	f.uv[1] = 1000000;
+	KUNIT_EXPECT_EQ(test, mt6797_rail_vote(&f.coordinator, generation,
+					    0, 1040000), -ERANGE);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_FALSE(test, status.ready);
+	KUNIT_EXPECT_EQ(test, f.writes, 0);
+	f.uv[1] = 1200000;
+	KUNIT_ASSERT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), 0);
 	f.read_error = -EIO;
 	KUNIT_EXPECT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), -EIO);
 	mt6797_rail_status(&f.coordinator, &status);

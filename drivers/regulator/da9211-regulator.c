@@ -665,6 +665,10 @@ static int da9211_buck_probe(struct platform_device *pdev)
 	};
 	int ret;
 
+	ret = mt6797_provider_buck_match(config.of_node, id);
+	if (ret)
+		return ret;
+
 	if (id == DA9211_ID_BUCKA &&
 	    of_machine_is_compatible("planet,gemini-pda")) {
 		ret = mt6797_boot_barrier_supply(config.of_node, "cpu-supply");

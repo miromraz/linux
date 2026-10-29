@@ -18,6 +18,8 @@ prelude = r'''
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
+#define ARRAY_SIZE(a) ((int)(sizeof(a) / sizeof((a)[0])))
+#define EXPORT_SYMBOL_GPL(x)
 #define MT6797_RAILS 2
 #define MT6797_PROC 0
 #define MT6797_SRAM 1
@@ -25,12 +27,12 @@ prelude = r'''
 #define IS_ERR(p) ((uintptr_t)(p) > (uintptr_t)-4096)
 #define PTR_ERR(p) ((int)(intptr_t)(p))
 struct device_node {
-    const char *name, *compat;
+    const char *name, *compat, *override;
     bool enabled;
-    struct device_node *parent, *supply[4];
+    struct device_node *parent, *supply[4], *child, *next;
     int count[4], refs;
 };
-static struct device_node cpu[2], cci, proc, sram, group, chip, other;
+static struct device_node cpu[2], cci, proc, sram, group, chip, other, infra, buckb;
 static struct device_node *rails[2];
 static int owner_lock;
 static bool gemini = true;
@@ -44,11 +46,16 @@ static int prop(const char *n) {
 static struct device_node *of_node_get(struct device_node *n) { if (n) n->refs++; return n; }
 static void of_node_put(struct device_node *n) { if (n) { assert(n->refs > 0); n->refs--; } }
 static bool of_device_is_available(struct device_node *n) { return n && n->enabled; }
-static bool of_property_present(struct device_node *n, const char *p) { return n->count[prop(p)]; }
+static bool of_property_present(struct device_node *n, const char *p) { return !strcmp(p, "regulator-compatible") ? !!n->override : n->count[prop(p)]; }
 static int of_property_count_u32_elems(struct device_node *n, const char *p) { return n->count[prop(p)]; }
 static struct device_node *of_parse_phandle(struct device_node *n, const char *p, int index) {
     assert(!index); return of_node_get(n->supply[prop(p)]);
 }
+static int of_property_read_string(struct device_node *n, const char *p, const char **v) {
+    (void)p; if (!n->override) return -EINVAL; *v = n->override; return 0;
+}
+#define for_each_child_of_node(p, c) \
+    for (c = of_node_get((p)->child); c; of_node_put(c), c = of_node_get(c->next))
 static struct device_node *of_get_cpu_node(int id, void *unused) {
     (void)unused; return of_node_get(&cpu[id == 4]);
 }
@@ -64,8 +71,9 @@ tests = r'''
 static void reset(void) {
     of_node_put(rails[0]); of_node_put(rails[1]); rails[0] = rails[1] = NULL;
     proc = (struct device_node){.name="BUCKA", .enabled=true, .parent=&group};
-    sram = (struct device_node){.compat="mediatek,mt6797-cpu-sram", .enabled=true};
-    group = (struct device_node){.name="regulators", .parent=&chip};
+    sram = (struct device_node){.compat="mediatek,mt6797-cpu-sram", .enabled=true, .parent=&infra};
+    group = (struct device_node){.name="regulators", .parent=&chip, .child=&proc};
+    infra = (struct device_node){.compat="mediatek,mt6797-infracfg", .enabled=true};
     chip = (struct device_node){.compat="dlg,da9214", .enabled=true};
     for (int i=0; i<2; i++) cpu[i] = (struct device_node){.enabled=true,
         .supply={NULL,&proc,NULL,&sram}, .count={0,1,0,1}};
@@ -92,6 +100,19 @@ int main(void) {
         reset(); n->enabled=false;
         assert(mt6797_boot_barrier_supply(&proc,"cpu-supply") == -EINVAL);
     }
+    reset(); proc.override="BUCKB";
+    assert(mt6797_boot_barrier_supply(&proc,"cpu-supply") == -EINVAL);
+    assert(mt6797_provider_buck_match(&proc, 1) == -EINVAL);
+    reset(); infra.enabled=false;
+    assert(mt6797_boot_barrier_supply(&proc,"cpu-supply") == -EINVAL);
+    reset(); infra.compat="syscon";
+    assert(mt6797_boot_barrier_supply(&proc,"cpu-supply") == -EINVAL);
+    reset(); buckb=(struct device_node){.name="BUCKB", .enabled=true, .parent=&group}; proc.next=&buckb;
+    assert(mt6797_provider_buck_match(&buckb, 1) == 0);
+    proc.override="BUCKB";
+    assert(mt6797_provider_buck_match(&buckb, 1) == -EINVAL);
+    proc.override=NULL; cpu[0].supply[1]=&buckb;
+    assert(mt6797_provider_buck_match(&buckb, 1) == -EINVAL);
     reset(); proc.name="BUCKB";
     assert(mt6797_boot_barrier_supply(&proc,"cpu-supply") == -EINVAL);
     reset(); chip.compat="dlg,da9211";

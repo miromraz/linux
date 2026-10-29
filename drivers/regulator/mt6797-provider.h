@@ -13,11 +13,16 @@ struct mt6797_provider_status {
 	int readiness;
 };
 
+int mt6797_provider_buck_match(struct device_node *provider, unsigned int id);
 int mt6797_boot_barrier_supply(struct device_node *provider, const char *supply);
 int mt6797_provider_attach(struct device *dev, enum mt6797_rail_id id,
 			   const struct mt6797_rail_io *io);
 int mt6797_provider_sample(u64 generation, int uv[MT6797_RAILS]);
 void mt6797_provider_status(struct mt6797_provider_status *status);
+/* Callbacks can overlap and run during probe/remove under driver-core locks.
+ * Queue framework work; never recursively subscribe/unsubscribe or return STOP.
+ * Unsubscribe drains callbacks; owners must then cancel their queued work.
+ */
 int mt6797_provider_subscribe(struct notifier_block *nb);
 int mt6797_provider_unsubscribe(struct notifier_block *nb);
 #endif
