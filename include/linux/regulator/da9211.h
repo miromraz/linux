@@ -32,6 +32,7 @@ struct da9211_pdata {
 	 * 2 : 2 phase 2 buck
 	 */
 	int num_buck;
+	/* Borrowed: caller owns acquisitions until the I2C device is removed. */
 	struct gpio_desc *gpiod_ren[DA9211_MAX_REGULATORS];
 	struct device_node *reg_node[DA9211_MAX_REGULATORS];
 	struct regulator_init_data *init_data[DA9211_MAX_REGULATORS];

@@ -40,6 +40,8 @@ struct da9211 {
 	int chip_irq;
 	int chip_id;
 	bool boot_barrier;
+	struct mutex gpio_lock;
+	unsigned long gpio_enabled;
 };
 
 static const struct regmap_range_cfg da9211_regmap_range[] = {
@@ -268,17 +270,69 @@ static int da9211_set_voltage_sel(struct regulator_dev *rdev, unsigned int sel)
 	return regulator_set_voltage_sel_regmap(rdev, sel);
 }
 
+/* Supplied descriptors are borrowed from the platform owner. Never transfer
+ * their only acquisition to a retryable child or regulator core. Serialize
+ * votes for the two physical bucks when platform data shares one descriptor.
+ */
+static int da9211_supplied_gpio_set(struct regulator_dev *rdev, bool enable)
+{
+	struct da9211 *chip = rdev_get_drvdata(rdev);
+	int id = rdev_get_id(rdev), i;
+	struct gpio_desc *gpio = chip->pdata->gpiod_ren[id];
+	bool value = enable;
+	unsigned long saved;
+	int ret;
+
+	mutex_lock(&chip->gpio_lock);
+	saved = chip->gpio_enabled;
+	if (enable)
+		chip->gpio_enabled |= BIT(id);
+	else
+		chip->gpio_enabled &= ~BIT(id);
+	for (i = 0; i < DA9211_MAX_REGULATORS; i++)
+		if (chip->pdata->gpiod_ren[i] == gpio &&
+		    (chip->gpio_enabled & BIT(i)))
+			value = true;
+	ret = gpiod_set_value_cansleep(gpio, value);
+	if (!ret) {
+		ret = gpiod_get_value_cansleep(gpio);
+		if (ret >= 0)
+			ret = ret == value ? 0 : -EIO;
+	}
+	if (ret)
+		chip->gpio_enabled = saved;
+	mutex_unlock(&chip->gpio_lock);
+	return ret;
+}
+
+static int da9211_is_enabled(struct regulator_dev *rdev)
+{
+	struct da9211 *chip = rdev_get_drvdata(rdev);
+	struct gpio_desc *gpio = chip->pdata->gpiod_ren[rdev_get_id(rdev)];
+
+	return gpio ? gpiod_get_value_cansleep(gpio) :
+		regulator_is_enabled_regmap(rdev);
+}
+
 static int da9211_enable(struct regulator_dev *rdev)
 {
+	struct da9211 *chip = rdev_get_drvdata(rdev);
+
 	if (da9211_boot_barrier(rdev))
 		return mt6797_boot_barrier_check(da9211_barrier_state(rdev), 0, 0);
+	if (chip->pdata->gpiod_ren[rdev_get_id(rdev)])
+		return da9211_supplied_gpio_set(rdev, true);
 	return regulator_enable_regmap(rdev);
 }
 
 static int da9211_disable(struct regulator_dev *rdev)
 {
+	struct da9211 *chip = rdev_get_drvdata(rdev);
+
 	if (da9211_boot_barrier(rdev))
 		return -EBUSY;
+	if (chip->pdata->gpiod_ren[rdev_get_id(rdev)])
+		return da9211_supplied_gpio_set(rdev, false);
 	return regulator_disable_regmap(rdev);
 }
 
@@ -287,7 +341,7 @@ static const struct regulator_ops da9211_buck_ops = {
 	.set_mode = da9211_buck_set_mode,
 	.enable = da9211_enable,
 	.disable = da9211_disable,
-	.is_enabled = regulator_is_enabled_regmap,
+	.is_enabled = da9211_is_enabled,
 	.set_voltage_sel = da9211_set_voltage_sel,
 	.get_voltage_sel = regulator_get_voltage_sel_regmap,
 	.list_voltage = regulator_list_voltage_linear,
@@ -446,6 +500,11 @@ static void da9211_buck_unpublish(void *data)
 		synchronize_irq(chip->chip_irq);
 }
 
+static void da9211_regulator_unregister(void *data)
+{
+	regulator_unregister(data);
+}
+
 static int da9211_buck_probe(struct platform_device *pdev)
 {
 	struct da9211 *chip = dev_get_drvdata(pdev->dev.parent);
@@ -477,9 +536,17 @@ static int da9211_buck_probe(struct platform_device *pdev)
 			return -EIO;
 	}
 
-	if (config.ena_gpiod)
-		devm_gpiod_unhinge(chip->dev, config.ena_gpiod);
-	if (!config.ena_gpiod && config.of_node) {
+	if (config.ena_gpiod) {
+		ret = gpiod_get_value_cansleep(config.ena_gpiod);
+		if (ret < 0)
+			return ret;
+		mutex_lock(&chip->gpio_lock);
+		if (ret)
+			chip->gpio_enabled |= BIT(id);
+		mutex_unlock(&chip->gpio_lock);
+		/* The caller retains ownership through parent and child retries. */
+		config.ena_gpiod = NULL;
+	} else if (config.of_node) {
 		config.ena_gpiod = devm_fwnode_gpiod_get(&pdev->dev,
 				of_fwnode_handle(config.of_node), "enable",
 				GPIOD_OUT_HIGH | GPIOD_FLAGS_BIT_NONEXCLUSIVE,
@@ -493,9 +560,13 @@ static int da9211_buck_probe(struct platform_device *pdev)
 			devm_gpiod_unhinge(&pdev->dev, config.ena_gpiod);
 		}
 	}
-	rdev = devm_regulator_register(&pdev->dev, &da9211_regulators[id], &config);
+	rdev = regulator_register(&pdev->dev, &da9211_regulators[id], &config);
 	if (IS_ERR(rdev))
 		return dev_err_probe(&pdev->dev, PTR_ERR(rdev), "register buck\n");
+
+	ret = devm_add_action_or_reset(&pdev->dev, da9211_regulator_unregister, rdev);
+	if (ret)
+		return ret;
 
 	/* IRQ acquire loads must observe the fully initialized regulator. */
 	smp_store_release(&chip->rdev[id], rdev);
@@ -533,6 +604,17 @@ static int da9211_regulator_init(struct da9211 *chip)
 	if (!(data & DA9211_SLAVE_SEL) && (chip->present & BIT(DA9211_ID_BUCKB)))
 		return -EINVAL;
 
+	/* Preserve enabled unbound siblings sharing a platform GPIO. */
+	for (id = 0; id < DA9211_MAX_REGULATORS; id++) {
+		if (!(chip->present & BIT(id)) || !chip->pdata->gpiod_ren[id])
+			continue;
+		ret = gpiod_get_value_cansleep(chip->pdata->gpiod_ren[id]);
+		if (ret < 0)
+			return ret;
+		if (ret)
+			chip->gpio_enabled |= BIT(id);
+	}
+
 	chip->boot_barrier = mt6797_boot_barrier_supply(
 		chip->pdata->reg_node[DA9211_ID_BUCKA], "cpu-supply");
 	for (id = 0; id < DA9211_MAX_REGULATORS; id++) {
@@ -563,6 +645,7 @@ static int da9211_i2c_probe(struct i2c_client *i2c)
 		return -ENOMEM;
 
 	chip->dev = &i2c->dev;
+	mutex_init(&chip->gpio_lock);
 	chip->regmap = devm_regmap_init_i2c(i2c, &da9211_regmap_config);
 	if (IS_ERR(chip->regmap)) {
 		error = PTR_ERR(chip->regmap);
