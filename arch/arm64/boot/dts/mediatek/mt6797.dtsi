@@ -349,6 +349,54 @@
 		clock-output-names = "clk26m";
 	};
 
+	thermal-zones {
+		cpu-thermal {
+			polling-delay-passive = <100>;
+			polling-delay = <500>;
+			thermal-sensors = <&thermal>;
+			sustainable-power = <3000>;
+
+			trips {
+				cpu_passive: trip-point0 {
+					/* vendor "cpu03" cooler trip */
+					temperature = <85000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				cpu_hot: trip-point1 {
+					/* vendor "cpu00" cooler trip */
+					temperature = <95000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				cpu_crit: cpu-crit {
+					/* vendor "mtktscpu-sysrst" trip */
+					temperature = <117000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu_passive>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu_hot>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+	};
+
 	/*
 	 * CPU OPPs come from the vendor per-bin tables (mt_cpufreq.c). The
 	 * speed bin is read from the efuse "speed_grade" cell (FUNC_CODE_1); the
