@@ -1,8 +1,9 @@
 # Packaged sunfish release validation, 2026-10-26
 
-Status: image and headers packages, generic/handset U-Boot and slotflip EFI
-payloads built on `llumik`. **No phone deployment or hardware test:** the user
-deferred phone access. This is not a complete recipient-ready system image.
+Build record: image and headers packages, generic/handset U-Boot and slotflip EFI
+payloads built on `llumik`. Subsequent boot, hardware, recovery and live OBS
+publication results are in the [2026-10-29 verification](sunfish-verification-20261029.md).
+This is not a complete recipient-ready system image.
 
 ## Kernel packages
 
@@ -77,19 +78,15 @@ and checksums are kept with the local build artifacts.
 
 ## Still required
 
-- Confirm that live OBS has synchronized the aligned Git branch and published
-  the new package version; source-metadata write access is needed to force a
-  stale scmsync refresh.
-- Once the phone is online, save its boot images and EFI state, install the
-  helper, and test its no-write probe before the Android transition.
-- Test boot, return/recovery, and hardware with matching kernel/modules.
+- Complete Android transition/return and the remaining physical hardware checks.
+- Preserve exact artifact identities: the phone-tested llumik package and the
+  separately published OBS package use different GCC 14 patch versions.
 - Build a separate sanitized recipient system image. The old development
   image still contains the maintainer's access/account configuration.
 
 The old GitHub OBS integration targets `linux-sunfish` on
 `sunfish-venus-v7.2`. Its workflow/webhook returns do not establish a refresh
-of `linux-sm7150`. The prior Git OBS head was `50629265abff`; the public OBS
-export inspected during this work was older still, `c20b2d53b9b6`.
-OBS credential requests timed out, so no live metadata refresh or successful
-native OBS build/publication is claimed by this record. The new version was
-built and inspected on `llumik`.
+of `linux-sm7150`. The latter was independently confirmed at source revision 13,
+commit `9f9186def0ae3cbc3ba6ac60f3217eed15b58066`, with successful native build and
+publication on 2026-10-29. See the linked verification record for hashes and the
+remaining embedded-provenance limitation.

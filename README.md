@@ -1,6 +1,6 @@
 # Linux for the Google Pixel 4a (sunfish)
 
-Developer handoff, 2026-10-26. This is a work-in-progress SM7150 kernel port,
+Developer handoff, updated 2026-10-29. This is a work-in-progress SM7150 kernel port,
 not a complete phone distribution or an installer.
 
 For installation on another phone, see the
@@ -37,10 +37,12 @@ branch above rather than relying on a plain clone.
 
 ## Hardware status
 
-These entries summarize previous hardware validation and the latest project
-notes (2026-10-24). No new on-device validation was performed for this
-documentation handoff, and the newest release fixes are not all confirmed
-to be deployed on the phone.
+The llumik-built GCC 14 release booted on the maintainer's phone on 2026-10-29.
+Nineteen automated checks passed before and after RTC-driven s2idle resume;
+Wi-Fi/USB SSH, both cameras and hardware H.264 decoding were exercised.
+See the [exact build identity, results and limits](Documentation/arm64/sunfish-verification-20261029.md).
+The table below also includes historical findings; not every listed feature
+received a fresh end-to-end test.
 
 | Feature | Recorded state |
 | --- | --- |
@@ -122,8 +124,10 @@ was rebuilt and all module release strings checked against `7.1.0-sm7150`.
 See the [build record](Documentation/arm64/sunfish-build-20261026.md).
 The subsequent full Debian image/headers build and handset helper validation
 are recorded in the [packaged release record](Documentation/arm64/sunfish-release-20261026.md).
-No hardware boot test or recipient system-image build was performed. In the
-maintainer's environment, builds and test suites run on `llumik`, never on `dev`.
+Subsequent handset tests are recorded in the
+[2026-10-29 verification](Documentation/arm64/sunfish-verification-20261029.md).
+No sanitized recipient system-image build has been validated. In the maintainer's
+environment, builds and test suites run on `llumik`, never on `dev`.
 
 ## Boot and userspace
 
@@ -145,9 +149,10 @@ installation procedure for a stock phone.
 
 ## Review priorities
 
-1. Verify that the live OBS source and published package match the aligned
-   branch and new version; a Git push alone does not prove a scmsync refresh.
-2. Verify the five release-only lens and charger fixes on the target image.
+1. Build and test a sanitized stock-userdata recipient image. Live OBS source
+   alignment and publication were confirmed on 2026-10-29; its embedded source
+   identity is still null and needs a packaging follow-up.
+2. Complete focus/calibration and 9 V charging checks with appropriate hardware.
 3. Keep GCC 14 and source provenance checks intact for subsequent packaging
    revisions; the full cross-package build is now validated on the build machine.
 4. Address LPASS runtime power management together with the userspace audio

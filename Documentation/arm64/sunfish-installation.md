@@ -1,6 +1,6 @@
 # Installing on another Pixel 4a: preparation and release status
 
-Updated 2026-10-26. Target: **Google Pixel 4a, codename `sunfish`, unlocked
+Updated 2026-10-29. Target: **Google Pixel 4a, codename `sunfish`, unlocked
 bootloader, Android userdata expendable**. Pixel 4a 5G is a different target.
 
 ## Current status
@@ -9,6 +9,12 @@ The public `sunfish-share` kernel and U-Boot branches are developer source
 handoffs. There is **no verified recipient-ready installation image** attached
 to them. This document records the intended installation path, read-only
 preparation, and the checks needed before providing device-write commands.
+
+The release kernel and handset U-Boot now have recorded
+[2026-10-29 hardware evidence](sunfish-verification-20261029.md), including kernel
+build-ID verification, cameras, decoding, networking, suspend/resume and recovery.
+Those tests used the maintainer's custom layout and existing userspace. They do
+not remove the recipient-image blockers below.
 
 The current maintainer handset boots Linux from a custom `linux` partition.
 That demonstrates the port on that handset, but does not validate installation
