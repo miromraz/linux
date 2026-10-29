@@ -11,6 +11,8 @@ struct da9211_test_bus {
 	unsigned int a_writes;
 	int a_error;
 	bool unguarded;
+	int mask_error;
+	int ack_error;
 };
 
 static int da9211_test_read(void *context, unsigned int reg, unsigned int *val)
@@ -27,6 +29,10 @@ static int da9211_test_write(void *context, unsigned int reg, unsigned int val)
 {
 	struct da9211_test_bus *bus = context;
 
+	if (reg == DA9211_REG_MASK_B && bus->mask_error)
+		return bus->mask_error;
+	if (reg == DA9211_REG_EVENT_B && val == DA9211_E_OV_CURR_A && bus->ack_error)
+		return bus->ack_error;
 	if (reg == DA9211_REG_VBUCKA_A || reg == DA9211_REG_BUCKA_CONT)
 		bus->a_writes++;
 	/* No registration/peer operation may disturb the protected live A. */
@@ -47,6 +53,22 @@ static const struct regmap_config da9211_test_regmap = {
 	.reg_write = da9211_test_write,
 };
 
+struct da9211_test_notifier {
+	struct notifier_block nb;
+	int count;
+};
+
+static int da9211_test_notify(struct notifier_block *nb, unsigned long event,
+			      void *data)
+{
+	struct da9211_test_notifier *n = container_of(nb,
+					struct da9211_test_notifier, nb);
+
+	if (event == REGULATOR_EVENT_OVER_CURRENT)
+		n->count++;
+	return NOTIFY_OK;
+}
+
 static void da9211_test_independent(struct kunit *test)
 {
 	struct da9211_test_bus *bus = kunit_kzalloc(test, sizeof(*bus), GFP_KERNEL);
@@ -64,6 +86,7 @@ static void da9211_test_independent(struct kunit *test)
 	struct da9211 chip = { .pdata = &pdata, .boot_barrier = true };
 	struct platform_device *parent, *a, *b;
 	struct regulator *consumer;
+	struct da9211_test_notifier notifier = { .nb.notifier_call = da9211_test_notify };
 	int id, ret;
 
 	KUNIT_ASSERT_NOT_NULL(test, bus);
@@ -74,6 +97,8 @@ static void da9211_test_independent(struct kunit *test)
 	bus->regs[DA9211_REG_VBUCKB_A] = 85;
 	parent = platform_device_register_simple("da9211-test-parent", -1, NULL, 0);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(parent));
+	mutex_init(&chip.irq_lock);
+	INIT_DELAYED_WORK(&chip.mask_work, da9211_mask_recover);
 	mutex_init(&chip.gpio_lock);
 	chip.dev = &parent->dev;
 	dev_set_drvdata(chip.dev, &chip);
@@ -139,8 +164,22 @@ static void da9211_test_independent(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, device_reprobe(&a->dev), 0);
 	KUNIT_EXPECT_NOT_NULL(test, chip.rdev[0]);
 	device_release_driver(&a->dev);
+	KUNIT_EXPECT_EQ(test, regulator_register_notifier(consumer, &notifier.nb), 0);
+	bus->ack_error = -EIO;
 	bus->regs[DA9211_REG_EVENT_B] = DA9211_E_OV_CURR_A | DA9211_E_OV_CURR_B;
 	KUNIT_EXPECT_EQ(test, da9211_irq_handler(0, &chip), IRQ_HANDLED);
+	KUNIT_EXPECT_EQ(test, notifier.count, 1);
+	KUNIT_EXPECT_EQ(test, bus->regs[DA9211_REG_EVENT_B], DA9211_E_OV_CURR_A);
+	KUNIT_EXPECT_EQ(test, regulator_unregister_notifier(consumer, &notifier.nb), 0);
+	bus->ack_error = 0;
+	bus->mask_error = -EIO;
+	KUNIT_EXPECT_EQ(test, da9211_buck_mask(&chip, 0, true), -EIO);
+	cancel_delayed_work_sync(&chip.mask_work);
+	KUNIT_EXPECT_EQ(test, chip.pending_mask, (unsigned int)DA9211_M_OV_CURR_A);
+	bus->mask_error = 0;
+	da9211_mask_recover(&chip.mask_work.work);
+	KUNIT_EXPECT_EQ(test, chip.pending_mask, 0U);
+	KUNIT_EXPECT_TRUE(test, bus->regs[DA9211_REG_MASK_B] & DA9211_M_OV_CURR_A);
 	KUNIT_EXPECT_PTR_EQ(test, chip.rdev[0], NULL);
 	KUNIT_EXPECT_EQ(test, regulator_set_voltage(consumer, 1200000, 1200000), 0);
 	KUNIT_EXPECT_EQ(test, regulator_get_voltage(consumer), 1200000);
@@ -183,6 +222,8 @@ static void da9211_test_sparse(struct kunit *test)
 	bus->regs[DA9211_REG_VBUCKB_A] = 85;
 	parent = platform_device_register_simple("da9211-test-sparse", -1, NULL, 0);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(parent));
+	mutex_init(&chip.irq_lock);
+	INIT_DELAYED_WORK(&chip.mask_work, da9211_mask_recover);
 	mutex_init(&chip.gpio_lock);
 	chip.dev = &parent->dev;
 	dev_set_drvdata(chip.dev, &chip);
@@ -273,6 +314,8 @@ static void da9211_test_supplied_gpio(struct kunit *test)
 	if (IS_ERR(parent))
 		goto desc_out;
 	chip.dev = &parent->dev;
+	mutex_init(&chip.irq_lock);
+	INIT_DELAYED_WORK(&chip.mask_work, da9211_mask_recover);
 	mutex_init(&chip.gpio_lock);
 	dev_set_drvdata(chip.dev, &chip);
 	chip.regmap = regmap_init(chip.dev, NULL, bus, &da9211_test_regmap);

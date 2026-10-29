@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
@@ -40,6 +41,11 @@ struct da9211 {
 	int chip_irq;
 	int chip_id;
 	bool boot_barrier;
+	struct mutex irq_lock;
+	struct delayed_work mask_work;
+	unsigned int pending_mask;
+	unsigned int mask_attempts;
+	bool stopping;
 	struct mutex gpio_lock;
 	unsigned long gpio_enabled;
 };
@@ -435,6 +441,63 @@ static struct da9211_pdata *da9211_parse_regulators_dt(
 }
 #endif
 
+/* Parent owns retries; child lifetime must not own recovery work. */
+static void da9211_mask_recover(struct work_struct *work)
+{
+	struct da9211 *chip = container_of(to_delayed_work(work),
+					 struct da9211, mask_work);
+	int ret;
+
+	mutex_lock(&chip->irq_lock);
+	if (chip->stopping || !chip->pending_mask)
+		goto out;
+	ret = regmap_update_bits(chip->regmap, DA9211_REG_MASK_B,
+				 chip->pending_mask, chip->pending_mask);
+	if (!ret) {
+		chip->pending_mask = 0;
+		goto out;
+	}
+	if (++chip->mask_attempts < 3)
+		schedule_delayed_work(&chip->mask_work, msecs_to_jiffies(20));
+	else
+		dev_err(chip->dev,
+			"IRQ mask recovery exhausted (%d); sources %#x may remain active\n",
+			ret, chip->pending_mask);
+out:
+	mutex_unlock(&chip->irq_lock);
+}
+
+static void da9211_mask_stop(void *data)
+{
+	struct da9211 *chip = data;
+
+	mutex_lock(&chip->irq_lock);
+	chip->stopping = true;
+	mutex_unlock(&chip->irq_lock);
+	cancel_delayed_work_sync(&chip->mask_work);
+}
+
+static int da9211_buck_mask(struct da9211 *chip, int id, bool mask)
+{
+	unsigned int bit = DA9211_M_OV_CURR_A << id;
+	int ret;
+
+	mutex_lock(&chip->irq_lock);
+	/* Supersede any stale removal retry before a new child unmasks. */
+	chip->pending_mask &= ~bit;
+	ret = regmap_update_bits(chip->regmap, DA9211_REG_MASK_B,
+				 bit, mask ? bit : 0);
+	if (ret && mask) {
+		chip->pending_mask |= bit;
+		chip->mask_attempts = 0;
+		dev_err(chip->dev, "buck %d IRQ mask failed: %d\n", id, ret);
+		if (!chip->stopping)
+			schedule_delayed_work(&chip->mask_work, msecs_to_jiffies(20));
+	}
+	mutex_unlock(&chip->irq_lock);
+	return ret;
+}
+
 static irqreturn_t da9211_irq_handler(int irq, void *data)
 {
 	struct da9211 *chip = data;
@@ -455,7 +518,7 @@ static irqreturn_t da9211_irq_handler(int irq, void *data)
 		err = regmap_write(chip->regmap, DA9211_REG_EVENT_B,
 			DA9211_E_OV_CURR_A);
 		if (err < 0)
-			goto error_i2c;
+			dev_err_ratelimited(chip->dev, "event acknowledge failed: %d\n", err);
 
 		ret = IRQ_HANDLED;
 	}
@@ -471,7 +534,7 @@ static irqreturn_t da9211_irq_handler(int irq, void *data)
 		err = regmap_write(chip->regmap, DA9211_REG_EVENT_B,
 			DA9211_E_OV_CURR_B);
 		if (err < 0)
-			goto error_i2c;
+			dev_err_ratelimited(chip->dev, "event acknowledge failed: %d\n", err);
 
 		ret = IRQ_HANDLED;
 	}
@@ -479,7 +542,7 @@ static irqreturn_t da9211_irq_handler(int irq, void *data)
 	return ret;
 
 error_i2c:
-	dev_err(chip->dev, "I2C error : %d\n", err);
+	dev_err_ratelimited(chip->dev, "I2C error : %d\n", err);
 	return IRQ_NONE;
 }
 
@@ -491,9 +554,7 @@ static void da9211_buck_unpublish(void *data)
 	int id = *(int *)dev_get_platdata(&pdev->dev);
 
 	if (chip->chip_irq)
-		regmap_update_bits(chip->regmap, DA9211_REG_MASK_B,
-				   DA9211_M_OV_CURR_A << id,
-				   DA9211_M_OV_CURR_A << id);
+		da9211_buck_mask(chip, id, true);
 	/* Stop new IRQ readers before draining readers of the old pointer. */
 	smp_store_release(&chip->rdev[id], NULL);
 	if (chip->chip_irq)
@@ -574,8 +635,7 @@ static int da9211_buck_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	if (chip->chip_irq)
-		return regmap_update_bits(chip->regmap, DA9211_REG_MASK_B,
-					  DA9211_M_OV_CURR_A << id, 0);
+		return da9211_buck_mask(chip, id, false);
 	return 0;
 }
 
@@ -645,7 +705,9 @@ static int da9211_i2c_probe(struct i2c_client *i2c)
 		return -ENOMEM;
 
 	chip->dev = &i2c->dev;
+	mutex_init(&chip->irq_lock);
 	mutex_init(&chip->gpio_lock);
+	INIT_DELAYED_WORK(&chip->mask_work, da9211_mask_recover);
 	chip->regmap = devm_regmap_init_i2c(i2c, &da9211_regmap_config);
 	if (IS_ERR(chip->regmap)) {
 		error = PTR_ERR(chip->regmap);
@@ -715,6 +777,10 @@ static int da9211_i2c_probe(struct i2c_client *i2c)
 		dev_warn(chip->dev, "No IRQ configured\n");
 	}
 
+	/* Released after children and before IRQ/regmap devres. */
+	ret = devm_add_action_or_reset(chip->dev, da9211_mask_stop, chip);
+	if (ret)
+		return ret;
 	return da9211_regulator_init(chip);
 }
 
