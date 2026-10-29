@@ -1413,6 +1413,10 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 
+		thermal_calibration: calib@180 {
+			reg = <0x180 0xc>;
+		};
+
 		/* FUNC_CODE_1, devinfo word 22[3:0], selects the CPU speed bin. */
 		cpu_speed_bin: speed-bin@71c {
 			reg = <0x71c 0x1>;
@@ -1726,6 +1730,8 @@
 		mediatek,auxadc = <&auxadc>;
 		mediatek,apmixedsys = <&apmixedsys>;
 		#thermal-sensor-cells = <0>;
+		nvmem-cells = <&thermal_calibration>;
+		nvmem-cell-names = "calibration-data";
 	};
 
 	i2c5: i2c@1101c000 {
