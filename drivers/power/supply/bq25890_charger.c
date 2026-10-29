@@ -125,6 +125,7 @@ struct bq25890_device {
 	struct delayed_work status_work;
 	struct delayed_work iinlim_work;
 	bool policy_paused;
+	bool psel_stale;
 	unsigned long usb_event;
 
 	struct regmap *rmap;
@@ -924,7 +925,7 @@ static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
 	if (bq->policy_paused)
 		return;
 
-	switch (bq->state.vbus_status) {
+	switch (bq->psel_stale ? BQ25896_VBUS_NO_INPUT : bq->state.vbus_status) {
 	case BQ25896_VBUS_ADAPTER:
 		iinlim_ua = 3250000;
 		break;
@@ -942,13 +943,18 @@ static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
 
 	bq25890_write_iinlim(bq,
 			     bq25890_charger_get_scaled_iinlim_regval(bq, iinlim_ua),
-			     typec_ua < 0);
+			     typec_ua < 0 || bq->psel_stale);
 }
 
 static void bq25890_iinlim_work(struct work_struct *work)
 {
 	struct bq25890_device *bq =
 		container_of(work, struct bq25890_device, iinlim_work.work);
+
+	mutex_lock(&bq->lock);
+	if (!bq->policy_paused && bq->psel_stale)
+		__bq25890_handle_irq(bq);
+	mutex_unlock(&bq->lock);
 
 	if (!IS_ERR_OR_NULL(bq->charger))
 		bq25890_charger_external_power_changed(bq->charger);
@@ -1002,10 +1008,12 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	if (ret < 0)
 		return IRQ_NONE;
 
-	if (!memcmp(&bq->state, &new_state, sizeof(new_state)))
+	if (!bq->psel_stale &&
+	    !memcmp(&bq->state, &new_state, sizeof(new_state)))
 		return IRQ_NONE;
 
-	vbus_changed = new_state.vbus_status != bq->state.vbus_status;
+	vbus_changed = bq->psel_stale ||
+		new_state.vbus_status != bq->state.vbus_status;
 
 	/*
 	 * Restore HiZ bit in case it was set by user. The chip does not retain
@@ -1029,6 +1037,7 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	}
 
 	bq->state = new_state;
+	bq->psel_stale = false;
 
 	/*
 	 * A changed VBUS_STAT means the source was (un)plugged or re-detected;
@@ -1872,21 +1881,29 @@ static int bq25890_suspend(struct device *dev)
 
 static int bq25890_resume(struct device *dev)
 {
+	struct bq25890_state state;
 	int ret;
 	struct bq25890_device *bq = dev_get_drvdata(dev);
 
 	mutex_lock(&bq->lock);
 
 	bq->policy_paused = false;
+	/* A cable replacement invalidates the pre-suspend PSEL budget. */
+	bq->psel_stale = bq->chip_version == BQ25896;
 	/* Refresh the supplier even when the subsequent chip-state read fails. */
 	if (bq->chip_version == BQ25896)
 		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 	else if (bq->chip_version == BQ25892)
 		mod_delayed_work(system_wq, &bq->iinlim_work, 0);
 
-	ret = bq25890_get_chip_state(bq, &bq->state);
+	ret = bq25890_get_chip_state(bq, &state);
 	if (ret < 0)
 		goto unlock;
+
+	bq->state = state;
+	bq->psel_stale = false;
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 
 	/* Re-enable ADC only if charger is plugged in. */
 	if (bq->state.online) {
