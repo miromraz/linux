@@ -19,6 +19,7 @@
 #include <linux/regulator/da9211.h>
 #include <dt-bindings/regulator/dlg,da9211-regulator.h>
 #include "da9211-regulator.h"
+#include "mt6797-boot-barrier.h"
 
 /* DEVICE IDs */
 #define DA9211_DEVICE_ID	0x22
@@ -37,6 +38,7 @@ struct da9211 {
 	int num_regulator;
 	int chip_irq;
 	int chip_id;
+	bool boot_barrier;
 };
 
 static const struct regmap_range_cfg da9211_regmap_range[] = {
@@ -234,13 +236,58 @@ static int da9211_get_current_limit(struct regulator_dev *rdev)
 	return current_limits[data];
 }
 
+/* Only the shared A53/CCI buck is subject to the board boot barrier. */
+static bool da9211_boot_barrier(struct regulator_dev *rdev)
+{
+	struct da9211 *chip = rdev_get_drvdata(rdev);
+
+	return chip->boot_barrier && rdev_get_id(rdev) == DA9211_ID_BUCKA;
+}
+
+static int da9211_barrier_state(struct regulator_dev *rdev)
+{
+	unsigned int control;
+	int ret;
+
+	ret = regmap_read(rdev->regmap, DA9211_REG_BUCKA_CONT, &control);
+	if (ret)
+		return ret;
+	/* The generic descriptor addresses bank A; do not infer bank B. */
+	if (control & (DA9211_VBUCKA_SEL | DA9211_VBUCKA_GPI_MASK |
+		       DA9211_BUCKA_GPI_MASK))
+		return -EIO;
+	return !!(control & DA9211_BUCKA_EN);
+}
+
+static int da9211_set_voltage_sel(struct regulator_dev *rdev, unsigned int sel)
+{
+	if (da9211_boot_barrier(rdev))
+		return mt6797_boot_barrier_check(da9211_barrier_state(rdev),
+				regulator_get_voltage_sel_regmap(rdev), sel);
+	return regulator_set_voltage_sel_regmap(rdev, sel);
+}
+
+static int da9211_enable(struct regulator_dev *rdev)
+{
+	if (da9211_boot_barrier(rdev))
+		return mt6797_boot_barrier_check(da9211_barrier_state(rdev), 0, 0);
+	return regulator_enable_regmap(rdev);
+}
+
+static int da9211_disable(struct regulator_dev *rdev)
+{
+	if (da9211_boot_barrier(rdev))
+		return -EBUSY;
+	return regulator_disable_regmap(rdev);
+}
+
 static const struct regulator_ops da9211_buck_ops = {
 	.get_mode = da9211_buck_get_mode,
 	.set_mode = da9211_buck_set_mode,
-	.enable = regulator_enable_regmap,
-	.disable = regulator_disable_regmap,
+	.enable = da9211_enable,
+	.disable = da9211_disable,
 	.is_enabled = regulator_is_enabled_regmap,
-	.set_voltage_sel = regulator_set_voltage_sel_regmap,
+	.set_voltage_sel = da9211_set_voltage_sel,
 	.get_voltage_sel = regulator_get_voltage_sel_regmap,
 	.list_voltage = regulator_list_voltage_linear,
 	.set_current_limit = da9211_set_current_limit,
@@ -315,6 +362,10 @@ static struct da9211_pdata *da9211_parse_regulators_dt(
 
 		pdata->init_data[n] = da9211_matches[i].init_data;
 		pdata->reg_node[n] = da9211_matches[i].of_node;
+		/* Never assert an external enable before shared-rail preflight. */
+		if (mt6797_boot_barrier_supply(pdata->reg_node[n], "cpu-supply") &&
+		    of_find_property(pdata->reg_node[n], "enable-gpios", NULL))
+			return ERR_PTR(-EOPNOTSUPP);
 		pdata->gpiod_ren[n] = devm_fwnode_gpiod_get(dev,
 					of_fwnode_handle(pdata->reg_node[n]),
 					"enable",
@@ -399,6 +450,19 @@ static int da9211_regulator_init(struct da9211 *chip)
 	else {
 		dev_err(chip->dev, "Configuration is mismatched\n");
 		return -EINVAL;
+	}
+
+	chip->boot_barrier = mt6797_boot_barrier_supply(
+		chip->pdata->reg_node[DA9211_ID_BUCKA], "cpu-supply");
+
+	if (chip->boot_barrier) {
+		ret = regmap_read(chip->regmap, DA9211_REG_BUCKA_CONT, &data);
+		if (ret)
+			return ret;
+		if (!(data & DA9211_BUCKA_EN) ||
+		    (data & (DA9211_VBUCKA_SEL | DA9211_VBUCKA_GPI_MASK |
+			     DA9211_BUCKA_GPI_MASK)))
+			return -EIO;
 	}
 
 	for (i = 0; i < chip->num_regulator; i++) {

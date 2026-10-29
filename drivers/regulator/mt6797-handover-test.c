@@ -8,12 +8,16 @@
 #include <linux/regulator/machine.h>
 #include <linux/platform_device.h>
 
+#include "mt6797-boot-barrier.h"
+
 struct handover_test {
 	struct kunit *test;
 	unsigned int sel;
 	unsigned int writes;
 	int enable_error;
 	bool fail;
+	bool barrier;
+	int enabled;
 };
 
 static int handover_get(struct regulator_dev *rdev)
@@ -28,6 +32,8 @@ static int handover_set(struct regulator_dev *rdev, unsigned int sel)
 	struct handover_test *ctx = rdev_get_drvdata(rdev);
 	int uv = regulator_list_voltage_linear(rdev, sel);
 
+	if (ctx->barrier)
+		return mt6797_boot_barrier_check(ctx->enabled, ctx->sel, sel);
 	if (ctx->fail)
 		return -EIO;
 	/* Fixed SRAM is 1.20 V in this fixture; check every physical write. */
@@ -169,8 +175,71 @@ static void handover_arbitration(struct kunit *test)
 	handover_arbitration_grid(test, 25000);
 }
 
+/* Exercise the actual immutable barrier through constraint normalization.
+ * Both rail grids and both arrival orders must leave hardware untouched,
+ * including when registration of the other provider fails.
+ */
+static void handover_boot_barrier(struct kunit *test)
+{
+	struct regulator_desc desc = handover_desc;
+	struct handover_test ctx[2] = {
+		{ .test = test, .sel = 15, .enabled = 1, .barrier = true },
+		{ .test = test, .sel = 6, .enabled = 1, .barrier = true },
+	};
+	struct regulator_init_data init = {
+		.constraints = {
+			.min_uV = 1200000, .max_uV = 1200000, .apply_uV = true,
+			.valid_ops_mask = REGULATOR_CHANGE_VOLTAGE,
+		},
+	};
+	struct regulator_config config = { .init_data = &init };
+	struct platform_device *pdev;
+	struct regulator_dev *rdev;
+	int order, rail, n;
+
+	pdev = platform_device_register_simple("handover-barrier", -1, NULL, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(pdev));
+	config.dev = &pdev->dev;
+	for (order = 0; order < 2; order++) {
+		for (n = 0; n < 2; n++) {
+			rail = n ^ order;
+			desc.uV_step = rail ? 25000 : 10000;
+			desc.n_voltages = rail ? 9 : 21;
+			config.driver_data = &ctx[rail];
+			rdev = regulator_register(config.dev, &desc, &config);
+			KUNIT_EXPECT_TRUE(test, IS_ERR(rdev));
+			if (IS_ERR(rdev))
+				KUNIT_EXPECT_EQ(test, PTR_ERR(rdev), -EBUSY);
+			else
+				regulator_unregister(rdev);
+			KUNIT_EXPECT_EQ(test, ctx[0].sel, 15U);
+			KUNIT_EXPECT_EQ(test, ctx[1].sel, 6U);
+			KUNIT_EXPECT_EQ(test, ctx[0].writes + ctx[1].writes, 0U);
+		}
+	}
+	/* A matching registration does not silently release the barrier. */
+	init.constraints.min_uV = 1000000;
+	config.driver_data = &ctx[0];
+	desc = handover_desc;
+	rdev = regulator_register(config.dev, &desc, &config);
+	KUNIT_EXPECT_FALSE(test, IS_ERR(rdev));
+	if (!IS_ERR(rdev)) {
+		KUNIT_EXPECT_EQ(test, handover_set(rdev, 15), 0);
+		KUNIT_EXPECT_EQ(test, handover_set(rdev, 14), -EBUSY);
+		KUNIT_EXPECT_EQ(test, handover_set(rdev, 16), -EBUSY);
+		ctx[0].enabled = 0;
+		KUNIT_EXPECT_EQ(test, handover_set(rdev, 15), -EIO);
+		ctx[0].enabled = -EPROBE_DEFER;
+		KUNIT_EXPECT_EQ(test, handover_set(rdev, 15), -EPROBE_DEFER);
+		KUNIT_EXPECT_EQ(test, ctx[0].writes, 0U);
+		regulator_unregister(rdev);
+	}
+	platform_device_unregister(pdev);
+}
+
 static struct kunit_case handover_cases[] = {
 	KUNIT_CASE(handover_registration),
+	KUNIT_CASE(handover_boot_barrier),
 	KUNIT_CASE(handover_arbitration),
 	{}
 };

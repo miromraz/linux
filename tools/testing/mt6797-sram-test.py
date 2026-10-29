@@ -15,6 +15,8 @@ root = pathlib.Path(__file__).resolve().parents[2]
 source = (root / 'drivers/regulator/mt6797-cpu-sram-regulator.c').read_text()
 callbacks = source[source.index('#define MT6797_CPULDO_CTRL_0'):
                    source.index('static const struct regulator_ops')]
+barrier = (root / 'drivers/regulator/mt6797-boot-barrier.h').read_text()
+barrier = barrier[barrier.index('static inline int'):barrier.index('#endif')]
 prelude = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -25,24 +27,24 @@ prelude = r'''
 #define DIV_ROUND_UP(n,d) (((n)+(d)-1)/(d))
 #define max(a,b) ((a) > (b) ? (a) : (b))
 #define dev_err(...) ((void)0)
-struct mock {
+struct regmap {
     unsigned regs[3], reads, writes, fail_read, fail_write, fail_write2;
     unsigned corrupt_read, drop_write, delays[16], ndelay;
 };
-struct regulator_dev { struct mock *regmap; void *data; };
+struct regulator_dev { struct regmap *regmap; void *data; };
 #define rdev_get_drvdata(r) ((r)->data)
-static struct mock *active;
+static struct regmap *active;
 static void udelay(unsigned us) {
     assert(active->ndelay < 16);
     active->delays[active->ndelay++] = us;
 }
-static int regmap_read(struct mock *m, unsigned reg, unsigned *value) {
+static int regmap_read(struct regmap *m, unsigned reg, unsigned *value) {
     if (++m->reads == m->fail_read) return -EIO;
     *value = m->regs[(reg-0xf98)/4];
     if (m->reads == m->corrupt_read) *value ^= 1;
     return 0;
 }
-static int regmap_update_bits(struct mock *m, unsigned reg, unsigned mask,
+static int regmap_update_bits(struct regmap *m, unsigned reg, unsigned mask,
                               unsigned value) {
     ++m->writes;
     if (m->writes == m->fail_write || m->writes == m->fail_write2)
@@ -54,6 +56,9 @@ static int regmap_update_bits(struct mock *m, unsigned reg, unsigned mask,
 static int regulator_enable_regmap(struct regulator_dev *r) {
     return regmap_update_bits(r->regmap, 0xf98, 255, 255);
 }
+static int regulator_disable_regmap(struct regulator_dev *r) {
+    return regmap_update_bits(r->regmap, 0xf98, 255, 0);
+}
 static int regulator_is_enabled_regmap(struct regulator_dev *r) {
     unsigned value;
     int ret = regmap_read(r->regmap, 0xf98, &value);
@@ -61,14 +66,15 @@ static int regulator_is_enabled_regmap(struct regulator_dev *r) {
 }
 '''
 tests = r'''
-static struct mock m;
+static struct regmap m;
 static struct mt6797_cpu_sram state;
 static struct regulator_dev r = {&m, &state};
 static unsigned packed(unsigned code) { return code * 0x01010101U; }
 static void reset(unsigned code) {
-    m = (struct mock){.regs = {255, 0xa0b0c0d0U | packed(code),
+    m = (struct regmap){.regs = {255, 0xa0b0c0d0U | packed(code),
                                    0xe0f08090U | packed(code)}};
     state.unresolved = false;
+    state.boot_barrier = false;
     active = &m;
 }
 static void restored(void) {
@@ -97,6 +103,21 @@ static void *reader(void *unused) {
     return NULL;
 }
 int main(void) {
+    reset(9);
+    state.boot_barrier = true;
+    assert(!mt6797_cpu_sram_set_voltage_sel(&r, 2));
+    assert(mt6797_cpu_sram_set_voltage_sel(&r, 1) == -EBUSY);
+    assert(mt6797_cpu_sram_set_voltage_sel(&r, 3) == -EBUSY);
+    assert(!mt6797_cpu_sram_enable(&r));
+    assert(mt6797_cpu_sram_disable(&r) == -EBUSY);
+    assert(!m.writes && !m.ndelay);
+    m.regs[0] = 0;
+    assert(mt6797_cpu_sram_set_voltage_sel(&r, 2) == -EIO);
+    assert(mt6797_cpu_sram_enable(&r) == -EIO);
+    assert(!m.writes && !m.ndelay);
+    reset(9);
+    assert(!mt6797_cpu_sram_disable(&r));
+    assert(!m.regs[0]);
     for (unsigned c = 0; c < 16; c++) {
         reset(c);
         int expected = c == 0 ? 2 : c < 7 ? -EINVAL : (int)c - 7;
@@ -238,7 +259,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='mt6797-sram-') as tmp:
     src = pathlib.Path(tmp) / 'test.c'
     exe = pathlib.Path(tmp) / 'test'
-    src.write_text(prelude + callbacks + tests)
+    src.write_text(prelude + barrier + callbacks + tests)
     subprocess.run(['gcc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-Wno-sign-compare', '-pthread', '-fsanitize=undefined,address',
                     str(src), '-o', str(exe)], check=True)

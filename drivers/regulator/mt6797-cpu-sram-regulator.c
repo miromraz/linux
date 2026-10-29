@@ -32,6 +32,8 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/of_regulator.h>
 
+#include "mt6797-boot-barrier.h"
+
 #define MT6797_CPULDO_CTRL_0		0xf98
 #define MT6797_CPULDO_CTRL_1		0xf9c
 #define MT6797_CPULDO_CTRL_2		0xfa0
@@ -60,14 +62,15 @@
 struct mt6797_cpu_sram {
 	/* Reboot/reprobe required; normal reads must not clear containment. */
 	bool unresolved;
+	bool boot_barrier;
 };
 
-static int mt6797_cpu_sram_read(struct regulator_dev *rdev, unsigned int words[2])
+static int mt6797_cpu_sram_read_bank(struct regmap *regmap, unsigned int words[2])
 {
 	unsigned int enable, code;
 	int ret, sel = -1, decoded, i;
 
-	ret = regmap_read(rdev->regmap, MT6797_CPULDO_CTRL_0, &enable);
+	ret = regmap_read(regmap, MT6797_CPULDO_CTRL_0, &enable);
 	if (ret)
 		return ret;
 	/* All-off is legal before the core's voltage-before-enable sequence. */
@@ -75,7 +78,7 @@ static int mt6797_cpu_sram_read(struct regulator_dev *rdev, unsigned int words[2
 	if (enable && enable != MT6797_CPULDO_EN_MASK)
 		return -EINVAL;
 	for (i = 0; i < 2; i++) {
-		ret = regmap_read(rdev->regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
+		ret = regmap_read(regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
 				  &words[i]);
 		if (ret)
 			return ret;
@@ -96,6 +99,11 @@ static int mt6797_cpu_sram_read(struct regulator_dev *rdev, unsigned int words[2
 		sel = decoded;
 	}
 	return sel;
+}
+
+static int mt6797_cpu_sram_read(struct regulator_dev *rdev, unsigned int words[2])
+{
+	return mt6797_cpu_sram_read_bank(rdev->regmap, words);
 }
 
 static unsigned int mt6797_cpu_sram_delay(unsigned int old_sel,
@@ -148,6 +156,9 @@ static int mt6797_cpu_sram_set_voltage_sel(struct regulator_dev *rdev,
 		dev_err(&rdev->dev, "cannot snapshot SRAM bank: %d\n", old_sel);
 		return old_sel;
 	}
+	if (sram->boot_barrier)
+		return mt6797_boot_barrier_check(
+			regulator_is_enabled_regmap(rdev), old_sel, sel);
 	code = sel + MT6797_CPULDO_MIN_SEL;
 	packed = code | (code << 8) | (code << 16) | (code << 24);
 	for (i = 0; i < 2; i++) {
@@ -200,12 +211,16 @@ recover:
 
 static int mt6797_cpu_sram_enable(struct regulator_dev *rdev)
 {
+	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
 	int ret;
 
 	ret = mt6797_cpu_sram_get_voltage_sel(rdev);
 	/* Registration tolerates -EINVAL for a missing enable operation. */
 	if (ret < 0)
 		return ret == -EINVAL ? -EIO : ret;
+	if (sram->boot_barrier)
+		return mt6797_boot_barrier_check(
+			regulator_is_enabled_regmap(rdev), ret, ret);
 	ret = regulator_enable_regmap(rdev);
 	if (ret)
 		return ret;
@@ -214,13 +229,22 @@ static int mt6797_cpu_sram_enable(struct regulator_dev *rdev)
 	return ret > 0 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
+static int mt6797_cpu_sram_disable(struct regulator_dev *rdev)
+{
+	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
+
+	if (sram->boot_barrier)
+		return -EBUSY;
+	return regulator_disable_regmap(rdev);
+}
+
 static const struct regulator_ops mt6797_cpu_sram_ops = {
 	.list_voltage		= regulator_list_voltage_linear,
 	.map_voltage		= regulator_map_voltage_linear,
 	.set_voltage_sel	= mt6797_cpu_sram_set_voltage_sel,
 	.get_voltage_sel	= mt6797_cpu_sram_get_voltage_sel,
 	.enable			= mt6797_cpu_sram_enable,
-	.disable		= regulator_disable_regmap,
+	.disable		= mt6797_cpu_sram_disable,
 	.is_enabled		= regulator_is_enabled_regmap,
 };
 
@@ -245,6 +269,8 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 	struct regulator_dev *rdev;
 	struct mt6797_cpu_sram *sram;
 	struct regmap *regmap;
+	unsigned int enable, words[2];
+	int ret;
 
 	regmap = syscon_node_to_regmap(dev->parent->of_node);
 	if (IS_ERR(regmap))
@@ -254,6 +280,17 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 	sram = devm_kzalloc(dev, sizeof(*sram), GFP_KERNEL);
 	if (!sram)
 		return -ENOMEM;
+	sram->boot_barrier = mt6797_boot_barrier_supply(np, "mem-supply");
+	if (sram->boot_barrier) {
+		ret = regmap_read(regmap, MT6797_CPULDO_CTRL_0, &enable);
+		if (ret)
+			return ret;
+		if ((enable & MT6797_CPULDO_EN_MASK) != MT6797_CPULDO_EN_MASK)
+			return -EIO;
+		ret = mt6797_cpu_sram_read_bank(regmap, words);
+		if (ret < 0)
+			return ret;
+	}
 	config.driver_data = sram;
 	config.dev = dev;
 	config.of_node = np;
