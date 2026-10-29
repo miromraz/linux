@@ -765,8 +765,11 @@ static int bq25890_power_supply_set_property(struct power_supply *psy,
 		}
 		/* Publish successful policy changes before recovery can run. */
 		ret = bq25890_field_write(bq, F_EN_HIZ, !val->intval);
-		if (!ret)
+		if (!ret) {
 			bq->force_hiz = !val->intval;
+			/* Reconcile ADC and cache even if the refresh fails. */
+			bq->adc_restore_pending = true;
+		}
 		mutex_unlock(&bq->lock);
 		bq25890_update_state(bq, psp, &state);
 		return ret;
@@ -1078,9 +1081,10 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 
 	return IRQ_HANDLED;
 error:
-	if (bq->adc_restore_pending || bq->psel_stale)
-		mod_delayed_work(system_wq, &bq->iinlim_work,
-				 BQ25890_POLL_INTERVAL);
+	/* A failed state read also needs recovery without another interrupt. */
+	bq->adc_restore_pending = true;
+	mod_delayed_work(system_wq, &bq->iinlim_work,
+			 BQ25890_POLL_INTERVAL);
 	dev_err(bq->dev, "Error communicating with the chip: %pe\n",
 		ERR_PTR(ret));
 	return IRQ_HANDLED;
