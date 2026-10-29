@@ -203,8 +203,9 @@ static int mt6797_cpu_sram_enable(struct regulator_dev *rdev)
 	int ret;
 
 	ret = mt6797_cpu_sram_get_voltage_sel(rdev);
+	/* Registration tolerates -EINVAL for a missing enable operation. */
 	if (ret < 0)
-		return ret;
+		return ret == -EINVAL ? -EIO : ret;
 	ret = regulator_enable_regmap(rdev);
 	if (ret)
 		return ret;

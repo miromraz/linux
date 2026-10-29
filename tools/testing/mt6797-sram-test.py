@@ -162,6 +162,9 @@ int main(void) {
         unsigned writes = m.writes;
         assert(mt6797_cpu_sram_set_voltage_sel(&r, 2) == -EIO);
         assert(m.writes == writes);
+        unsigned reads = m.reads, waits = m.ndelay;
+        assert(mt6797_cpu_sram_enable(&r) == -EIO);
+        assert(m.writes == writes && m.reads == reads && m.ndelay == waits);
     }
     for (unsigned fail = 4; fail <= 6; fail++) {
         reset(9); m.fail_write = 2; m.fail_read = fail;
@@ -192,7 +195,7 @@ int main(void) {
         reset(9); m.regs[0] = enable;
         if (enable && enable != 255) {
             assert(mt6797_cpu_sram_get_voltage_sel(&r) == -EINVAL);
-            assert(mt6797_cpu_sram_enable(&r) == -EINVAL);
+            assert(mt6797_cpu_sram_enable(&r) == -EIO);
             assert(!m.writes);
         } else {
             assert(mt6797_cpu_sram_get_voltage_sel(&r) == 2);
@@ -201,10 +204,28 @@ int main(void) {
             assert(m.regs[0] == 255);
         }
     }
-    reset(9); m.regs[0] = 0; m.fail_write = 1;
-    assert(mt6797_cpu_sram_enable(&r) == -EIO);
-    reset(9); m.fail_read = 4;
-    assert(mt6797_cpu_sram_enable(&r) == -EIO);
+    /* All-off failures: a failed verification can leave the bank on. */
+    for (unsigned fault = 0; fault < 3; fault++) {
+        reset(9); m.regs[0] = 0xabcdef00;
+        if (fault == 0) m.fail_write = 1;
+        if (fault == 1) m.fail_read = 4;
+        if (fault == 2) m.drop_write = 1;
+        assert(mt6797_cpu_sram_enable(&r) == -EIO);
+        assert(m.regs[0] == (fault == 1 ? 0xabcdefffU : 0xabcdef00U));
+        assert(m.ndelay == (fault == 0 ? 0 : 1));
+        if (m.ndelay) assert(m.delays[0] == 69);
+        restored();
+        m.fail_write = m.fail_read = m.drop_write = 0;
+        assert(!mt6797_cpu_sram_enable(&r));
+        assert(m.regs[0] == 0xabcdefffU);
+        assert(m.delays[m.ndelay-1] == 69);
+        restored();
+    }
+    for (unsigned code = 1; code < 7; code++) {
+        reset(code); m.regs[0] = 0;
+        assert(mt6797_cpu_sram_enable(&r) == -EIO);
+        assert(!m.writes && !m.ndelay && !m.regs[0]);
+    }
     reset(9);
     pthread_t a, b;
     assert(!pthread_create(&a, NULL, writer, NULL));
