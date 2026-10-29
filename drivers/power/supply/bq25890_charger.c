@@ -999,6 +999,26 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 	return 0;
 }
 
+/* Called with lock held, before committing state or selecting the ADC target. */
+static int bq25890_restore_hiz(struct bq25890_device *bq,
+			       struct bq25890_state *state)
+{
+	int ret;
+
+	/* Cable insertion can clear HiZ, including while suspended. */
+	if (!bq->force_hiz || state->hiz)
+		return 0;
+
+	/* Keep recovery armed even if this write or the next state read fails. */
+	bq->adc_restore_pending = true;
+	ret = bq25890_field_write(bq, F_EN_HIZ, 1);
+	if (ret < 0)
+		return ret;
+
+	state->hiz = 1;
+	return 0;
+}
+
 static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 {
 	bool adc_conv_rate, new_adc_conv_rate;
@@ -1013,24 +1033,16 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	if (ret < 0)
 		goto error;
 
+	ret = bq25890_restore_hiz(bq, &new_state);
+	if (ret < 0)
+		goto error;
+
 	state_changed = memcmp(&bq->state, &new_state, sizeof(new_state));
 	if (!bq->psel_stale && !bq->adc_restore_pending && !state_changed)
 		return IRQ_NONE;
 
 	vbus_changed = bq->psel_stale ||
 		new_state.vbus_status != bq->state.vbus_status;
-
-	/*
-	 * Restore HiZ bit in case it was set by user. The chip does not retain
-	 * this bit on cable replug, hence the bit must be reset manually here.
-	 */
-	if (new_state.online && !bq->state.online && bq->force_hiz) {
-		bq->adc_restore_pending = true;
-		ret = bq25890_field_write(bq, F_EN_HIZ, bq->force_hiz);
-		if (ret < 0)
-			goto error;
-		new_state.hiz = 1;
-	}
 
 	/* Should period ADC sampling be enabled? */
 	adc_conv_rate = bq->state.online && !bq->state.hiz;
@@ -1914,6 +1926,10 @@ static int bq25890_resume(struct device *dev)
 		mod_delayed_work(system_wq, &bq->iinlim_work, 0);
 
 	ret = bq25890_get_chip_state(bq, &state);
+	if (ret < 0)
+		goto unlock;
+
+	ret = bq25890_restore_hiz(bq, &state);
 	if (ret < 0)
 		goto unlock;
 
