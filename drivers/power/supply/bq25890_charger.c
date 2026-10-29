@@ -822,27 +822,26 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 	 * The BQ25896 takes its limit from the PSEL pin and, when the source is
 	 * a USB-C connector, from the Type-C current the supplier advertises.
 	 */
+	mutex_lock(&bq->lock);
+	if (bq->policy_paused)
+		goto unlock;
+
 	if (bq->chip_version == BQ25896) {
-		mutex_lock(&bq->lock);
 		bq25890_charger_set_iinlim_from_vbus_stat(bq);
-		mutex_unlock(&bq->lock);
-		return;
+		goto unlock;
 	}
 
 	/* On the BQ25892 try to get charger-type info from our supplier */
 	if (bq->chip_version != BQ25892)
-		return;
+		goto unlock;
 
 	ret = power_supply_get_property_from_supplier(psy,
 						      POWER_SUPPLY_PROP_USB_TYPE,
 						      &val);
 	if (ret) {
-		mutex_lock(&bq->lock);
-		if (!bq->policy_paused)
-			mod_delayed_work(system_wq, &bq->iinlim_work,
-					 BQ25890_POLL_INTERVAL);
-		mutex_unlock(&bq->lock);
-		return;
+		mod_delayed_work(system_wq, &bq->iinlim_work,
+				 BQ25890_POLL_INTERVAL);
+		goto unlock;
 	}
 
 	switch (val.intval) {
@@ -863,10 +862,13 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 		input_current_limit = bq25890_charger_get_scaled_iinlim_regval(bq, 500000);
 	}
 
-	mutex_lock(&bq->lock);
 	bq25890_write_iinlim(bq, input_current_limit, false);
 	mutex_unlock(&bq->lock);
 	power_supply_changed(psy);
+	return;
+
+unlock:
+	mutex_unlock(&bq->lock);
 }
 
 /*
@@ -878,14 +880,20 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 static int bq25896_typec_input_current_ua(struct bq25890_device *bq)
 {
 	union power_supply_propval val;
+	int ret;
 
 	if (!bq->charger)
 		return 0;
 
-	if (power_supply_get_property_from_supplier(bq->charger,
+	ret = power_supply_get_property_from_supplier(bq->charger,
 						    POWER_SUPPLY_PROP_CURRENT_MAX,
-						    &val))
-		return -EAGAIN;
+						    &val);
+	if (ret == -ENODEV && !bq->charger->num_supplies &&
+	    !device_property_present(bq->dev, "power-supplies") &&
+	    !device_property_present(bq->dev, "supplied-from"))
+		return 0;
+	if (ret)
+		return ret;
 
 	return val.intval;
 }
@@ -906,6 +914,10 @@ static int bq25896_typec_input_current_ua(struct bq25890_device *bq)
 static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
 {
 	int iinlim_ua, typec_ua;
+
+	/* All callers hold lock, including across the supplier access. */
+	if (bq->policy_paused)
+		return;
 
 	switch (bq->state.vbus_status) {
 	case BQ25896_VBUS_ADAPTER:
