@@ -33,6 +33,7 @@ struct mtk_cpufreq_platform_data {
 	 * SoCs are left untouched.
 	 */
 	bool firmware_pll;
+	bool allow_unmanaged;
 
 };
 
@@ -466,6 +467,19 @@ static int mtk_cpu_opp_set_supported_hw(struct mtk_cpu_dvfs_info *info)
 	return 0;
 }
 
+/* Preserve board mappings and supply aliases as well as DT supplies. */
+static struct regulator *mtk_cpufreq_get_regulator(struct device *dev,
+						   const char *name,
+						   const char *legacy_name)
+{
+	struct regulator *reg = regulator_get_optional(dev, name);
+
+	if (IS_ERR(reg) && PTR_ERR(reg) == -ENODEV)
+		reg = regulator_get_optional(dev, legacy_name);
+
+	return reg;
+}
+
 static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 {
 	struct device *cpu_dev;
@@ -503,11 +517,14 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 	}
 
 	/* "cpu"/"mem" are the current supply names; "proc"/"sram" the old ones. */
-	info->proc_reg = regulator_get_optional(cpu_dev, "cpu");
-	if (PTR_ERR(info->proc_reg) == -ENODEV)
-		info->proc_reg = regulator_get_optional(cpu_dev, "proc");
+	info->proc_reg = mtk_cpufreq_get_regulator(cpu_dev, "cpu", "proc");
 	if (IS_ERR(info->proc_reg)) {
 		ret = PTR_ERR(info->proc_reg);
+		/* MT6797 boards may intentionally leave a cluster unmanaged. */
+		if (ret == -ENODEV && info->soc_data->allow_unmanaged) {
+			ret = 1; /* Successfully identified an unmanaged cluster. */
+			goto out_free_inter_clock;
+		}
 		dev_err_probe(cpu_dev, ret,
 			      "cpu%d: failed to get proc regulator\n", cpu);
 		goto out_free_inter_clock;
@@ -520,12 +537,10 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 	}
 
 	/* Both presence and absence of sram regulator are valid cases. */
-	info->sram_reg = regulator_get_optional(cpu_dev, "mem");
-	if (PTR_ERR(info->sram_reg) == -ENODEV)
-		info->sram_reg = regulator_get_optional(cpu_dev, "sram");
+	info->sram_reg = mtk_cpufreq_get_regulator(cpu_dev, "mem", "sram");
 	if (IS_ERR(info->sram_reg)) {
 		ret = PTR_ERR(info->sram_reg);
-		if (ret == -EPROBE_DEFER) {
+		if (ret != -ENODEV) {
 			dev_err_probe(cpu_dev, ret,
 				      "cpu%d: Failed to get sram regulator\n", cpu);
 			goto out_disable_proc_reg;
@@ -679,15 +694,6 @@ static void mtk_cpu_dvfs_info_release(struct mtk_cpu_dvfs_info *info)
 		put_device(info->cci_dev);
 }
 
-/* Keep probe and policy initialization consistent for unmanaged CPUs. */
-static bool mtk_cpu_has_dvfs(struct device *cpu_dev)
-{
-	return cpu_dev &&
-		of_property_present(cpu_dev->of_node, "operating-points-v2") &&
-		(of_property_present(cpu_dev->of_node, "cpu-supply") ||
-		 of_property_present(cpu_dev->of_node, "proc-supply"));
-}
-
 static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 {
 	struct mtk_cpu_dvfs_info *info;
@@ -697,14 +703,8 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 	int ret, idx, i;
 
 	info = mtk_cpu_dvfs_info_lookup(policy->cpu);
-	if (!info) {
-		if (!mtk_cpu_has_dvfs(get_cpu_device(policy->cpu)))
-			return -ENODEV;
-
-		pr_err("dvfs info for cpu%d is not initialized.\n",
-			policy->cpu);
-		return -EINVAL;
-	}
+	if (!info)
+		return -ENODEV;
 
 	ret = dev_pm_opp_init_cpufreq_table(info->cpu_dev, &freq_table);
 	if (ret) {
@@ -813,9 +813,10 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 		if (info)
 			continue;
 
-		/* A board must describe both the OPPs and their voltage supply. */
+		/* Only MT6797 explicitly supports unmanaged clusters. */
 		cpu_dev = get_cpu_device(cpu);
-		if (cpu_dev && !mtk_cpu_has_dvfs(cpu_dev))
+		if (data->allow_unmanaged && cpu_dev &&
+		    !of_property_present(cpu_dev->of_node, "operating-points-v2"))
 			continue;
 
 		info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
@@ -827,6 +828,8 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 
 		info->soc_data = data;
 		ret = mtk_cpu_dvfs_info_init(info, cpu);
+		if (ret == 1 && data->allow_unmanaged)
+			continue;
 		if (ret)
 			goto release_dvfs_info_list;
 
@@ -874,6 +877,7 @@ static const struct mtk_cpufreq_platform_data mt6797_platform_data = {
 	.sram_max_volt = 1200000,
 	.ccifreq_supported = false,
 	.firmware_pll = true,
+	.allow_unmanaged = true,
 };
 
 static const struct mtk_cpufreq_platform_data mt7622_platform_data = {
