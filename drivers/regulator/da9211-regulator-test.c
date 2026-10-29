@@ -263,13 +263,16 @@ out:
 struct da9211_test_gpio {
 	struct gpio_chip chip;
 	int value;
+	int requests;
+	int read_error;
+	int frees;
 };
 
 static int da9211_gpio_get(struct gpio_chip *gc, unsigned int offset)
 {
 	struct da9211_test_gpio *gpio = gpiochip_get_data(gc);
 
-	return gpio->value;
+	return gpio->read_error ?: gpio->value;
 }
 
 static int da9211_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
@@ -280,35 +283,63 @@ static int da9211_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
 	return 0;
 }
 
-static void da9211_test_supplied_gpio(struct kunit *test)
+static int da9211_gpio_request(struct gpio_chip *gc, unsigned int offset)
+{
+	struct da9211_test_gpio *gpio = gpiochip_get_data(gc);
+
+	gpio->requests++;
+	return 0;
+}
+
+static void da9211_gpio_free(struct gpio_chip *gc, unsigned int offset)
+{
+	struct da9211_test_gpio *gpio = gpiochip_get_data(gc);
+
+	gpio->frees++;
+}
+
+static void da9211_test_gpio_level(struct kunit *test, bool high)
 {
 	struct da9211_test_gpio gpio = { .chip = {
 		.label = "da9211-test-gpio", .base = -1, .ngpio = 1,
 		.get = da9211_gpio_get, .set = da9211_gpio_set,
 		.direction_output = da9211_gpio_set,
+		.request = da9211_gpio_request, .free = da9211_gpio_free,
 	} };
 	struct da9211_test_bus *bus = kunit_kzalloc(test, sizeof(*bus), GFP_KERNEL);
-	struct regulator_init_data init = { .constraints = {
-		.min_uV = 1000000, .max_uV = 1200000,
-		.valid_ops_mask = REGULATOR_CHANGE_STATUS,
-	} };
-	struct da9211_pdata pdata = { .init_data = { &init, &init } };
+	struct regulator_consumer_supply supply[2] = {
+		REGULATOR_SUPPLY("A", "da9211-test-gpio-parent"),
+		REGULATOR_SUPPLY("B", "da9211-test-gpio-parent"),
+	};
+	struct regulator_init_data init[2] = {
+		{ .constraints = { .min_uV = 1000000, .max_uV = 1200000,
+			.valid_ops_mask = REGULATOR_CHANGE_STATUS },
+		  .num_consumer_supplies = 1, .consumer_supplies = &supply[0] },
+		{ .constraints = { .min_uV = 1000000, .max_uV = 1200000,
+			.valid_ops_mask = REGULATOR_CHANGE_STATUS },
+		  .num_consumer_supplies = 1, .consumer_supplies = &supply[1] },
+	};
+	struct da9211_pdata pdata = { .gpio_exclusive = true,
+		.init_data = { &init[0], &init[1] } };
 	struct da9211 chip = { .pdata = &pdata };
-	struct platform_device *parent, *a;
+	struct platform_device *parent, *buck[2] = { };
+	struct regulator *consumer[2] = { };
 	struct gpio_desc *desc;
-	int id = 0;
+	int id, round;
 
 	KUNIT_ASSERT_NOT_NULL(test, bus);
 	KUNIT_ASSERT_EQ(test, gpiochip_add_data(&gpio.chip, &gpio), 0);
 	desc = gpiochip_request_own_desc(&gpio.chip, 0, "da9211-test",
-				       GPIO_ACTIVE_HIGH, GPIOD_OUT_HIGH);
+			GPIO_ACTIVE_HIGH, high ? GPIOD_OUT_HIGH : GPIOD_OUT_LOW);
 	KUNIT_EXPECT_FALSE(test, IS_ERR(desc));
 	if (IS_ERR(desc))
 		goto gpio_out;
 	pdata.gpiod_ren[0] = desc;
+	pdata.gpiod_ren[1] = desc;
 	bus->test = test;
 	bus->unguarded = true;
 	bus->regs[DA9211_REG_VBUCKA_A] = 85;
+	bus->regs[DA9211_REG_VBUCKB_A] = 85;
 	parent = platform_device_register_simple("da9211-test-gpio-parent", -1, NULL, 0);
 	KUNIT_EXPECT_FALSE(test, IS_ERR(parent));
 	if (IS_ERR(parent))
@@ -322,33 +353,89 @@ static void da9211_test_supplied_gpio(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, IS_ERR(chip.regmap));
 	if (IS_ERR(chip.regmap))
 		goto parent_out;
-	a = platform_device_register_data(chip.dev, "da9211-buck",
-					 PLATFORM_DEVID_AUTO, &id, sizeof(id));
-	KUNIT_EXPECT_FALSE(test, IS_ERR(a));
-	if (IS_ERR(a))
-		goto map_out;
-	KUNIT_EXPECT_NOT_NULL(test, chip.rdev[0]);
-	if (chip.rdev[0]) {
-		KUNIT_EXPECT_EQ(test, da9211_disable(chip.rdev[0]), 0);
-		KUNIT_EXPECT_EQ(test, gpio.value, 0);
-		KUNIT_EXPECT_EQ(test, da9211_enable(chip.rdev[0]), 0);
+	for (id = 0; id < 2; id++) {
+		buck[id] = platform_device_register_data(chip.dev, "da9211-buck",
+				PLATFORM_DEVID_AUTO, &id, sizeof(id));
+		if (IS_ERR(buck[id])) {
+			buck[id] = NULL;
+			KUNIT_FAIL(test, "child allocation");
+			goto children_out;
+		}
+		KUNIT_EXPECT_NOT_NULL(test, chip.rdev[id]);
+		consumer[id] = regulator_get(chip.dev, id ? "B" : "A");
+		if (IS_ERR(consumer[id])) {
+			consumer[id] = NULL;
+			KUNIT_FAIL(test, "consumer acquisition");
+			goto children_out;
+		}
+		if (!id) {
+			KUNIT_EXPECT_EQ(test, regulator_enable(consumer[0]), 0);
+			KUNIT_EXPECT_EQ(test, regulator_disable(consumer[0]), 0);
+			/* The enabled, not-yet-bound B retains boot ownership. */
+			KUNIT_EXPECT_EQ(test, gpio.value, high ? 1 : 0);
+		}
 	}
-	device_release_driver(&a->dev);
-	KUNIT_EXPECT_EQ(test, gpiod_get_value_cansleep(desc), 1);
-	KUNIT_EXPECT_EQ(test, device_reprobe(&a->dev), 0);
+	/* Actual consumer core skips enable for boot-high logical votes. Both
+	 * initial states must converge to low, then retain both independent votes.
+	 */
+	for (round = 0; round < 3; round++) {
+		KUNIT_EXPECT_EQ(test, regulator_enable(consumer[0]), 0);
+		KUNIT_EXPECT_EQ(test, regulator_enable(consumer[1]), 0);
+		KUNIT_EXPECT_EQ(test, regulator_disable(consumer[round % 2]), 0);
+		KUNIT_EXPECT_EQ(test, gpio.value, 1);
+		KUNIT_EXPECT_EQ(test, regulator_is_enabled(consumer[round % 2]), 0);
+		KUNIT_EXPECT_EQ(test, regulator_disable(consumer[1 - round % 2]), 0);
+		KUNIT_EXPECT_EQ(test, gpio.value, 0);
+	}
+	regulator_put(consumer[0]);
+	consumer[0] = NULL;
+	device_release_driver(&buck[0]->dev);
+	KUNIT_EXPECT_EQ(test, regulator_enable(consumer[1]), 0);
+	/* Rebind A while B holds high must not create a phantom A vote. */
+	KUNIT_EXPECT_EQ(test, device_reprobe(&buck[0]->dev), 0);
 	KUNIT_EXPECT_NOT_NULL(test, chip.rdev[0]);
-	platform_device_unregister(a);
-	/* The last regulator disappearing must not consume the caller's GPIO. */
-	KUNIT_EXPECT_EQ(test, gpiod_direction_output(desc, 0), 0);
+	KUNIT_EXPECT_EQ(test, regulator_disable(consumer[1]), 0);
 	KUNIT_EXPECT_EQ(test, gpio.value, 0);
-map_out:
+	device_release_driver(&buck[0]->dev);
+	pdata.gpio_exclusive = false;
+	KUNIT_EXPECT_EQ(test, da9211_buck_probe(buck[0]), -EOPNOTSUPP);
+	pdata.gpio_exclusive = true;
+	gpio.read_error = -EPROBE_DEFER;
+	KUNIT_EXPECT_EQ(test, da9211_buck_probe(buck[0]), -EPROBE_DEFER);
+	gpio.read_error = -EIO;
+	KUNIT_EXPECT_EQ(test, da9211_buck_probe(buck[0]), -EIO);
+	KUNIT_EXPECT_EQ(test, gpio.requests, 1);
+	KUNIT_EXPECT_EQ(test, gpio.frees, 0);
+	gpio.read_error = 0;
+	init[0].constraints.max_uV = 999999;
+	KUNIT_EXPECT_EQ(test, da9211_buck_probe(buck[0]), -EINVAL);
+	KUNIT_EXPECT_EQ(test, gpio.requests, 1);
+	KUNIT_EXPECT_EQ(test, gpio.frees, 0);
+	init[0].constraints.max_uV = 1200000;
+	KUNIT_EXPECT_EQ(test, device_reprobe(&buck[0]->dev), 0);
+children_out:
+	for (id = 0; id < 2; id++)
+		if (consumer[id])
+			regulator_put(consumer[id]);
+	for (id = 0; id < 2; id++)
+		if (buck[id])
+			platform_device_unregister(buck[id]);
 	regmap_exit(chip.regmap);
 parent_out:
 	platform_device_unregister(parent);
+	KUNIT_EXPECT_EQ(test, gpio.requests, 1);
+	KUNIT_EXPECT_EQ(test, gpio.frees, 0);
 desc_out:
 	gpiochip_free_own_desc(desc);
+	KUNIT_EXPECT_EQ(test, gpio.frees, 1);
 gpio_out:
 	gpiochip_remove(&gpio.chip);
+}
+
+static void da9211_test_supplied_gpio(struct kunit *test)
+{
+	da9211_test_gpio_level(test, false);
+	da9211_test_gpio_level(test, true);
 }
 
 static struct kunit_case da9211_cases[] = {

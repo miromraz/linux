@@ -48,6 +48,7 @@ struct da9211 {
 	bool stopping;
 	struct mutex gpio_lock;
 	unsigned long gpio_enabled;
+	unsigned long gpio_initialized;
 };
 
 static const struct regmap_range_cfg da9211_regmap_range[] = {
@@ -315,9 +316,17 @@ static int da9211_is_enabled(struct regulator_dev *rdev)
 {
 	struct da9211 *chip = rdev_get_drvdata(rdev);
 	struct gpio_desc *gpio = chip->pdata->gpiod_ren[rdev_get_id(rdev)];
+	int enabled;
 
-	return gpio ? gpiod_get_value_cansleep(gpio) :
-		regulator_is_enabled_regmap(rdev);
+	if (!gpio)
+		return regulator_is_enabled_regmap(rdev);
+	/* Core skips .enable when this returns true: report this buck's vote,
+	 * never the physical level contributed by another buck.
+	 */
+	mutex_lock(&chip->gpio_lock);
+	enabled = !!(chip->gpio_enabled & BIT(rdev_get_id(rdev)));
+	mutex_unlock(&chip->gpio_lock);
+	return enabled;
 }
 
 static int da9211_enable(struct regulator_dev *rdev)
@@ -598,13 +607,29 @@ static int da9211_buck_probe(struct platform_device *pdev)
 	}
 
 	if (config.ena_gpiod) {
+		int peer;
+
+		if (!chip->pdata->gpio_exclusive)
+			return -EOPNOTSUPP;
+		mutex_lock(&chip->gpio_lock);
 		ret = gpiod_get_value_cansleep(config.ena_gpiod);
+		if (ret >= 0) {
+			/* Snapshot all unbound peers before the first child can
+			 * disable the line. Rebind must not turn a peer's physical
+			 * high into a new logical vote for an already known buck.
+			 */
+			for (peer = 0; peer < DA9211_MAX_REGULATORS; peer++) {
+				if (chip->pdata->gpiod_ren[peer] != config.ena_gpiod ||
+				    (chip->gpio_initialized & BIT(peer)))
+					continue;
+				if (ret)
+					chip->gpio_enabled |= BIT(peer);
+				chip->gpio_initialized |= BIT(peer);
+			}
+		}
+		mutex_unlock(&chip->gpio_lock);
 		if (ret < 0)
 			return ret;
-		mutex_lock(&chip->gpio_lock);
-		if (ret)
-			chip->gpio_enabled |= BIT(id);
-		mutex_unlock(&chip->gpio_lock);
 		/* The caller retains ownership through parent and child retries. */
 		config.ena_gpiod = NULL;
 	} else if (config.of_node) {
@@ -668,11 +693,14 @@ static int da9211_regulator_init(struct da9211 *chip)
 	for (id = 0; id < DA9211_MAX_REGULATORS; id++) {
 		if (!(chip->present & BIT(id)) || !chip->pdata->gpiod_ren[id])
 			continue;
+		if (!chip->pdata->gpio_exclusive)
+			return -EOPNOTSUPP;
 		ret = gpiod_get_value_cansleep(chip->pdata->gpiod_ren[id]);
 		if (ret < 0)
 			return ret;
 		if (ret)
 			chip->gpio_enabled |= BIT(id);
+		chip->gpio_initialized |= BIT(id);
 	}
 
 	chip->boot_barrier = mt6797_boot_barrier_supply(
