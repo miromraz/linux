@@ -758,9 +758,16 @@ static int bq25890_power_supply_set_property(struct power_supply *psy,
 		lval = bq25890_find_idx(val->intval, TBL_IINLIM);
 		return bq25890_field_write(bq, F_IINLIM, lval);
 	case POWER_SUPPLY_PROP_ONLINE:
+		mutex_lock(&bq->lock);
+		if (bq->policy_paused) {
+			mutex_unlock(&bq->lock);
+			return -EBUSY;
+		}
+		/* Publish successful policy changes before recovery can run. */
 		ret = bq25890_field_write(bq, F_EN_HIZ, !val->intval);
 		if (!ret)
 			bq->force_hiz = !val->intval;
+		mutex_unlock(&bq->lock);
 		bq25890_update_state(bq, psp, &state);
 		return ret;
 	default:
