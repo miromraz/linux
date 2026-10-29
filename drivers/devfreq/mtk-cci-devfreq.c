@@ -227,14 +227,12 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 		goto out_unlock;
 	}
 
-	/* scale up: set voltage first then freq. */
-	target_voltage = max(inter_voltage, voltage);
-	if (pre_voltage <= target_voltage) {
-		ret = mtk_ccifreq_set_voltage(drv, target_voltage);
-		if (ret) {
-			dev_err(dev, "failed to scale up voltage\n");
-			goto out_restore_voltage;
-		}
+	/* Own a preparation floor; a peer's aggregate voltage is not a vote. */
+	target_voltage = max(pre_voltage, max(inter_voltage, voltage));
+	ret = mtk_ccifreq_set_voltage(drv, target_voltage);
+	if (ret) {
+		dev_err(dev, "failed to prepare voltage\n");
+		goto out_restore_voltage;
 	}
 
 	/* switch the cci clock to intermediate clock source. */
@@ -260,16 +258,11 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 		goto out_unlock;
 	}
 
-	/*
-	 * If the new voltage is lower than the intermediate voltage or the
-	 * original voltage, scale down to the new voltage.
-	 */
-	if (voltage < inter_voltage || voltage < pre_voltage) {
-		ret = mtk_ccifreq_set_voltage(drv, voltage);
-		if (ret) {
-			dev_err(dev, "failed to scale down voltage\n");
-			goto out_unlock;
-		}
+	/* Replace the preparation vote with our persistent target floor. */
+	ret = mtk_ccifreq_set_voltage(drv, voltage);
+	if (ret) {
+		dev_err(dev, "failed to set target voltage\n");
+		goto out_unlock;
 	}
 
 	drv->pre_freq = *freq;

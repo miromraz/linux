@@ -274,17 +274,15 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		vproc = max(vproc, info->vproc_on_boot);
 
 	/*
-	 * If the new voltage or the intermediate voltage is higher than the
-	 * current voltage, scale up voltage first.
+	 * A peer's aggregate voltage is not this consumer's vote. Submit our
+	 * preparation floor even when the rail already reads high. Retain the
+	 * old requirement until the clock transition has completed.
 	 */
-	target_vproc = max(inter_vproc, vproc);
-	if (pre_vproc <= target_vproc) {
-		ret = mtk_cpufreq_set_voltage(info, target_vproc);
-		if (ret) {
-			dev_err(cpu_dev,
-				"cpu%d: failed to scale up voltage!\n", policy->cpu);
-			goto out;
-		}
+	target_vproc = max(pre_vproc, max(inter_vproc, vproc));
+	ret = mtk_cpufreq_set_voltage(info, target_vproc);
+	if (ret) {
+		dev_err(cpu_dev, "cpu%d: failed to prepare voltage!\n", policy->cpu);
+		goto out;
 	}
 
 	/* Reparent the CPU clock to intermediate clock. */
@@ -321,18 +319,12 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		goto fault;
 	}
 
-	/*
-	 * If the new voltage is lower than the intermediate voltage or the
-	 * original voltage, scale down to the new voltage.
-	 */
-	if (vproc < inter_vproc || vproc < pre_vproc) {
-		ret = mtk_cpufreq_set_voltage(info, vproc);
-		if (ret) {
-			dev_err(cpu_dev,
-				"cpu%d: failed to scale down voltage!\n", policy->cpu);
-			/* Keep the lowered clock: voltage may already be reduced. */
-			goto out;
-		}
+	/* Replace the preparation vote with our persistent target floor. */
+	ret = mtk_cpufreq_set_voltage(info, vproc);
+	if (ret) {
+		dev_err(cpu_dev, "cpu%d: failed to set target voltage!\n", policy->cpu);
+		/* Keep the lowered clock: voltage may already be reduced. */
+		goto out;
 	}
 
 	info->current_freq = freq_hz;
