@@ -16,13 +16,14 @@
  *   CTRL_0 0xf98  [7:0]  per-LDO enable, 0xff = all eight on
  *   CTRL_1 0xf9c  four LDO voltage fields, one per byte, value in [3:0]
  *   CTRL_2 0xfa0  four more LDO voltage fields, same layout
- * All eight fields carry the same value. The voltage code maps linearly as
+ * All eight fields must decode to the same voltage. The code maps linearly as
  * 25 mV per step from 0.90 V at code 3 (vendor VOLT_TO_PMIC_VAL), so the
  * 1.00-1.20 V operating range the vendor allows (MIN/MAX_VSRAM_VOLT) is
  * codes 7..15.
  */
 
 #include <linux/bitops.h>
+#include <linux/delay.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -52,51 +53,164 @@
 #define MT6797_CPULDO_STEP_UV		25000
 #define MT6797_CPULDO_N_VOLTAGES	9
 
-static int mt6797_cpu_sram_set_voltage_sel(struct regulator_dev *rdev,
-					   unsigned int sel)
-{
-	unsigned int code = sel + MT6797_CPULDO_MIN_SEL;
-	unsigned int packed = code | (code << 8) | (code << 16) | (code << 24);
-	int ret;
+/* Normal callbacks are serialized by the regulator core's rdev lock.
+ * This does not exclude firmware writers; SPM ownership remains a platform
+ * prerequisite. Never treat a saved selector as live hardware readback.
+ */
+struct mt6797_cpu_sram {
+	/* Reboot/reprobe required; normal reads must not clear containment. */
+	bool unresolved;
+};
 
-	ret = regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_1,
-				 MT6797_CPULDO_VOLT_FIELDS_MASK, packed);
+static int mt6797_cpu_sram_read(struct regulator_dev *rdev, unsigned int words[2])
+{
+	unsigned int enable, code;
+	int ret, sel = -1, decoded, i;
+
+	ret = regmap_read(rdev->regmap, MT6797_CPULDO_CTRL_0, &enable);
 	if (ret)
 		return ret;
+	/* All-off is legal before the core's voltage-before-enable sequence. */
+	enable &= MT6797_CPULDO_EN_MASK;
+	if (enable && enable != MT6797_CPULDO_EN_MASK)
+		return -EINVAL;
+	for (i = 0; i < 2; i++) {
+		ret = regmap_read(rdev->regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
+				  &words[i]);
+		if (ret)
+			return ret;
+	}
+	for (i = 0; i < 8; i++) {
+		code = (words[i / 4] >> (8 * (i % 4))) & MT6797_CPULDO_VOLT_MASK;
+		/* Vendor code 0 and code 9 both mean 1.05 V. */
+		if (!code)
+			code = 9;
+		/* Codes 1/2 are 0.60/0.70 V, 3..6 are 0.90..0.975 V:
+		 * electrically defined, but outside our operating table.
+		 */
+		if (code < MT6797_CPULDO_MIN_SEL)
+			return -EINVAL;
+		decoded = code - MT6797_CPULDO_MIN_SEL;
+		if (sel >= 0 && decoded != sel)
+			return -EINVAL;
+		sel = decoded;
+	}
+	return sel;
+}
 
-	return regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_2,
-				  MT6797_CPULDO_VOLT_FIELDS_MASK, packed);
+static unsigned int mt6797_cpu_sram_delay(unsigned int old_sel,
+					  unsigned int new_sel)
+{
+	unsigned int delta, delay;
+
+	if (old_sel == new_sel)
+		return 0;
+	/* BSP mt_cpufreq.c PMIC_VOLT_{UP,DOWN}_SETTLE_TIME and
+	 * _calc_pmic_settle_time(), converted from 10 uV units to uV.
+	 */
+	if (new_sel > old_sel) {
+		delta = (new_sel - old_sel) * MT6797_CPULDO_STEP_UV;
+		delay = DIV_ROUND_UP(delta, 12500) + 5;
+	} else {
+		delta = (old_sel - new_sel) * MT6797_CPULDO_STEP_UV;
+		delay = delta * 2 / 6250 + 5;
+	}
+	return max(delay, 25U);
 }
 
 static int mt6797_cpu_sram_get_voltage_sel(struct regulator_dev *rdev)
 {
-	unsigned int val, code;
+	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
+	unsigned int words[2];
 	int ret;
 
-	/*
-	 * Only CTRL_1 is read: this driver and the vendor firmware always
-	 * program the LDO fields of CTRL_1 and CTRL_2 in lockstep to the same
-	 * code (see set_voltage_sel()), so CTRL_1 field 0 is representative.
+	if (sram->unresolved)
+		return -EIO;
+	ret = mt6797_cpu_sram_read(rdev, words);
+	if (ret < 0)
+		dev_err(&rdev->dev, "invalid SRAM bank or read failure: %d\n", ret);
+	return ret;
+}
+
+static int mt6797_cpu_sram_set_voltage_sel(struct regulator_dev *rdev,
+					   unsigned int sel)
+{
+	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
+	unsigned int saved[2], check[2], code, packed;
+	int old_sel, ret, restore = 0, err, i;
+
+	if (sel >= MT6797_CPULDO_N_VOLTAGES)
+		return -EINVAL;
+	if (sram->unresolved)
+		return -EIO;
+	old_sel = mt6797_cpu_sram_read(rdev, saved);
+	if (old_sel < 0) {
+		dev_err(&rdev->dev, "cannot snapshot SRAM bank: %d\n", old_sel);
+		return old_sel;
+	}
+	code = sel + MT6797_CPULDO_MIN_SEL;
+	packed = code | (code << 8) | (code << 16) | (code << 24);
+	for (i = 0; i < 2; i++) {
+		ret = regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
+					 MT6797_CPULDO_VOLT_FIELDS_MASK, packed);
+		if (ret)
+			goto recover;
+	}
+	/* Own the wait: the core does not delay after a failed setter. */
+	udelay(mt6797_cpu_sram_delay(old_sel, sel));
+	ret = mt6797_cpu_sram_read(rdev, check);
+	if (ret < 0)
+		goto recover;
+	if (ret == sel &&
+	    (check[0] & MT6797_CPULDO_VOLT_FIELDS_MASK) == packed &&
+	    (check[1] & MT6797_CPULDO_VOLT_FIELDS_MASK) == packed)
+		return 0;
+	ret = -EIO;
+
+recover:
+	/* One bounded attempt, both words even if the first restore fails.
+	 * Wait the worst supported downward transition before and after it:
+	 * partial progress/read errors do not supply a known starting voltage.
+	 * Synthetic regmap faults test this; ordinary MMIO writes return zero.
 	 */
-	ret = regmap_read(rdev->regmap, MT6797_CPULDO_CTRL_1, &val);
+	udelay(mt6797_cpu_sram_delay(MT6797_CPULDO_N_VOLTAGES - 1, 0));
+	for (i = 0; i < 2; i++) {
+		err = regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
+					 MT6797_CPULDO_VOLT_FIELDS_MASK, saved[i]);
+		if (err)
+			restore = err;
+	}
+	udelay(mt6797_cpu_sram_delay(MT6797_CPULDO_N_VOLTAGES - 1, 0));
+	err = mt6797_cpu_sram_read(rdev, check);
+	if (err != old_sel ||
+	    (check[0] & MT6797_CPULDO_VOLT_FIELDS_MASK) !=
+	    (saved[0] & MT6797_CPULDO_VOLT_FIELDS_MASK) ||
+	    (check[1] & MT6797_CPULDO_VOLT_FIELDS_MASK) !=
+	    (saved[1] & MT6797_CPULDO_VOLT_FIELDS_MASK))
+		restore = -EIO;
+	if (restore) {
+		sram->unresolved = true;
+		dev_err(&rdev->dev, "SRAM recovery unresolved (%d), operations blocked\n",
+			restore);
+	} else {
+		dev_err(&rdev->dev, "SRAM programming failed (%d), bank restored\n", ret);
+	}
+	return ret;
+}
+
+static int mt6797_cpu_sram_enable(struct regulator_dev *rdev)
+{
+	int ret;
+
+	ret = mt6797_cpu_sram_get_voltage_sel(rdev);
+	if (ret < 0)
+		return ret;
+	ret = regulator_enable_regmap(rdev);
 	if (ret)
 		return ret;
-
-	code = val & MT6797_CPULDO_VOLT_MASK;
-	/* The vendor maps code 0 to 1.05 V (get_cur_volt_sram_l); report it. */
-	if (code == 0)
-		return (1050000 - MT6797_CPULDO_MIN_UV) / MT6797_CPULDO_STEP_UV;
-	/*
-	 * Codes 1..6 are below this regulator's 1.00 V table minimum and can be
-	 * left by the bootloader. The rail is always-on with a >= 1.15 V
-	 * constraint, so get_voltage_sel() must return a valid selector or
-	 * registration fails; report the nearest in-table value (selector 0,
-	 * 1.00 V) and let the core raise the rail into its constraint.
-	 */
-	if (code < MT6797_CPULDO_MIN_SEL)
-		return 0;
-
-	return code - MT6797_CPULDO_MIN_SEL;
+	udelay(mt6797_cpu_sram_delay(MT6797_CPULDO_N_VOLTAGES - 1, 0));
+	ret = regulator_is_enabled_regmap(rdev);
+	return ret > 0 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
 static const struct regulator_ops mt6797_cpu_sram_ops = {
@@ -104,7 +218,7 @@ static const struct regulator_ops mt6797_cpu_sram_ops = {
 	.map_voltage		= regulator_map_voltage_linear,
 	.set_voltage_sel	= mt6797_cpu_sram_set_voltage_sel,
 	.get_voltage_sel	= mt6797_cpu_sram_get_voltage_sel,
-	.enable			= regulator_enable_regmap,
+	.enable			= mt6797_cpu_sram_enable,
 	.disable		= regulator_disable_regmap,
 	.is_enabled		= regulator_is_enabled_regmap,
 };
@@ -117,12 +231,6 @@ static const struct regulator_desc mt6797_cpu_sram_desc = {
 	.n_voltages	= MT6797_CPULDO_N_VOLTAGES,
 	.min_uV		= MT6797_CPULDO_MIN_UV,
 	.uV_step	= MT6797_CPULDO_STEP_UV,
-	/*
-	 * Vendor up-slew: PMIC_VOLT_UP_SETTLE_TIME ~= 1 us per 12.5 mV; the
-	 * regulator core then blocks for the settle after a raise, before the
-	 * consumer (cpufreq/cci) raises Vproc.
-	 */
-	.ramp_delay	= 12500,
 	.enable_reg	= MT6797_CPULDO_CTRL_0,
 	.enable_mask	= MT6797_CPULDO_EN_MASK,
 	.enable_val	= MT6797_CPULDO_EN_MASK,
@@ -134,6 +242,7 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	struct regulator_config config = { };
 	struct regulator_dev *rdev;
+	struct mt6797_cpu_sram *sram;
 	struct regmap *regmap;
 
 	regmap = syscon_node_to_regmap(dev->parent->of_node);
@@ -141,6 +250,10 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(regmap),
 				     "failed to get parent infracfg regmap\n");
 
+	sram = devm_kzalloc(dev, sizeof(*sram), GFP_KERNEL);
+	if (!sram)
+		return -ENOMEM;
+	config.driver_data = sram;
 	config.dev = dev;
 	config.of_node = np;
 	config.regmap = regmap;
