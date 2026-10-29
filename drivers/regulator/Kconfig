@@ -1957,3 +1957,16 @@ config REGULATOR_DA9211_KUNIT_TEST
 	  regmap, including guarded A failure/defer and independent B lifetime.
 	  Also check sparse physical buck IDs and non-Gemini callbacks.
 	  These tests do not access real hardware.
+
+config REGULATOR_MT6797_RAIL_COORDINATOR
+	tristate "MT6797 shared rail coordinator engine"
+	help
+	  Durable provider-side requirements and checked conversion engine for
+	  the Gemini A53/CCI rail pair. Board discovery and consumer admission
+	  must supply validated requirements before conversion is possible.
+
+config REGULATOR_MT6797_RAIL_COORDINATOR_KUNIT_TEST
+	tristate "MT6797 shared rail coordinator tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	select REGULATOR_MT6797_RAIL_COORDINATOR
+	default KUNIT_ALL_TESTS
