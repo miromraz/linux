@@ -839,8 +839,9 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 						      POWER_SUPPLY_PROP_USB_TYPE,
 						      &val);
 	if (ret) {
-		mod_delayed_work(system_wq, &bq->iinlim_work,
-				 BQ25890_POLL_INTERVAL);
+		bq25890_write_iinlim(bq,
+			bq25890_charger_get_scaled_iinlim_regval(bq, 500000),
+			true);
 		goto unlock;
 	}
 
@@ -885,9 +886,13 @@ static int bq25896_typec_input_current_ua(struct bq25890_device *bq)
 	if (!bq->charger)
 		return 0;
 
-	ret = power_supply_get_property_from_supplier(bq->charger,
-						    POWER_SUPPLY_PROP_CURRENT_MAX,
-						    &val);
+	ret = power_supply_get_property_from_supplier(
+		bq->charger, POWER_SUPPLY_PROP_CURRENT_MAX, &val);
+	/*
+	 * The core also returns ENODEV when all supplier reads fail. Only
+	 * interpret it as absence if neither the core nor firmware configured
+	 * a supplier. Property helpers include ACPI and software nodes.
+	 */
 	if (ret == -ENODEV && !bq->charger->num_supplies &&
 	    !device_property_present(bq->dev, "power-supplies") &&
 	    !device_property_present(bq->dev, "supplied-from"))
