@@ -102,10 +102,13 @@ static int panfrost_read_speedbin(struct device *dev)
 		/*
 		 * A missing speed-bin nvmem (-ENOENT/-EOPNOTSUPP) means this
 		 * platform does not gate OPPs by bin: return without setting
-		 * supported_hw, so no OPP is dropped. This is true for every
-		 * compatible, index-based or not.
+		 * supported_hw, so no OPP is dropped. Index-based platforms must still
+		 * mask turbo OPPs when the provider is unavailable.
 		 */
-		if (ret == -ENOENT || ret == -EOPNOTSUPP)
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		if ((ret == -ENOENT || ret == -EOPNOTSUPP) &&
+		    !pfdev->comp->speedbin_is_index)
 			return 0;
 		/*
 		 * A real read error is fatal on a bitmask platform. On an

@@ -385,14 +385,16 @@
 					trip = <&cpu_passive>;
 					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
 							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 
 				map1 {
 					trip = <&cpu_hot>;
 					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
 							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+							 <&cpu8 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -1305,6 +1307,27 @@
 				 <&scpsys MT6797_POWER_DOMAIN_MFG_CORE3>;
 		power-domain-names = "core0", "core1", "core2", "core3";
 		mediatek,infracfg = <&infrasys>;
+		/*
+		 * The GPU has no dedicated speed-bin efuse field. The vendor
+		 * 3.18 mt_gpufreq driver selects the GPU OPP table from
+		 * FUNC_CODE_1 (efuse word 22[3:0],
+		 * mt_gpufreq_get_dvfs_table_type()), the same raw index the CPU
+		 * speed bin uses, so reuse that cell. panfrost converts the
+		 * index to a BIT() mask (the speedbin_is_index compatible flag).
+		 */
+		nvmem-cells = <&cpu_speed_bin>;
+		nvmem-cell-names = "speed-bin";
+		#cooling-cells = <2>;
+		/*
+		 * Active dynamic-power coefficient (uW/MHz/V^2) for the IPA
+		 * (power_allocator) governor's Energy Model, which panfrost
+		 * registers for the GPU via devfreq_cooling_em_register().
+		 * Back-calculated from the vendor 3.18 mt_gpufreq active-power
+		 * model (mt_gpufreq_power_calculation(), GPU_ACT_REF_POWER
+		 * 1169 mW at GPU_ACT_REF_FREQ 800 MHz / GPU_ACT_REF_VOLT 1.0 V):
+		 * C = 1169000 uW / (800 MHz * 1.0^2 V^2) = 1461.
+		 */
+		dynamic-power-coefficient = <1461>;
 		status = "disabled";
 	};
 
