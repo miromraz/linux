@@ -1121,6 +1121,10 @@ static int scpsys_probe(struct platform_device *pdev)
 	struct genpd_onecell_data *pd_data;
 	int i, ret;
 
+	/* The MFD layout delegates domains to its power-controller child. */
+	if (of_device_is_compatible(pdev->dev.of_node, "simple-mfd"))
+		return -ENODEV;
+
 	soc = of_device_get_match_data(&pdev->dev);
 
 	scp = init_scp(pdev, soc->domains, soc->num_domains, &soc->regs,
