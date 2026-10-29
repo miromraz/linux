@@ -126,6 +126,7 @@ struct bq25890_device {
 	struct delayed_work iinlim_work;
 	bool policy_paused;
 	bool psel_stale;
+	bool adc_restore_pending;
 	unsigned long usb_event;
 
 	struct regmap *rmap;
@@ -952,7 +953,8 @@ static void bq25890_iinlim_work(struct work_struct *work)
 		container_of(work, struct bq25890_device, iinlim_work.work);
 
 	mutex_lock(&bq->lock);
-	if (!bq->policy_paused && bq->psel_stale)
+	if (!bq->policy_paused &&
+	    (bq->psel_stale || bq->adc_restore_pending))
 		__bq25890_handle_irq(bq);
 	mutex_unlock(&bq->lock);
 
@@ -1001,15 +1003,18 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 {
 	bool adc_conv_rate, new_adc_conv_rate;
 	struct bq25890_state new_state;
-	bool vbus_changed;
+	bool vbus_changed, state_changed;
 	int ret;
+
+	if (bq->policy_paused)
+		return IRQ_NONE;
 
 	ret = bq25890_get_chip_state(bq, &new_state);
 	if (ret < 0)
-		return IRQ_NONE;
+		goto error;
 
-	if (!bq->psel_stale &&
-	    !memcmp(&bq->state, &new_state, sizeof(new_state)))
+	state_changed = memcmp(&bq->state, &new_state, sizeof(new_state));
+	if (!bq->psel_stale && !bq->adc_restore_pending && !state_changed)
 		return IRQ_NONE;
 
 	vbus_changed = bq->psel_stale ||
@@ -1020,6 +1025,7 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	 * this bit on cable replug, hence the bit must be reset manually here.
 	 */
 	if (new_state.online && !bq->state.online && bq->force_hiz) {
+		bq->adc_restore_pending = true;
 		ret = bq25890_field_write(bq, F_EN_HIZ, bq->force_hiz);
 		if (ret < 0)
 			goto error;
@@ -1030,12 +1036,14 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	adc_conv_rate = bq->state.online && !bq->state.hiz;
 	new_adc_conv_rate = new_state.online && !new_state.hiz;
 
-	if (new_adc_conv_rate != adc_conv_rate) {
+	if (bq->adc_restore_pending || new_adc_conv_rate != adc_conv_rate) {
+		bq->adc_restore_pending = true;
 		ret = bq25890_field_write(bq, F_CONV_RATE, new_adc_conv_rate);
 		if (ret < 0)
 			goto error;
 	}
 
+	bq->adc_restore_pending = false;
 	bq->state = new_state;
 	bq->psel_stale = false;
 
@@ -1046,10 +1054,14 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	if (bq->chip_version == BQ25896 && vbus_changed)
 		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 
-	power_supply_changed(bq->charger);
+	if (state_changed)
+		power_supply_changed(bq->charger);
 
 	return IRQ_HANDLED;
 error:
+	if (bq->adc_restore_pending || bq->psel_stale)
+		mod_delayed_work(system_wq, &bq->iinlim_work,
+				 BQ25890_POLL_INTERVAL);
 	dev_err(bq->dev, "Error communicating with the chip: %pe\n",
 		ERR_PTR(ret));
 	return IRQ_HANDLED;
@@ -1861,7 +1873,11 @@ static int bq25890_suspend(struct device *dev)
 	 * If charger is removed, while in suspend, make sure ADC is diabled
 	 * since it consumes slightly more power.
 	 */
+	mutex_lock(&bq->lock);
+	/* Even a failed write may have reached the chip. */
+	bq->adc_restore_pending = true;
 	ret = bq25890_field_write(bq, F_CONV_RATE, 0);
+	mutex_unlock(&bq->lock);
 	if (ret < 0 && client->irq <= 0)
 		/*
 		 * Suspend is aborted on error, so resume will not run to
@@ -1888,6 +1904,7 @@ static int bq25890_resume(struct device *dev)
 	mutex_lock(&bq->lock);
 
 	bq->policy_paused = false;
+	bq->adc_restore_pending = true;
 	/* A cable replacement invalidates the pre-suspend PSEL budget. */
 	bq->psel_stale = bq->chip_version == BQ25896;
 	/* Refresh the supplier even when the subsequent chip-state read fails. */
@@ -1905,17 +1922,18 @@ static int bq25890_resume(struct device *dev)
 	if (bq->chip_version == BQ25896)
 		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 
-	/* Re-enable ADC only if charger is plugged in. */
-	if (bq->state.online) {
-		ret = bq25890_field_write(bq, F_CONV_RATE, 1);
-		if (ret < 0)
-			goto unlock;
-	}
+	ret = bq25890_field_write(bq, F_CONV_RATE,
+				  state.online && !state.hiz);
+	if (!ret)
+		bq->adc_restore_pending = false;
 
 	/* signal userspace, maybe state changed while suspended */
 	power_supply_changed(bq->charger);
 
 unlock:
+	if (bq->adc_restore_pending)
+		mod_delayed_work(system_wq, &bq->iinlim_work,
+				 BQ25890_POLL_INTERVAL);
 	mutex_unlock(&bq->lock);
 
 	if (to_i2c_client(dev)->irq <= 0)
