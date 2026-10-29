@@ -223,3 +223,5 @@ obj-$(CONFIG_REGULATOR_WM8400) += wm8400-regulator.o
 obj-$(CONFIG_REGULATOR_WM8994) += wm8994-regulator.o
 
 ccflags-$(CONFIG_REGULATOR_DEBUG) += -DDEBUG
+
+obj-$(CONFIG_REGULATOR_MT6797_HANDOVER_KUNIT_TEST) += mt6797-handover-test.o
