@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Immutable production ownership. No conversion/admission entry point. */
+#include <linux/clk.h>
+#include <linux/cpu.h>
 #include <linux/module.h>
+#include <linux/nvmem-consumer.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <linux/pm_opp.h>
+#include <linux/workqueue.h>
 #include <linux/of.h>
 #include <linux/slab.h>
 #include "mt6797-provider.h"
@@ -12,6 +19,20 @@ static struct mt6797_rail_coordinator owner = {
 static struct device_node *rails[MT6797_RAILS];
 static unsigned long attached;
 static BLOCKING_NOTIFIER_HEAD(events);
+static void preflight_work(struct work_struct *work);
+static DECLARE_WORK(preflight_job, preflight_work);
+static bool preflight_active, rebuild;
+static unsigned int clock_changes;
+static struct mt6797_preflight_result preflight = { .error = -EPROBE_DEFER };
+
+/* owner_lock serializes invalidation with publication and status snapshots. */
+static void preflight_invalidate(void)
+{
+	preflight.generation++;
+	preflight.error = -EAGAIN;
+	if (preflight_active)
+		schedule_work(&preflight_job);
+}
 
 /* Accept either spelling, but never accept conflicting or broken aliases. */
 static struct device_node *supply(struct device_node *user, const char *a,
@@ -151,6 +172,239 @@ out:
 	return ret;
 }
 
+/* Only this worker owns these references. Consumers remain blocked before
+ * configuring OPPs, so none can clear the retained supported-hw configuration.
+ */
+struct preflight_user {
+	struct device *dev;
+	struct clk *clk[2];
+	struct notifier_block opp_nb, clk_nb[2];
+	int token;
+	bool table, opp_notify, clk_notify[2];
+	u8 bin;
+};
+static struct preflight_user pf_users[MT6797_RAIL_USERS];
+
+static int preflight_opp_event(struct notifier_block *nb,
+			       unsigned long event, void *data)
+{
+	mutex_lock(&owner_lock);
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	return NOTIFY_OK;
+}
+
+static int preflight_clock_event(struct notifier_block *nb,
+				 unsigned long event, void *data)
+{
+	mutex_lock(&owner_lock);
+	if (event == PRE_RATE_CHANGE)
+		clock_changes++;
+	else if (clock_changes)
+		clock_changes--;
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	return NOTIFY_OK;
+}
+
+static void preflight_release(void)
+{
+	int i, j;
+
+	for (i = MT6797_RAIL_USERS - 1; i >= 0; i--) {
+		struct preflight_user *u = &pf_users[i];
+
+		if (!u->dev)
+			continue;
+		for (j = 0; j < 2; j++) {
+			if (u->clk_notify[j])
+				clk_notifier_unregister(u->clk[j], &u->clk_nb[j]);
+			clk_put(u->clk[j]);
+		}
+		if (u->opp_notify)
+			dev_pm_opp_unregister_notifier(u->dev, &u->opp_nb);
+		if (u->table)
+			dev_pm_opp_of_remove_table(u->dev);
+		if (u->token > 0)
+			dev_pm_opp_clear_config(u->token);
+		put_device(u->dev);
+		memset(u, 0, sizeof(*u));
+	}
+}
+
+static int preflight_acquire(void)
+{
+	struct device_node *np;
+	struct platform_device *pdev;
+	int i, j, ret;
+
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		struct preflight_user *u = &pf_users[i];
+		struct dev_pm_opp_config config = {};
+		unsigned int hw;
+
+		if (i < 2) {
+			u->dev = get_device(get_cpu_device(i * 4));
+		} else {
+			np = of_find_compatible_node(NULL, NULL, "mediatek,mt6797-cci");
+			pdev = of_find_device_by_node(np);
+			of_node_put(np);
+			u->dev = pdev ? &pdev->dev : NULL;
+		}
+		if (!u->dev)
+			return -EPROBE_DEFER;
+		ret = nvmem_cell_read_u8(u->dev, "speed_grade", &u->bin);
+		if (ret)
+			return ret;
+		/* FUNC_CODE_1 is four bits. Never shift an unchecked efuse. */
+		ret = mt6797_preflight_hw(u->bin, &hw);
+		if (ret)
+			return ret;
+		if (i && u->bin != pf_users[0].bin)
+			return -EINVAL;
+		config.supported_hw = &hw;
+		config.supported_hw_count = 1;
+		ret = dev_pm_opp_set_config(u->dev, &config);
+		if (ret < 0)
+			return ret;
+		u->token = ret;
+		ret = dev_pm_opp_of_add_table(u->dev);
+		if (ret)
+			return ret;
+		u->table = true;
+		u->opp_nb.notifier_call = preflight_opp_event;
+		ret = dev_pm_opp_register_notifier(u->dev, &u->opp_nb);
+		if (ret)
+			return ret;
+		u->opp_notify = true;
+		for (j = 0; j < 2; j++) {
+			u->clk[j] = clk_get(u->dev, j ? "intermediate" :
+					   (i == 2 ? "cci" : "cpu"));
+			if (IS_ERR(u->clk[j])) {
+				ret = PTR_ERR(u->clk[j]);
+				u->clk[j] = NULL;
+				return ret;
+			}
+			u->clk_nb[j].notifier_call = preflight_clock_event;
+			ret = clk_notifier_register(u->clk[j], &u->clk_nb[j]);
+			if (ret)
+				return ret;
+			u->clk_notify[j] = true;
+		}
+	}
+	return 0;
+}
+
+/* Shared with the focused OPP-core fixture; neither helper grants admission. */
+int mt6797_preflight_hw(u8 bin, unsigned int *hw)
+{
+	if (bin > 15)
+		return -EINVAL;
+	*hw = BIT(bin);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_hw);
+
+int mt6797_preflight_ceiling(struct device *dev, unsigned long rate,
+			    unsigned long *freq, unsigned long *uv)
+{
+	struct dev_pm_opp *opp;
+	unsigned long lower = rate;
+
+	if (!rate)
+		return -EINVAL;
+	/* A ceiling alone would silently accept an unknown sub-table rate. */
+	opp = dev_pm_opp_find_freq_floor(dev, &lower);
+	if (IS_ERR(opp))
+		return PTR_ERR(opp);
+	dev_pm_opp_put(opp);
+	opp = dev_pm_opp_find_freq_ceil(dev, &rate);
+	if (IS_ERR(opp))
+		return PTR_ERR(opp);
+	*freq = rate;
+	*uv = dev_pm_opp_get_voltage(opp);
+	dev_pm_opp_put(opp);
+	return !*uv || *uv > INT_MAX ? -EINVAL : 0;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_ceiling);
+
+/* No rounding, programming, clock enable, regulator handles or admission. */
+static int preflight_measure(struct mt6797_preflight_result *r)
+{
+	int i, j;
+
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		r->speedbin[i] = pf_users[i].bin;
+		for (j = 0; j < 2; j++) {
+			unsigned long rate = clk_get_rate(pf_users[i].clk[j]);
+			int ret;
+
+			r->rate[i][j] = rate;
+			ret = mt6797_preflight_ceiling(pf_users[i].dev, rate,
+						     &r->ceiling[i][j], &r->uv[i][j]);
+			if (ret)
+				return ret;
+		}
+	}
+	return mt6797_provider_sample(r->provider_generation, r->rail_uv);
+}
+
+static void preflight_work(struct work_struct *work)
+{
+	struct mt6797_preflight_result result = {};
+	bool reset;
+	int ret;
+
+	mutex_lock(&owner_lock);
+	if (!preflight_active || clock_changes) {
+		mutex_unlock(&owner_lock);
+		return;
+	}
+	result.generation = preflight.generation;
+	result.provider_generation = owner.generation;
+	reset = rebuild;
+	rebuild = false;
+	ret = topology();
+	mutex_unlock(&owner_lock);
+	if (reset)
+		preflight_release();
+	if (!ret && !pf_users[2].table) {
+		ret = preflight_acquire();
+		if (ret)
+			preflight_release();
+	}
+	if (!ret)
+		ret = preflight_measure(&result);
+	result.error = ret;
+	mutex_lock(&owner_lock);
+	if (result.generation == preflight.generation &&
+	    result.provider_generation == owner.generation && !clock_changes)
+		preflight = result;
+	mutex_unlock(&owner_lock);
+}
+
+/* Supplier arrival/removal wakes even without a cpufreq/devfreq driver.
+ * No framework calls on driver-core or NVMEM notification stacks.
+ */
+static int preflight_supplier_event(struct notifier_block *nb,
+				    unsigned long event, void *data)
+{
+	mutex_lock(&owner_lock);
+	rebuild = true;
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	return NOTIFY_OK;
+}
+static struct notifier_block supplier_nb = {
+	.notifier_call = preflight_supplier_event,
+};
+static struct notifier_block cpu_nb = {
+	.notifier_call = preflight_supplier_event,
+};
+static struct notifier_block nvmem_nb = {
+	.notifier_call = preflight_supplier_event,
+};
+
 int mt6797_boot_barrier_supply(struct device_node *provider, const char *name)
 {
 	int id = !strcmp(name, "cpu-supply") ? MT6797_PROC : MT6797_SRAM;
@@ -179,6 +433,7 @@ static void detach(void *data)
 	/* Engine detach drains raw calls before provider devres can be freed. */
 	mt6797_rail_detach(&owner, a->id);
 	attached &= ~BIT(a->id);
+	preflight_invalidate();
 	mutex_unlock(&owner_lock);
 	blocking_notifier_call_chain(&events, 0, NULL);
 }
@@ -208,8 +463,10 @@ int mt6797_provider_attach(struct device *dev, enum mt6797_rail_id id,
 	ret = io->read(io->data);
 	if (ret >= 0)
 		ret = mt6797_rail_attach(&owner, id, &guarded);
-	if (!ret)
+	if (!ret) {
 		attached |= BIT(id);
+		preflight_invalidate();
+	}
 	mutex_unlock(&owner_lock);
 	if (ret) {
 		devm_kfree(dev, a);
@@ -258,6 +515,7 @@ void mt6797_provider_status(struct mt6797_provider_status *status)
 	mutex_lock(&owner_lock);
 	mt6797_rail_status(&owner, &status->engine);
 	status->attached = attached;
+	status->preflight = preflight;
 	status->readiness = attached == GENMASK(1, 0) ? -EAGAIN : -EPROBE_DEFER;
 	mutex_unlock(&owner_lock);
 }
@@ -282,8 +540,47 @@ int mt6797_provider_unsubscribe(struct notifier_block *nb)
 }
 EXPORT_SYMBOL_GPL(mt6797_provider_unsubscribe);
 
+static int __init mt6797_provider_init(void)
+{
+	int ret;
+
+	if (!of_machine_is_compatible("planet,gemini-pda"))
+		return 0;
+	ret = bus_register_notifier(&platform_bus_type, &supplier_nb);
+	if (ret)
+		return ret;
+	ret = bus_register_notifier(&cpu_subsys, &cpu_nb);
+	if (ret) {
+		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
+		return ret;
+	}
+	ret = nvmem_register_notifier(&nvmem_nb);
+	if (ret) {
+		bus_unregister_notifier(&cpu_subsys, &cpu_nb);
+		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
+		return ret;
+	}
+	mutex_lock(&owner_lock);
+	preflight_active = true;
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	return 0;
+}
+module_init(mt6797_provider_init);
+
 static void __exit mt6797_provider_exit(void)
 {
+	if (of_machine_is_compatible("planet,gemini-pda")) {
+		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
+		bus_unregister_notifier(&cpu_subsys, &cpu_nb);
+		nvmem_unregister_notifier(&nvmem_nb);
+	}
+	mutex_lock(&owner_lock);
+	preflight_active = false;
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	cancel_work_sync(&preflight_job);
+	preflight_release();
 	of_node_put(rails[0]);
 	of_node_put(rails[1]);
 }

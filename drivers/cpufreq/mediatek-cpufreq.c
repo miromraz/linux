@@ -469,6 +469,10 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 	unsigned long rate;
 	int ret;
 
+	/* The registry owns Gemini shared OPPs until consumer adoption exists. */
+	if (cpu < 8 && of_machine_is_compatible("planet,gemini-pda"))
+		return -EPROBE_DEFER;
+
 	cpu_dev = get_cpu_device(cpu);
 	if (!cpu_dev)
 		return dev_err_probe(cpu_dev, -ENODEV, "failed to get cpu%d device\n", cpu);

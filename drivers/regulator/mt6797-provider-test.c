@@ -3,7 +3,61 @@
 #include <linux/completion.h>
 #include <linux/kthread.h>
 #include <linux/platform_device.h>
+#include <linux/pm_opp.h>
 #include "mt6797-provider.h"
+
+/* Actual OPP core and production selector, no replacement OPP functions.
+ * Dynamic OPPs do not exercise OF supported-hw parsing or CPU-node mapping.
+ */
+static void preflight_opp_core(struct kunit *test)
+{
+	struct platform_device *pdev;
+	struct dev_pm_opp_config config = {};
+	unsigned long freq, uv;
+	unsigned int hw;
+	int bin, token;
+
+	pdev = platform_device_register_simple("preflight-opp-test", -1, NULL, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(pdev));
+	for (bin = 0; bin < 16; bin++) {
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_hw(bin, &hw), 0);
+		KUNIT_EXPECT_EQ(test, hw, (unsigned int)BIT(bin));
+	}
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_hw(32, &hw), -EINVAL);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_hw(16, &hw), -EINVAL);
+	config.supported_hw = &hw;
+	config.supported_hw_count = 1;
+	token = dev_pm_opp_set_config(&pdev->dev, &config);
+	KUNIT_ASSERT_GT(test, token, 0);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 100,
+						     &freq, &uv), -ERANGE);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&pdev->dev, 100, 800000), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&pdev->dev, 200, 900000), 0);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 0,
+						     &freq, &uv), -EINVAL);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 99,
+						     &freq, &uv), -ERANGE);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 201,
+						     &freq, &uv), -ERANGE);
+	KUNIT_ASSERT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 101,
+						     &freq, &uv), 0);
+	KUNIT_EXPECT_EQ(test, freq, 200UL);
+	KUNIT_EXPECT_EQ(test, uv, 900000UL);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_disable(&pdev->dev, 200), 0);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 101,
+						     &freq, &uv), -ERANGE);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_enable(&pdev->dev, 200), 0);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 100,
+						     &freq, &uv), 0);
+	KUNIT_EXPECT_EQ(test, uv, 800000UL);
+	dev_pm_opp_remove_all_dynamic(&pdev->dev);
+	dev_pm_opp_clear_config(token);
+	/* Reinstallation after clearing must work on the same device. */
+	token = dev_pm_opp_set_config(&pdev->dev, &config);
+	KUNIT_ASSERT_GT(test, token, 0);
+	dev_pm_opp_clear_config(token);
+	platform_device_unregister(pdev);
+}
 
 struct provider_fixture {
 	int uv;
@@ -46,7 +100,7 @@ static void provider_orders(struct kunit *test)
 	struct mt6797_provider_status status;
 	struct platform_device *dev[2];
 	int order, id, uv[2], before;
-	u64 generation;
+	u64 generation, preflight_generation;
 
 	KUNIT_ASSERT_EQ(test, mt6797_provider_subscribe(&listener.nb), 0);
 	KUNIT_EXPECT_GT(test, listener.count, 0);
@@ -60,6 +114,7 @@ static void provider_orders(struct kunit *test)
 						order, &io[order]), 0);
 		mt6797_provider_status(&status);
 		generation = status.engine.generation;
+		preflight_generation = status.preflight.generation;
 		KUNIT_EXPECT_EQ(test, status.attached, BIT(order));
 		KUNIT_EXPECT_EQ(test, status.readiness, -EPROBE_DEFER);
 		KUNIT_EXPECT_FALSE(test, status.engine.ready);
@@ -71,6 +126,8 @@ static void provider_orders(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, mt6797_provider_sample(generation, uv), -ESTALE);
 		mt6797_provider_status(&status);
 		KUNIT_EXPECT_EQ(test, status.readiness, -EAGAIN);
+		KUNIT_EXPECT_GT(test, status.preflight.generation, preflight_generation);
+		KUNIT_EXPECT_NE(test, status.preflight.error, 0);
 		KUNIT_EXPECT_FALSE(test, status.engine.ready);
 		KUNIT_EXPECT_EQ(test, mt6797_provider_sample(status.engine.generation, uv), 0);
 		KUNIT_EXPECT_EQ(test, uv[0], f[0].uv);
@@ -182,6 +239,7 @@ static void provider_inflight(struct kunit *test)
 }
 
 static struct kunit_case provider_cases[] = {
+	KUNIT_CASE(preflight_opp_core),
 	KUNIT_CASE(provider_orders),
 	KUNIT_CASE(provider_invalid),
 	KUNIT_CASE(provider_inflight),

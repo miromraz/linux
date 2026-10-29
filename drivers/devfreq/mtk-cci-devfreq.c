@@ -315,6 +315,10 @@ static int mtk_ccifreq_probe(struct platform_device *pdev)
 	unsigned long rate, opp_volt;
 	int ret;
 
+	/* The registry prepares clocks/OPPs independently of this consumer. */
+	if (of_machine_is_compatible("planet,gemini-pda"))
+		return -EPROBE_DEFER;
+
 	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)
 		return -ENOMEM;
