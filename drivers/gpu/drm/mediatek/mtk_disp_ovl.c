@@ -643,8 +643,26 @@ void mtk_ovl_bgclr_in_off(struct device *dev)
 static int mtk_disp_ovl_bind(struct device *dev, struct device *master,
 			     void *data)
 {
-	/* Clear any state a bootloader left behind (e.g. enabled layers). */
-	return device_reset_optional(dev);
+	struct mtk_disp_ovl *ovl = dev_get_drvdata(dev);
+	int ret;
+
+	/* The engine must be powered and clocked while its reset is pulsed. */
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0)
+		return ret;
+
+	ret = clk_prepare_enable(ovl->clk);
+	if (ret)
+		goto out_put;
+
+	/* Clear any state left by the bootloader before starting the pipeline. */
+	ret = device_reset_optional(dev);
+
+	clk_disable_unprepare(ovl->clk);
+out_put:
+	pm_runtime_put(dev);
+
+	return ret;
 }
 
 static void mtk_disp_ovl_unbind(struct device *dev, struct device *master,

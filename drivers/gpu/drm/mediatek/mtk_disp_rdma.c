@@ -358,9 +358,26 @@ void mtk_rdma_layer_config(struct device *dev, unsigned int idx,
 static int mtk_disp_rdma_bind(struct device *dev, struct device *master,
 			      void *data)
 {
-	/* Clear any state a bootloader left behind (its frame setup). */
-	return device_reset_optional(dev);
+	struct mtk_disp_rdma *rdma = dev_get_drvdata(dev);
+	int ret;
 
+	/* The engine must be powered and clocked while its reset is pulsed. */
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0)
+		return ret;
+
+	ret = clk_prepare_enable(rdma->clk);
+	if (ret)
+		goto out_put;
+
+	/* Clear any state left by the bootloader before starting the pipeline. */
+	ret = device_reset_optional(dev);
+
+	clk_disable_unprepare(rdma->clk);
+out_put:
+	pm_runtime_put(dev);
+
+	return ret;
 }
 
 static void mtk_disp_rdma_unbind(struct device *dev, struct device *master,
