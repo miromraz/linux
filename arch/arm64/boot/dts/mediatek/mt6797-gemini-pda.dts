@@ -710,7 +710,7 @@
 	 * polls. The port is sink-only here; DRP using the BQ25896 boost
 	 * (usb-otg-vbus) as vbus-supply is left for later.
 	 */
-	typec@25 {
+	typec_left: typec@25 {
 		compatible = "onnn,fusb301";
 		reg = <0x25>;
 
@@ -1007,14 +1007,15 @@
 	 * does not reprogram them. The 1.3 A boost current limit matches the
 	 * value the vendor firmware writes.
 	 *
-	 * The vendor kernel never resets the charger. A register reset makes
-	 * the BQ25896 re-run D+/D- detection on the left USB-C data lines,
-	 * which knocks an already enumerated MTU3 gadget off the host.
+	 * Preserve the vendor firmware's charger configuration. The BQ25896
+	 * uses PSEL for source selection, not D+/D- detection. The left Type-C
+	 * controller supplies the advertised source-current budget.
 	 */
 	charger: charger@6b {
 		compatible = "ti,bq25896", "ti,bq25890";
 		reg = <0x6b>;
 		linux,skip-reset;
+		power-supplies = <&typec_left>;
 
 		monitored-battery = <&battery>;
 

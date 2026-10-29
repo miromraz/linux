@@ -91,9 +91,9 @@ properties:
   linux,skip-reset:
     description: |
       Do not reset the charger registers when the driver binds or unbinds.
-      A register reset makes the charger re-run its D+/D- input source
-      detection, which disturbs a USB data link that is already up on the
-      same port.
+      Preserve firmware register settings when resetting would disrupt an
+      active charging or power path. Parts with D+/D- detection may also
+      restart source detection; the BQ25896 uses PSEL instead.
     type: boolean
 
 required:
