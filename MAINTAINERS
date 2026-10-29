@@ -4302,6 +4302,13 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/iio/adc/avia-hx711.yaml
 F:	drivers/iio/adc/hx711.c
 
+AWINIC AW9120 LED DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-leds@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/leds/awinic,aw9120.yaml
+F:	drivers/leds/leds-aw9120.c
+
 AWINIC AW99706 WLED BACKLIGHT DRIVER
 M:	Junjie Cao <caojunjie650@gmail.com>
 S:	Maintained
@@ -16376,6 +16383,21 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/mmc/mtk-sd.yaml
 F:	drivers/mmc/host/mtk-sd.c
 
+MEDIATEK MT6351 ACCDET DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-sound@vger.kernel.org
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	sound/soc/codecs/mt6351-accdet.c
+
+MEDIATEK MT6351 FUEL GAUGE DRIVER
+M:	Miroslav Mraz <miroslav.mraz@techmania.cz>
+L:	linux-pm@vger.kernel.org
+L:	linux-mediatek@lists.infradead.org (moderated for non-subscribers)
+S:	Maintained
+F:	Documentation/devicetree/bindings/power/supply/mediatek,mt6351-fuel-gauge.yaml
+F:	drivers/power/supply/mt6351_fuel_gauge.c
+
 MEDIATEK MT6735 CLOCK & RESET DRIVERS
 M:	Yassine Oudjana <y.oudjana@protonmail.com>
 L:	linux-clk@vger.kernel.org
@@ -27753,6 +27775,12 @@ F:	Documentation/ABI/testing/sysfs-class-typec
 F:	Documentation/driver-api/usb/typec.rst
 F:	drivers/usb/typec/
 F:	include/linux/usb/typec.h
+
+USB TYPEC FUSB301 DRIVER
+L:	linux-usb@vger.kernel.org
+S:	Orphan
+F:	Documentation/devicetree/bindings/usb/onnn,fusb301.yaml
+F:	drivers/usb/typec/fusb301.c
 
 USB TYPEC INTEL PMC MUX DRIVER
 M:	Heikki Krogerus <heikki.krogerus@linux.intel.com>

@@ -106,6 +106,7 @@ struct bq25890_state {
 	u8 boost_fault;
 	u8 bat_fault;
 	u8 ntc_fault;
+	u8 vbus_status;
 };
 
 struct bq25890_device {
@@ -122,6 +123,8 @@ struct bq25890_device {
 	struct work_struct usb_work;
 	struct delayed_work pump_express_work;
 	struct delayed_work status_work;
+	struct delayed_work iinlim_work;
+	bool policy_paused;
 	unsigned long usb_event;
 
 	struct regmap *rmap;
@@ -443,6 +446,37 @@ enum bq25890_ntc_fault {
 	NTC_FAULT_HOT = 6,
 };
 
+/*
+ * REG0B VBUS_STAT on the BQ25896. Unlike the BQ25890/BQ25895, which run USB
+ * D+/D- BC1.2 detection and report an eight-value type, the BQ25896 has no
+ * D+/D- connection: it samples the PSEL pin at VBUS insertion (high = USB
+ * host, low = adapter) and reports only these codes (datasheet SLUSC76,
+ * Table 17).
+ */
+enum bq25896_vbus_status {
+	BQ25896_VBUS_NO_INPUT	= 0,
+	BQ25896_VBUS_USB_SDP	= 1,	/* PSEL high: USB host, IINLIM 500 mA */
+	BQ25896_VBUS_ADAPTER	= 2,	/* PSEL low: adapter, IINLIM 3.25 A */
+	BQ25896_VBUS_OTG	= 7,
+};
+
+/*
+ * Map the BQ25896 PSEL-based VBUS_STAT to the power-supply USB type it reports.
+ * PSEL low (adapter) is a dedicated charging port, which is DCP in the
+ * power_supply vocabulary; the BQ25896 cannot tell a CDP from an SDP.
+ */
+static int bq25896_usb_type(u8 vbus_status)
+{
+	switch (vbus_status) {
+	case BQ25896_VBUS_USB_SDP:
+		return POWER_SUPPLY_USB_TYPE_SDP;
+	case BQ25896_VBUS_ADAPTER:
+		return POWER_SUPPLY_USB_TYPE_DCP;
+	default:
+		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
+	}
+}
+
 static bool bq25890_is_adc_property(enum power_supply_property psp)
 {
 	switch (psp) {
@@ -539,6 +573,19 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 
 	case POWER_SUPPLY_PROP_ONLINE:
 		val->intval = state.online && !state.hiz;
+		break;
+
+	case POWER_SUPPLY_PROP_USB_TYPE:
+		/*
+		 * Only the PSEL-based BQ25896 is decoded here. The BQ25890 and
+		 * BQ25895 report an eight-value BC1.2 type whose VBUS_STAT
+		 * encoding differs, and the BQ25892 takes the type from an
+		 * external supplier; those are left UNKNOWN for now.
+		 */
+		if (bq->chip_version == BQ25896)
+			val->intval = bq25896_usb_type(state.vbus_status);
+		else
+			val->intval = POWER_SUPPLY_USB_TYPE_UNKNOWN;
 		break;
 
 	case POWER_SUPPLY_PROP_HEALTH:
@@ -745,21 +792,58 @@ static int bq25890_charger_get_scaled_iinlim_regval(struct bq25890_device *bq,
 	return bq25890_find_idx(iinlim_ua, TBL_IINLIM);
 }
 
-/* On the BQ25892 try to get charger-type info from our supplier */
+static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq);
+
+/* Called with lock held. Keep retrying even without a new supplier event. */
+static void bq25890_write_iinlim(struct bq25890_device *bq, int limit,
+				 bool retry)
+{
+	int ret;
+
+	if (bq->policy_paused)
+		return;
+	ret = bq25890_field_write(bq, F_IINLIM, limit);
+
+	if ((ret || retry) && !bq->policy_paused)
+		mod_delayed_work(system_wq, &bq->iinlim_work,
+				 BQ25890_POLL_INTERVAL);
+	if (ret)
+		dev_err_ratelimited(bq->dev, "Input current limit write failed: %d\n", ret);
+}
+
+/* Re-evaluate the input current limit when a supplier's advertisement changes */
 static void bq25890_charger_external_power_changed(struct power_supply *psy)
 {
 	struct bq25890_device *bq = power_supply_get_drvdata(psy);
 	union power_supply_propval val;
 	int input_current_limit, ret;
 
+	/*
+	 * The BQ25896 takes its limit from the PSEL pin and, when the source is
+	 * a USB-C connector, from the Type-C current the supplier advertises.
+	 */
+	if (bq->chip_version == BQ25896) {
+		mutex_lock(&bq->lock);
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+		mutex_unlock(&bq->lock);
+		return;
+	}
+
+	/* On the BQ25892 try to get charger-type info from our supplier */
 	if (bq->chip_version != BQ25892)
 		return;
 
 	ret = power_supply_get_property_from_supplier(psy,
 						      POWER_SUPPLY_PROP_USB_TYPE,
 						      &val);
-	if (ret)
+	if (ret) {
+		mutex_lock(&bq->lock);
+		if (!bq->policy_paused)
+			mod_delayed_work(system_wq, &bq->iinlim_work,
+					 BQ25890_POLL_INTERVAL);
+		mutex_unlock(&bq->lock);
 		return;
+	}
 
 	switch (val.intval) {
 	case POWER_SUPPLY_USB_TYPE_DCP:
@@ -779,8 +863,78 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 		input_current_limit = bq25890_charger_get_scaled_iinlim_regval(bq, 500000);
 	}
 
-	bq25890_field_write(bq, F_IINLIM, input_current_limit);
+	mutex_lock(&bq->lock);
+	bq25890_write_iinlim(bq, input_current_limit, false);
+	mutex_unlock(&bq->lock);
 	power_supply_changed(psy);
+}
+
+/*
+ * The BQ25896 has no D+/D- and no CC pins, so it cannot see the Type-C current
+ * a USB-C source advertises through its Rp resistor. A Type-C port controller
+ * wired as our supplier (DT "power-supplies") reports that current as
+ * POWER_SUPPLY_PROP_CURRENT_MAX; return it, or 0 when no such source is known.
+ */
+static int bq25896_typec_input_current_ua(struct bq25890_device *bq)
+{
+	union power_supply_propval val;
+
+	if (!bq->charger)
+		return 0;
+
+	if (power_supply_get_property_from_supplier(bq->charger,
+						    POWER_SUPPLY_PROP_CURRENT_MAX,
+						    &val))
+		return -EAGAIN;
+
+	return val.intval;
+}
+
+/*
+ * The BQ25896 sets REG00 IINLIM itself from the PSEL pin at every VBUS
+ * insertion (datasheet 9.2.3.3): PSEL high -> 500 mA, PSEL low -> 3.25 A.
+ * Re-apply that limit from the reported VBUS_STAT. With linux,skip-reset the
+ * driver inherits the bootloader's IINLIM, so this resyncs a stale value; on a
+ * normal plug event it just rewrites what the chip already programmed.
+ *
+ * On boards where PSEL is strapped high the chip reports USB SDP for every
+ * source, so raise the limit to the current a USB-C source advertises via its
+ * Rp resistor. The advertisement is an upper bound set by
+ * the source, so the limit never exceeds it; with no Type-C information the
+ * chip's own 500 mA SDP value stands.
+ */
+static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
+{
+	int iinlim_ua, typec_ua;
+
+	switch (bq->state.vbus_status) {
+	case BQ25896_VBUS_ADAPTER:
+		iinlim_ua = 3250000;
+		break;
+	case BQ25896_VBUS_USB_SDP:
+	default:
+		iinlim_ua = 500000;
+		break;
+	}
+
+	typec_ua = bq25896_typec_input_current_ua(bq);
+	if (typec_ua < 0)
+		iinlim_ua = 500000;
+	else if (typec_ua > 0)
+		iinlim_ua = typec_ua;
+
+	bq25890_write_iinlim(bq,
+			     bq25890_charger_get_scaled_iinlim_regval(bq, iinlim_ua),
+			     typec_ua < 0);
+}
+
+static void bq25890_iinlim_work(struct work_struct *work)
+{
+	struct bq25890_device *bq =
+		container_of(work, struct bq25890_device, iinlim_work.work);
+
+	if (!IS_ERR_OR_NULL(bq->charger))
+		bq25890_charger_external_power_changed(bq->charger);
 }
 
 static int bq25890_get_chip_state(struct bq25890_device *bq,
@@ -799,7 +953,8 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 		{F_BOOST_FAULT, &state->boost_fault},
 		{F_BAT_FAULT,	&state->bat_fault},
 		{F_CHG_FAULT,	&state->chrg_fault},
-		{F_NTC_FAULT,	&state->ntc_fault}
+		{F_NTC_FAULT,	&state->ntc_fault},
+		{F_VBUS_STAT,	&state->vbus_status}
 	};
 
 	for (i = 0; i < ARRAY_SIZE(state_fields); i++) {
@@ -810,11 +965,11 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 		*state_fields[i].data = ret;
 	}
 
-	dev_dbg(bq->dev, "S:CHG/PG/HIZ/VSYS=%d/%d/%d/%d, F:CHG/BOOST/BAT/NTC=%d/%d/%d/%d\n",
+	dev_dbg(bq->dev, "S:CHG/PG/HIZ/VSYS=%d/%d/%d/%d, F:CHG/BOOST/BAT/NTC=%d/%d/%d/%d, VBUS=%d\n",
 		state->chrg_status, state->online,
 		state->hiz, state->vsys_status,
 		state->chrg_fault, state->boost_fault,
-		state->bat_fault, state->ntc_fault);
+		state->bat_fault, state->ntc_fault, state->vbus_status);
 
 	return 0;
 }
@@ -823,6 +978,7 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 {
 	bool adc_conv_rate, new_adc_conv_rate;
 	struct bq25890_state new_state;
+	bool vbus_changed;
 	int ret;
 
 	ret = bq25890_get_chip_state(bq, &new_state);
@@ -831,6 +987,8 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 
 	if (!memcmp(&bq->state, &new_state, sizeof(new_state)))
 		return IRQ_NONE;
+
+	vbus_changed = new_state.vbus_status != bq->state.vbus_status;
 
 	/*
 	 * Restore HiZ bit in case it was set by user. The chip does not retain
@@ -854,6 +1012,14 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	}
 
 	bq->state = new_state;
+
+	/*
+	 * A changed VBUS_STAT means the source was (un)plugged or re-detected;
+	 * reprogram the input current limit from the BQ25896's own detection.
+	 */
+	if (bq->chip_version == BQ25896 && vbus_changed)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+
 	power_supply_changed(bq->charger);
 
 	return IRQ_HANDLED;
@@ -996,6 +1162,10 @@ static int bq25890_hw_init(struct bq25890_device *bq)
 		return ret;
 	}
 
+	/* Match the input current limit to a source already present at probe */
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+
 	/* Configure ADC for continuous conversions when charging */
 	ret = bq25890_field_write(bq, F_CONV_RATE, bq->state.online && !bq->state.hiz);
 	if (ret < 0) {
@@ -1012,6 +1182,7 @@ static const enum power_supply_property bq25890_power_supply_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
 	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_USB_TYPE,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
@@ -1031,6 +1202,9 @@ static char *bq25890_charger_supplied_to[] = {
 
 static const struct power_supply_desc bq25890_power_supply_desc = {
 	.type = POWER_SUPPLY_TYPE_USB,
+	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+		     BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN),
 	.properties = bq25890_power_supply_props,
 	.num_properties = ARRAY_SIZE(bq25890_power_supply_props),
 	.get_property = bq25890_power_supply_get_property,
@@ -1039,8 +1213,19 @@ static const struct power_supply_desc bq25890_power_supply_desc = {
 	.external_power_changed	= bq25890_charger_external_power_changed,
 };
 
+static void bq25890_stop_iinlim_work(void *data)
+{
+	struct bq25890_device *bq = data;
+
+	mutex_lock(&bq->lock);
+	bq->policy_paused = true;
+	mutex_unlock(&bq->lock);
+	cancel_delayed_work_sync(&bq->iinlim_work);
+}
+
 static int bq25890_power_supply_init(struct bq25890_device *bq)
 {
+	int ret;
 	struct power_supply_config psy_cfg = { .drv_data = bq, };
 
 	/* Get ID for the device */
@@ -1054,12 +1239,28 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	bq->desc = bq25890_power_supply_desc;
 	bq->desc.name = bq->name;
 
+	psy_cfg.fwnode = dev_fwnode(bq->dev);
 	psy_cfg.supplied_to = bq25890_charger_supplied_to;
 	psy_cfg.num_supplicants = ARRAY_SIZE(bq25890_charger_supplied_to);
 
 	bq->charger = devm_power_supply_register(bq->dev, &bq->desc, &psy_cfg);
 
-	return PTR_ERR_OR_ZERO(bq->charger);
+	if (IS_ERR(bq->charger))
+		return PTR_ERR(bq->charger);
+
+	/* Stop retries before devres unregisters the power supply. */
+	ret = devm_add_action_or_reset(bq->dev, bq25890_stop_iinlim_work, bq);
+	if (ret)
+		return ret;
+
+	/* The supplier can already be ready before we register. */
+	mutex_lock(&bq->lock);
+	bq->policy_paused = false;
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+	mutex_unlock(&bq->lock);
+
+	return 0;
 }
 
 static int bq25890_set_otg_cfg(struct bq25890_device *bq, u8 val)
@@ -1482,8 +1683,13 @@ static int bq25890_probe(struct i2c_client *client)
 	bq->client = client;
 	bq->dev = dev;
 	bq->id = -1;
+	bq->policy_paused = true;
 
 	mutex_init(&bq->lock);
+	ret = devm_delayed_work_autocancel(dev, &bq->iinlim_work,
+					   bq25890_iinlim_work);
+	if (ret)
+		return ret;
 	INIT_DELAYED_WORK(&bq->pump_express_work, bq25890_pump_express_work);
 
 	bq->rmap = devm_regmap_init_i2c(client, &bq25890_regmap_config);
@@ -1586,6 +1792,13 @@ static void bq25890_shutdown(struct i2c_client *client)
 {
 	struct bq25890_device *bq = i2c_get_clientdata(client);
 
+	mutex_lock(&bq->lock);
+	bq->policy_paused = true;
+	mutex_unlock(&bq->lock);
+	cancel_delayed_work_sync(&bq->iinlim_work);
+	if (client->irq <= 0)
+		cancel_delayed_work_sync(&bq->status_work);
+
 	/*
 	 * TODO this if + return should probably be removed, but that would
 	 * introduce a function change for boards using the usb-phy framework.
@@ -1611,6 +1824,10 @@ static int bq25890_suspend(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	int ret;
 
+	mutex_lock(&bq->lock);
+	bq->policy_paused = true;
+	mutex_unlock(&bq->lock);
+	cancel_delayed_work_sync(&bq->iinlim_work);
 	if (client->irq <= 0)
 		cancel_delayed_work_sync(&bq->status_work);
 
@@ -1627,6 +1844,12 @@ static int bq25890_suspend(struct device *dev)
 		 */
 		schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
 
+	if (ret < 0) {
+		mutex_lock(&bq->lock);
+		bq->policy_paused = false;
+		mod_delayed_work(system_wq, &bq->iinlim_work, 0);
+		mutex_unlock(&bq->lock);
+	}
 	return ret;
 }
 
@@ -1636,6 +1859,13 @@ static int bq25890_resume(struct device *dev)
 	struct bq25890_device *bq = dev_get_drvdata(dev);
 
 	mutex_lock(&bq->lock);
+
+	bq->policy_paused = false;
+	/* Refresh the supplier even when the subsequent chip-state read fails. */
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+	else if (bq->chip_version == BQ25892)
+		mod_delayed_work(system_wq, &bq->iinlim_work, 0);
 
 	ret = bq25890_get_chip_state(bq, &bq->state);
 	if (ret < 0)
