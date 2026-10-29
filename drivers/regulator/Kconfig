@@ -371,6 +371,7 @@ config REGULATOR_DA9121
 	tristate "Dialog Semiconductor DA9121/DA9122/DA9220/DA9217/DA9130/DA9131/DA9132 regulator"
 	depends on I2C && OF
 	select REGMAP_I2C
+	select REGULATOR_MT6797_PROVIDER
 	help
 	  Say y here to support for the Dialog Semiconductor DA9121.  The
 	  DA9121 is a single channel dual-phase buck converter controlled
@@ -391,6 +392,7 @@ config REGULATOR_DA9210
 	tristate "Dialog Semiconductor DA9210 regulator"
 	depends on I2C
 	select REGMAP_I2C
+	select REGULATOR_MT6797_PROVIDER
 	help
 	  Say y here to support for the Dialog Semiconductor DA9210.
 	  The DA9210 is a multi-phase synchronous step down
@@ -401,6 +403,7 @@ config REGULATOR_DA9211
 	tristate "Dialog Semiconductor DA9211/DA9212/DA9213/DA9223/DA9214/DA9224/DA9215/DA9225 regulator"
 	depends on I2C
 	select REGMAP_I2C
+	select REGULATOR_MT6797_PROVIDER
 	help
 	  Say y here to support for the Dialog Semiconductor DA9211/DA9212
 	  /DA9213/DA9214/DA9215.
@@ -1020,6 +1023,7 @@ config REGULATOR_MT6397
 	  through regulator interface.
 
 config REGULATOR_MT6797_CPU_SRAM
+	select REGULATOR_MT6797_PROVIDER
 	tristate "MediaTek MT6797 CPU SRAM LDO"
 	depends on ARCH_MEDIATEK || COMPILE_TEST
 	depends on OF
@@ -1540,6 +1544,7 @@ config REGULATOR_SLG51000
 	tristate "Dialog Semiconductor SLG51000 regulators"
 	depends on I2C
 	select REGMAP_I2C
+	select REGULATOR_MT6797_PROVIDER
 	help
 	  Say y here to support for the Dialog Semiconductor SLG51000.
 	  The SLG51000 is seven compact and customizable low dropout
@@ -1976,3 +1981,18 @@ config REGULATOR_MT6797_RAIL_COORDINATOR_KUNIT_TEST
 	  Check retained requirements, stale generation rejection and failed
 	  replacement votes using synthetic raw provider callbacks. These tests
 	  do not establish board discovery or consumer lifecycle correctness.
+
+config REGULATOR_MT6797_PROVIDER
+	tristate
+	select REGULATOR_MT6797_RAIL_COORDINATOR
+
+config REGULATOR_MT6797_PROVIDER_KUNIT_TEST
+	tristate "MT6797 production provider registry tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	select REGULATOR_MT6797_PROVIDER
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise actual registry attachment, devres removal, generations and
+	  notification replay using platform devices and synthetic endpoints.
+	  Includes concurrent sample and detach with the actual registry lock.
+	  Does not establish board hardware or firmware ownership correctness.

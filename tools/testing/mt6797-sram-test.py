@@ -15,6 +15,8 @@ root = pathlib.Path(__file__).resolve().parents[2]
 source = (root / 'drivers/regulator/mt6797-cpu-sram-regulator.c').read_text()
 callbacks = source[source.index('#define MT6797_CPULDO_CTRL_0'):
                    source.index('static const struct regulator_ops')]
+callbacks += source[source.index('static int mt6797_cpu_sram_owned_read_unlocked'):
+                    source.index('static int mt6797_cpu_sram_probe')]
 barrier = (root / 'drivers/regulator/mt6797-boot-barrier.h').read_text()
 barrier = barrier[barrier.index('static inline int'):barrier.index('#endif')]
 prelude = r'''
@@ -23,6 +25,9 @@ prelude = r'''
 #include <errno.h>
 #include <stdio.h>
 #include <pthread.h>
+struct mutex { pthread_mutex_t lock; };
+static void mutex_lock(struct mutex *m) { assert(!pthread_mutex_lock(&m->lock)); }
+static void mutex_unlock(struct mutex *m) { assert(!pthread_mutex_unlock(&m->lock)); }
 #define GENMASK(h,l) ((~0U << (l)) & (~0U >> (31-(h))))
 #define DIV_ROUND_UP(n,d) (((n)+(d)-1)/(d))
 #define max(a,b) ((a) > (b) ? (a) : (b))
@@ -67,7 +72,9 @@ static int regulator_is_enabled_regmap(struct regulator_dev *r) {
 '''
 tests = r'''
 static struct regmap m;
-static struct mt6797_cpu_sram state;
+static struct mt6797_cpu_sram state = {
+    .rail_lock = { PTHREAD_MUTEX_INITIALIZER }, .regmap = &m,
+};
 static struct regulator_dev r = {&m, &state};
 static unsigned packed(unsigned code) { return code * 0x01010101U; }
 static void reset(unsigned code) {
@@ -246,6 +253,16 @@ int main(void) {
         reset(code); m.regs[0] = 0;
         assert(mt6797_cpu_sram_enable(&r) == -EIO);
         assert(!m.writes && !m.ndelay && !m.regs[0]);
+    }
+    reset(9);
+    assert(mt6797_cpu_sram_owned_read(&state) == 1050000);
+    for (unsigned mask = 0; mask < 255; mask++) {
+        reset(9); m.regs[0] = mask;
+        assert(mt6797_cpu_sram_owned_read(&state) == -EIO);
+    }
+    for (unsigned field = 0; field < 8; field++) {
+        reset(9); m.regs[1 + field / 4] ^= 1U << (8 * (field % 4));
+        assert(mt6797_cpu_sram_owned_read(&state) == -EINVAL);
     }
     reset(9);
     pthread_t a, b;

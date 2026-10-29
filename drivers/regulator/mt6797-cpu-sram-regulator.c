@@ -61,8 +61,10 @@
  */
 struct mt6797_cpu_sram {
 	/* Reboot/reprobe required; normal reads must not clear containment. */
+	struct mutex rail_lock;
 	bool unresolved;
 	bool boot_barrier;
+	struct regmap *regmap;
 };
 
 static int mt6797_cpu_sram_read_bank(struct regmap *regmap, unsigned int words[2])
@@ -140,7 +142,7 @@ static int mt6797_cpu_sram_get_voltage_sel(struct regulator_dev *rdev)
 	return ret;
 }
 
-static int mt6797_cpu_sram_set_voltage_sel(struct regulator_dev *rdev,
+static int mt6797_cpu_sram_set_voltage_sel_unlocked(struct regulator_dev *rdev,
 					   unsigned int sel)
 {
 	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
@@ -209,7 +211,18 @@ recover:
 	return ret;
 }
 
-static int mt6797_cpu_sram_enable(struct regulator_dev *rdev)
+static int mt6797_cpu_sram_set_voltage_sel(struct regulator_dev *rdev, unsigned int sel)
+{
+	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&sram->rail_lock);
+	ret = mt6797_cpu_sram_set_voltage_sel_unlocked(rdev, sel);
+	mutex_unlock(&sram->rail_lock);
+	return ret;
+}
+
+static int mt6797_cpu_sram_enable_unlocked(struct regulator_dev *rdev)
 {
 	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
 	int ret;
@@ -229,13 +242,35 @@ static int mt6797_cpu_sram_enable(struct regulator_dev *rdev)
 	return ret > 0 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
-static int mt6797_cpu_sram_disable(struct regulator_dev *rdev)
+static int mt6797_cpu_sram_enable(struct regulator_dev *rdev)
+{
+	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&sram->rail_lock);
+	ret = mt6797_cpu_sram_enable_unlocked(rdev);
+	mutex_unlock(&sram->rail_lock);
+	return ret;
+}
+
+static int mt6797_cpu_sram_disable_unlocked(struct regulator_dev *rdev)
 {
 	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
 
 	if (sram->boot_barrier)
 		return -EBUSY;
 	return regulator_disable_regmap(rdev);
+}
+
+static int mt6797_cpu_sram_disable(struct regulator_dev *rdev)
+{
+	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&sram->rail_lock);
+	ret = mt6797_cpu_sram_disable_unlocked(rdev);
+	mutex_unlock(&sram->rail_lock);
+	return ret;
 }
 
 static const struct regulator_ops mt6797_cpu_sram_ops = {
@@ -261,6 +296,34 @@ static const struct regulator_desc mt6797_cpu_sram_desc = {
 	.enable_val	= MT6797_CPULDO_EN_MASK,
 };
 
+static int mt6797_cpu_sram_owned_read_unlocked(void *data)
+{
+	struct mt6797_cpu_sram *sram = data;
+	unsigned int enable, words[2];
+	int ret;
+
+	if (sram->unresolved)
+		return -EIO;
+	ret = regmap_read(sram->regmap, MT6797_CPULDO_CTRL_0, &enable);
+	if (ret)
+		return ret;
+	if ((enable & MT6797_CPULDO_EN_MASK) != MT6797_CPULDO_EN_MASK)
+		return -EIO;
+	ret = mt6797_cpu_sram_read_bank(sram->regmap, words);
+	return ret < 0 ? ret : MT6797_CPULDO_MIN_UV + ret * MT6797_CPULDO_STEP_UV;
+}
+
+static int mt6797_cpu_sram_owned_read(void *data)
+{
+	struct mt6797_cpu_sram *sram = data;
+	int ret;
+
+	mutex_lock(&sram->rail_lock);
+	ret = mt6797_cpu_sram_owned_read_unlocked(data);
+	mutex_unlock(&sram->rail_lock);
+	return ret;
+}
+
 static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -269,7 +332,10 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 	struct regulator_dev *rdev;
 	struct mt6797_cpu_sram *sram;
 	struct regmap *regmap;
-	unsigned int enable, words[2];
+	struct mt6797_rail_io io = {
+		.read = mt6797_cpu_sram_owned_read,
+		.step_uv = MT6797_CPULDO_STEP_UV,
+	};
 	int ret;
 
 	regmap = syscon_node_to_regmap(dev->parent->of_node);
@@ -280,15 +346,16 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 	sram = devm_kzalloc(dev, sizeof(*sram), GFP_KERNEL);
 	if (!sram)
 		return -ENOMEM;
-	sram->boot_barrier = mt6797_boot_barrier_supply(np, "mem-supply");
+	mutex_init(&sram->rail_lock);
+	sram->regmap = regmap;
+	ret = mt6797_boot_barrier_supply(np, "mem-supply");
+	if (ret < 0)
+		return ret;
+	sram->boot_barrier = ret;
 	if (sram->boot_barrier) {
-		ret = regmap_read(regmap, MT6797_CPULDO_CTRL_0, &enable);
+		io.data = sram;
+		ret = mt6797_provider_attach(dev, MT6797_SRAM, &io);
 		if (ret)
-			return ret;
-		if ((enable & MT6797_CPULDO_EN_MASK) != MT6797_CPULDO_EN_MASK)
-			return -EIO;
-		ret = mt6797_cpu_sram_read_bank(regmap, words);
-		if (ret < 0)
 			return ret;
 	}
 	config.driver_data = sram;

@@ -46,6 +46,7 @@ struct da9211 {
 	unsigned int pending_mask;
 	unsigned int mask_attempts;
 	bool stopping;
+	struct mutex rail_lock;
 	struct mutex gpio_lock;
 	unsigned long gpio_enabled;
 	unsigned long gpio_initialized;
@@ -269,12 +270,23 @@ static int da9211_barrier_state(struct regulator_dev *rdev)
 	return !!(control & DA9211_BUCKA_EN);
 }
 
-static int da9211_set_voltage_sel(struct regulator_dev *rdev, unsigned int sel)
+static int da9211_set_voltage_sel_unlocked(struct regulator_dev *rdev, unsigned int sel)
 {
 	if (da9211_boot_barrier(rdev))
 		return mt6797_boot_barrier_check(da9211_barrier_state(rdev),
 				regulator_get_voltage_sel_regmap(rdev), sel);
 	return regulator_set_voltage_sel_regmap(rdev, sel);
+}
+
+static int da9211_set_voltage_sel(struct regulator_dev *rdev, unsigned int sel)
+{
+	struct da9211 *chip = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&chip->rail_lock);
+	ret = da9211_set_voltage_sel_unlocked(rdev, sel);
+	mutex_unlock(&chip->rail_lock);
+	return ret;
 }
 
 /* Supplied descriptors are borrowed from the platform owner. Never transfer
@@ -329,7 +341,7 @@ static int da9211_is_enabled(struct regulator_dev *rdev)
 	return enabled;
 }
 
-static int da9211_enable(struct regulator_dev *rdev)
+static int da9211_enable_unlocked(struct regulator_dev *rdev)
 {
 	struct da9211 *chip = rdev_get_drvdata(rdev);
 
@@ -340,7 +352,18 @@ static int da9211_enable(struct regulator_dev *rdev)
 	return regulator_enable_regmap(rdev);
 }
 
-static int da9211_disable(struct regulator_dev *rdev)
+static int da9211_enable(struct regulator_dev *rdev)
+{
+	struct da9211 *chip = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&chip->rail_lock);
+	ret = da9211_enable_unlocked(rdev);
+	mutex_unlock(&chip->rail_lock);
+	return ret;
+}
+
+static int da9211_disable_unlocked(struct regulator_dev *rdev)
 {
 	struct da9211 *chip = rdev_get_drvdata(rdev);
 
@@ -349,6 +372,17 @@ static int da9211_disable(struct regulator_dev *rdev)
 	if (chip->pdata->gpiod_ren[rdev_get_id(rdev)])
 		return da9211_supplied_gpio_set(rdev, false);
 	return regulator_disable_regmap(rdev);
+}
+
+static int da9211_disable(struct regulator_dev *rdev)
+{
+	struct da9211 *chip = rdev_get_drvdata(rdev);
+	int ret;
+
+	mutex_lock(&chip->rail_lock);
+	ret = da9211_disable_unlocked(rdev);
+	mutex_unlock(&chip->rail_lock);
+	return ret;
 }
 
 static const struct regulator_ops da9211_buck_ops = {
@@ -575,6 +609,42 @@ static void da9211_regulator_unregister(void *data)
 	regulator_unregister(data);
 }
 
+/* Called before core registration; production ownership has no write API. */
+static int da9211_owned_read_unlocked(void *data)
+{
+	struct da9211 *chip = data;
+	unsigned int control, selector, config;
+	int ret;
+
+	ret = regmap_read_bypassed(chip->regmap, DA9211_REG_CONFIG_E, &config);
+	if (ret)
+		return ret;
+	if (chip->chip_id != DA9213 || !(config & DA9211_SLAVE_SEL))
+		return -EINVAL;
+	ret = regmap_read_bypassed(chip->regmap, DA9211_REG_BUCKA_CONT, &control);
+	if (ret)
+		return ret;
+	if (!(control & DA9211_BUCKA_EN) ||
+	    (control & (DA9211_VBUCKA_SEL | DA9211_VBUCKA_GPI_MASK |
+			DA9211_BUCKA_GPI_MASK)))
+		return -EIO;
+	ret = regmap_read_bypassed(chip->regmap, DA9211_REG_VBUCKA_A, &selector);
+	if (ret)
+		return ret;
+	return 300000 + (selector & 0x7f) * 10000;
+}
+
+static int da9211_owned_read(void *data)
+{
+	struct da9211 *chip = data;
+	int ret;
+
+	mutex_lock(&chip->rail_lock);
+	ret = da9211_owned_read_unlocked(data);
+	mutex_unlock(&chip->rail_lock);
+	return ret;
+}
+
 static int da9211_buck_probe(struct platform_device *pdev)
 {
 	struct da9211 *chip = dev_get_drvdata(pdev->dev.parent);
@@ -588,22 +658,29 @@ static int da9211_buck_probe(struct platform_device *pdev)
 		.ena_gpiod = chip->pdata->gpiod_ren[id],
 	};
 	struct regulator_dev *rdev;
-	unsigned int control;
+	struct mt6797_rail_io io = {
+		.read = da9211_owned_read,
+		.data = chip,
+		.step_uv = 10000,
+	};
 	int ret;
 
+	if (id == DA9211_ID_BUCKA &&
+	    of_machine_is_compatible("planet,gemini-pda")) {
+		ret = mt6797_boot_barrier_supply(config.of_node, "cpu-supply");
+		if (ret < 0)
+			return ret;
+		chip->boot_barrier = ret;
+	}
 	if (chip->boot_barrier && id == DA9211_ID_BUCKA) {
 		/* Both names are accepted by OF GPIO lookup. Reject before get. */
 		if (config.ena_gpiod ||
 		    of_property_present(config.of_node, "enable-gpio") ||
 		    of_property_present(config.of_node, "enable-gpios"))
 			return -EOPNOTSUPP;
-		ret = regmap_read(chip->regmap, DA9211_REG_BUCKA_CONT, &control);
+		ret = mt6797_provider_attach(&pdev->dev, MT6797_PROC, &io);
 		if (ret)
 			return ret;
-		if (!(control & DA9211_BUCKA_EN) ||
-		    (control & (DA9211_VBUCKA_SEL | DA9211_VBUCKA_GPI_MASK |
-				DA9211_BUCKA_GPI_MASK)))
-			return -EIO;
 	}
 
 	if (config.ena_gpiod) {
@@ -703,8 +780,6 @@ static int da9211_regulator_init(struct da9211 *chip)
 		chip->gpio_initialized |= BIT(id);
 	}
 
-	chip->boot_barrier = mt6797_boot_barrier_supply(
-		chip->pdata->reg_node[DA9211_ID_BUCKA], "cpu-supply");
 	for (id = 0; id < DA9211_MAX_REGULATORS; id++) {
 		if (!(chip->present & BIT(id)))
 			continue;
@@ -735,6 +810,7 @@ static int da9211_i2c_probe(struct i2c_client *i2c)
 	chip->dev = &i2c->dev;
 	mutex_init(&chip->irq_lock);
 	mutex_init(&chip->gpio_lock);
+	mutex_init(&chip->rail_lock);
 	INIT_DELAYED_WORK(&chip->mask_work, da9211_mask_recover);
 	chip->regmap = devm_regmap_init_i2c(i2c, &da9211_regmap_config);
 	if (IS_ERR(chip->regmap)) {

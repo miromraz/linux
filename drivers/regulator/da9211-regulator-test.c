@@ -83,7 +83,8 @@ static void da9211_test_independent(struct kunit *test)
 	};
 	struct da9211_pdata pdata = { .num_buck = 2,
 		.init_data = { &init[0], &init[1] } };
-	struct da9211 chip = { .pdata = &pdata, .boot_barrier = true };
+	struct da9211 chip = { .pdata = &pdata, .boot_barrier = true,
+		.chip_id = DA9213 };
 	struct platform_device *parent, *a, *b;
 	struct regulator *consumer;
 	struct da9211_test_notifier notifier = { .nb.notifier_call = da9211_test_notify };
@@ -91,6 +92,7 @@ static void da9211_test_independent(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, bus);
 	bus->test = test;
+	bus->regs[DA9211_REG_CONFIG_E] = DA9211_SLAVE_SEL;
 	bus->regs[DA9211_REG_BUCKA_CONT] = DA9211_BUCKA_EN;
 	bus->regs[DA9211_REG_BUCKB_CONT] = DA9211_BUCKA_EN;
 	bus->regs[DA9211_REG_VBUCKA_A] = 85; /* 1.15 V */
@@ -100,12 +102,27 @@ static void da9211_test_independent(struct kunit *test)
 	mutex_init(&chip.irq_lock);
 	INIT_DELAYED_WORK(&chip.mask_work, da9211_mask_recover);
 	mutex_init(&chip.gpio_lock);
+	mutex_init(&chip.rail_lock);
 	chip.dev = &parent->dev;
 	dev_set_drvdata(chip.dev, &chip);
 	chip.regmap = regmap_init(chip.dev, NULL, bus, &da9211_test_regmap);
 	KUNIT_EXPECT_FALSE(test, IS_ERR(chip.regmap));
 	if (IS_ERR(chip.regmap))
 		goto parent_out;
+	/* Execute the production enabled-bank reader against the regmap bus. */
+	KUNIT_EXPECT_EQ(test, da9211_owned_read(&chip), 1150000);
+	bus->regs[DA9211_REG_BUCKA_CONT] = 0;
+	KUNIT_EXPECT_EQ(test, da9211_owned_read(&chip), -EIO);
+	bus->regs[DA9211_REG_BUCKA_CONT] = DA9211_BUCKA_EN | DA9211_VBUCKA_SEL;
+	KUNIT_EXPECT_EQ(test, da9211_owned_read(&chip), -EIO);
+	bus->regs[DA9211_REG_BUCKA_CONT] = DA9211_BUCKA_EN | DA9211_VBUCKA_GPI_MASK;
+	KUNIT_EXPECT_EQ(test, da9211_owned_read(&chip), -EIO);
+	bus->regs[DA9211_REG_BUCKA_CONT] = DA9211_BUCKA_EN | DA9211_BUCKA_GPI_MASK;
+	KUNIT_EXPECT_EQ(test, da9211_owned_read(&chip), -EIO);
+	bus->regs[DA9211_REG_BUCKA_CONT] = DA9211_BUCKA_EN;
+	bus->regs[DA9211_REG_CONFIG_E] = 0;
+	KUNIT_EXPECT_EQ(test, da9211_owned_read(&chip), -EINVAL);
+	bus->regs[DA9211_REG_CONFIG_E] = DA9211_SLAVE_SEL;
 	id = 0;
 	a = platform_device_register_data(chip.dev, "da9211-buck",
 					PLATFORM_DEVID_AUTO, &id, sizeof(id));
@@ -216,6 +233,7 @@ static void da9211_test_sparse(struct kunit *test)
 	bus->regs[DA9211_REG_CONFIG_E] = DA9211_SLAVE_SEL;
 	KUNIT_ASSERT_NOT_NULL(test, bus);
 	bus->test = test;
+	bus->regs[DA9211_REG_CONFIG_E] = DA9211_SLAVE_SEL;
 	bus->regs[DA9211_REG_BUCKA_CONT] = DA9211_BUCKA_EN;
 	bus->regs[DA9211_REG_BUCKB_CONT] = DA9211_BUCKA_EN;
 	bus->regs[DA9211_REG_VBUCKA_A] = 85;
@@ -225,6 +243,7 @@ static void da9211_test_sparse(struct kunit *test)
 	mutex_init(&chip.irq_lock);
 	INIT_DELAYED_WORK(&chip.mask_work, da9211_mask_recover);
 	mutex_init(&chip.gpio_lock);
+	mutex_init(&chip.rail_lock);
 	chip.dev = &parent->dev;
 	dev_set_drvdata(chip.dev, &chip);
 	chip.regmap = regmap_init(chip.dev, NULL, bus, &da9211_test_regmap);
@@ -348,6 +367,7 @@ static void da9211_test_gpio_level(struct kunit *test, bool high)
 	mutex_init(&chip.irq_lock);
 	INIT_DELAYED_WORK(&chip.mask_work, da9211_mask_recover);
 	mutex_init(&chip.gpio_lock);
+	mutex_init(&chip.rail_lock);
 	dev_set_drvdata(chip.dev, &chip);
 	chip.regmap = regmap_init(chip.dev, NULL, bus, &da9211_test_regmap);
 	KUNIT_EXPECT_FALSE(test, IS_ERR(chip.regmap));
