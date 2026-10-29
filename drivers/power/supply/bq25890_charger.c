@@ -872,7 +872,7 @@ static int bq25896_typec_input_current_ua(struct bq25890_device *bq)
  *
  * On boards where PSEL is strapped high the chip reports USB SDP for every
  * source, so raise the limit to the current a USB-C source advertises via its
- * Rp resistor when that is higher. The advertisement is an upper bound set by
+ * Rp resistor. The advertisement is an upper bound set by
  * the source, so the limit never exceeds it; with no Type-C information the
  * chip's own 500 mA SDP value stands.
  */
@@ -891,7 +891,7 @@ static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
 	}
 
 	typec_ua = bq25896_typec_input_current_ua(bq);
-	if (typec_ua > iinlim_ua)
+	if (typec_ua > 0)
 		iinlim_ua = typec_ua;
 
 	bq25890_field_write(bq, F_IINLIM,
@@ -1195,7 +1195,16 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 
 	bq->charger = devm_power_supply_register(bq->dev, &bq->desc, &psy_cfg);
 
-	return PTR_ERR_OR_ZERO(bq->charger);
+	if (IS_ERR(bq->charger))
+		return PTR_ERR(bq->charger);
+
+	/* The supplier can already be ready before we register. */
+	mutex_lock(&bq->lock);
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+	mutex_unlock(&bq->lock);
+
+	return 0;
 }
 
 static int bq25890_set_otg_cfg(struct bq25890_device *bq, u8 val)
@@ -1776,6 +1785,9 @@ static int bq25890_resume(struct device *dev)
 	ret = bq25890_get_chip_state(bq, &bq->state);
 	if (ret < 0)
 		goto unlock;
+
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 
 	/* Re-enable ADC only if charger is plugged in. */
 	if (bq->state.online) {
