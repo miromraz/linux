@@ -27754,6 +27754,12 @@ F:	Documentation/driver-api/usb/typec.rst
 F:	drivers/usb/typec/
 F:	include/linux/usb/typec.h
 
+USB TYPEC FUSB301 DRIVER
+L:	linux-usb@vger.kernel.org
+S:	Orphan
+F:	Documentation/devicetree/bindings/usb/onnn,fusb301.yaml
+F:	drivers/usb/typec/fusb301.c
+
 USB TYPEC INTEL PMC MUX DRIVER
 M:	Heikki Krogerus <heikki.krogerus@linux.intel.com>
 L:	linux-usb@vger.kernel.org
