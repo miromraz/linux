@@ -1274,6 +1274,8 @@ static u16 scpsys_domain_caps(const struct scpsys_soc_data *soc, u32 id)
 		if (id < soc->num_hwv_domains)
 			return soc->hwv_domains_data[id].caps;
 		break;
+	case SCPSYS_MTCMOS_TYPE_MAX:
+		break;
 	}
 
 	return 0;
