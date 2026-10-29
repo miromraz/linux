@@ -78,7 +78,8 @@ struct mt6351_fg {
 static int mt6351_fg_read_current(struct mt6351_fg *fg, int *curr_ua)
 {
 	unsigned int con0, raw;
-	int ret, clear_ret;
+	int ret, clear_ret, idle_ret;
+	int sample;
 
 	/* Request a fresh latch of the current register. */
 	ret = regmap_update_bits(fg->regmap, MT6351_FGADC_CON0, FG_CON0_CTRL,
@@ -97,19 +98,32 @@ static int mt6351_fg_read_current(struct mt6351_fg *fg, int *curr_ua)
 	 * the read result. If the clear does not complete the next read would
 	 * return a stale value, so report that as an error too.
 	 */
-	regmap_update_bits(fg->regmap, MT6351_FGADC_CON0, FG_CON0_CTRL, FG_SW_CLEAR);
-	clear_ret = regmap_read_poll_timeout(fg->regmap, MT6351_FGADC_CON0, con0,
-					     !(con0 & FG_LATCHDATA_ST),
-					     FG_LATCH_POLL_US, FG_LATCH_TIMEOUT_US);
-	regmap_update_bits(fg->regmap, MT6351_FGADC_CON0, FG_CON0_CTRL, 0);
+	clear_ret = regmap_update_bits(fg->regmap, MT6351_FGADC_CON0,
+				       FG_CON0_CTRL, FG_SW_CLEAR);
+	if (!clear_ret)
+		clear_ret = regmap_read_poll_timeout(fg->regmap, MT6351_FGADC_CON0, con0,
+						     !(con0 & FG_LATCHDATA_ST),
+						     FG_LATCH_POLL_US, FG_LATCH_TIMEOUT_US);
+	idle_ret = regmap_update_bits(fg->regmap, MT6351_FGADC_CON0,
+				      FG_CON0_CTRL, 0);
 
 	if (ret)
 		return ret;
 	if (clear_ret)
 		return clear_ret;
 
-	/* Positive is charging (battery_meter_hal.c:482). */
-	*curr_ua = div_s64((s64)sign_extend32(raw, 15) * MT6351_FG_CUR_NUM,
+	if (idle_ret)
+		return idle_ret;
+
+	/*
+	 * Vendor battery_meter_hal.c subtracts 65535 for negative samples:
+	 * one's complement, including negative zero, not two's complement.
+	 * Positive is charging. This changes encoding, not calibration.
+	 */
+	sample = raw & 0xffff;
+	if (sample > 0x7fff)
+		sample -= 0xffff;
+	*curr_ua = div_s64((s64)sample * MT6351_FG_CUR_NUM,
 			   fg->shunt_uohm);
 	return 0;
 }
