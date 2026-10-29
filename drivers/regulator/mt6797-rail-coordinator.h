@@ -30,6 +30,18 @@ struct mt6797_rail_coordinator {
 	bool fault;
 };
 
+/* A single synchronized observation; readiness never grants a clock change
+ * without revalidation of generation by the subsequent operation.
+ */
+struct mt6797_rail_status {
+	u64 generation;
+	int floor[MT6797_RAIL_USERS];
+	bool ready;
+	bool fault;
+};
+
+void mt6797_rail_status(struct mt6797_rail_coordinator *c,
+			struct mt6797_rail_status *status);
 void mt6797_rail_init(struct mt6797_rail_coordinator *c);
 int mt6797_rail_attach(struct mt6797_rail_coordinator *c,
 		       enum mt6797_rail_id id, const struct mt6797_rail_io *io);

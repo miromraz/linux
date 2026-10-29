@@ -8,6 +8,7 @@ struct rail_fixture {
 	int uv[2];
 	int writes;
 	int fail_at;
+	int read_error;
 };
 
 struct rail_endpoint {
@@ -19,7 +20,7 @@ static int rail_read(void *data)
 {
 	struct rail_endpoint *e = data;
 
-	return e->fixture->uv[e->id];
+	return e->fixture->read_error ?: e->fixture->uv[e->id];
 }
 
 static int rail_write(void *data, int uv)
@@ -115,9 +116,61 @@ static void rail_lifetime(struct kunit *test)
 	mutex_destroy(&f.coordinator.lock);
 }
 
+static void rail_reprepare(struct kunit *test)
+{
+	struct rail_fixture f = { .test = test, .uv = { 1040000, 1200000 } };
+	struct rail_endpoint e[2] = { { &f, 0 }, { &f, 1 } };
+	struct mt6797_rail_io io[2] = {
+		{ rail_read, rail_write, &e[0], 10000 },
+		{ rail_read, rail_write, &e[1], 25000 },
+	};
+	int floor[3] = { 1040000, 1040000, 1040000 };
+	struct mt6797_rail_status status;
+	u64 generation;
+
+	mt6797_rail_init(&f.coordinator);
+	KUNIT_ASSERT_EQ(test, mt6797_rail_attach(&f.coordinator, 0, &io[0]), 0);
+	KUNIT_ASSERT_EQ(test, mt6797_rail_attach(&f.coordinator, 1, &io[1]), 0);
+	mt6797_rail_status(&f.coordinator, &status);
+	generation = status.generation;
+	KUNIT_ASSERT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), 0);
+	KUNIT_EXPECT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation - 1, floor),
+			-ESTALE);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_TRUE(test, status.ready);
+	floor[0] = 1200001;
+	KUNIT_EXPECT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), -ERANGE);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_TRUE(test, status.ready);
+	KUNIT_EXPECT_EQ(test, status.floor[0], 1040000);
+	floor[0] = 1040000;
+	f.read_error = -EIO;
+	KUNIT_EXPECT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), -EIO);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_FALSE(test, status.ready);
+	KUNIT_EXPECT_FALSE(test, status.fault);
+	KUNIT_EXPECT_EQ(test, status.floor[0], 1040000);
+	f.read_error = 0;
+	KUNIT_ASSERT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), 0);
+	floor[0] = 1100000;
+	KUNIT_EXPECT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), -ERANGE);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_FALSE(test, status.ready);
+	KUNIT_EXPECT_EQ(test, status.floor[0], 1100000);
+	KUNIT_EXPECT_EQ(test, f.writes, 0);
+	/* External recovery may satisfy a retained floor; retry must validate it. */
+	f.uv[0] = 1100000;
+	KUNIT_ASSERT_EQ(test, mt6797_rail_prepare(&f.coordinator, generation, floor), 0);
+	mt6797_rail_status(&f.coordinator, &status);
+	KUNIT_EXPECT_TRUE(test, status.ready);
+	KUNIT_EXPECT_EQ(test, status.generation, generation);
+	mutex_destroy(&f.coordinator.lock);
+}
+
 static struct kunit_case rail_cases[] = {
 	KUNIT_CASE(rail_conversion),
 	KUNIT_CASE(rail_lifetime),
+	KUNIT_CASE(rail_reprepare),
 	{}
 };
 

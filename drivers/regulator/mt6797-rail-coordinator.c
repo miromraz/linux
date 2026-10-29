@@ -17,6 +17,18 @@ void mt6797_rail_init(struct mt6797_rail_coordinator *c)
 }
 EXPORT_SYMBOL_GPL(mt6797_rail_init);
 
+void mt6797_rail_status(struct mt6797_rail_coordinator *c,
+			struct mt6797_rail_status *status)
+{
+	mutex_lock(&c->lock);
+	status->generation = c->generation;
+	memcpy(status->floor, c->floor, sizeof(status->floor));
+	status->ready = c->converted && c->requirements_valid && !c->fault;
+	status->fault = c->fault;
+	mutex_unlock(&c->lock);
+}
+EXPORT_SYMBOL_GPL(mt6797_rail_status);
+
 int mt6797_rail_attach(struct mt6797_rail_coordinator *c,
 		       enum mt6797_rail_id id, const struct mt6797_rail_io *io)
 {
@@ -92,6 +104,7 @@ static int mt6797_rail_step(struct mt6797_rail_coordinator *c, int id,
 	if (ret) {
 		c->fault = true;
 		c->converted = false;
+		c->requirements_valid = false;
 	}
 	return ret;
 }
@@ -120,13 +133,17 @@ int mt6797_rail_prepare(struct mt6797_rail_coordinator *c, u64 generation,
 			goto out;
 		}
 	}
+	/* Only an accepted request revokes readiness. Stale tokens and malformed
+	 * requests must not invalidate a different, already validated owner.
+	 */
+	c->requirements_valid = false;
+	c->converted = false;
 	/* Keep the old requirements as well until live hardware is validated. */
 	for (i = 0; i < MT6797_RAIL_USERS; i++)
 		c->floor[i] = max(c->floor[i], floor[i]);
 	ret = mt6797_rail_read(c, uv);
 	if (ret)
 		goto out;
-	c->requirements_valid = true;
 	/* Raise SRAM one grid step if possible, otherwise raise proc one step.
 	 * Every state satisfies proc <= SRAM <= proc + 160 mV. No electrical
 	 * supply relationship is assumed. Both loops are bounded by the grids.
@@ -141,6 +158,7 @@ int mt6797_rail_prepare(struct mt6797_rail_coordinator *c, u64 generation,
 		if (ret)
 			goto out;
 	}
+	c->requirements_valid = true;
 	c->converted = true;
 out:
 	mutex_unlock(&c->lock);
@@ -160,7 +178,7 @@ int mt6797_rail_vote(struct mt6797_rail_coordinator *c, u64 generation,
 		ret = -ESTALE;
 		goto out;
 	}
-	if (!c->converted || c->fault) {
+	if (!c->converted || !c->requirements_valid || c->fault) {
 		ret = -EBUSY;
 		goto out;
 	}
