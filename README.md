@@ -37,8 +37,9 @@ branch above rather than relying on a plain clone.
 
 ## Hardware status
 
-The llumik-built GCC 14 release booted on the maintainer's phone on 2026-10-29.
-Nineteen automated checks passed before and after RTC-driven s2idle resume;
+Both the llumik-built GCC 14 release and the actual published OBS package booted
+on the maintainer's Pixel 4a on 2026-10-29. The OBS package passed twenty checks
+before and after RTC-driven s2idle resume, including all 764 module hashes;
 Wi-Fi/USB SSH, both cameras and hardware H.264 decoding were exercised.
 See the [exact build identity, results and limits](Documentation/arm64/sunfish-verification-20261029.md).
 The table below also includes historical findings; not every listed feature

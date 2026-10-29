@@ -1,12 +1,14 @@
 # Sunfish handset verification, 2026-10-29
 
-The llumik-built release kernel boots on the maintainer's Pixel 4a with matching
-modules. Nineteen automated checks passed before and after a successful RTC-driven
-s2idle suspend/resume. Automatic return to the preserved September system was
-also demonstrated after failed trial boots. This validates the existing custom
-handset layout; it does not validate a fresh stock-userdata installation.
+Both the llumik-built release and the published OBS kernel boot on the
+maintainer's physical Pixel 4a with matching modules. The llumik build passed
+nineteen automated checks; the OBS build passed those checks plus verification of
+all 764 module hashes. Both passed again after RTC-driven s2idle suspend/resume.
+Automatic return to the preserved September system was also demonstrated after
+failed trial boots. This validates the existing custom handset layout; it does
+not validate a fresh stock-userdata installation.
 
-## Tested kernel identity
+## Tested llumik kernel identity
 
 | Input | Identity |
 | --- | --- |
@@ -119,10 +121,59 @@ both image and headers at `7.1.0-sm7150-20261026.3+git473d9fb95156`.
 
 The downloaded image package matched its published hash and reported GCC 14.2.0
 for target and host. Its configuration matches the working September kernel apart
-from the compiler command name. Its bytes differ from the llumik build, and the
-OBS binary itself has not been boot-tested in this run. Its embedded
+from the compiler command name. Its bytes differ from the llumik build. Its embedded
 `source_commit` is null; source identity was checked separately in OBS's
 `_scmsync.obsinfo`. Treat that missing embedded identity as a packaging follow-up.
+
+### Published OBS package tested on the physical phone
+
+The actual downloaded OBS package was then booted unattended on the Pixel 4a,
+using its kernel, DTB and matching modules. The running kernel's GNU build ID was
+read from `/sys/kernel/notes`; all 764 installed module files matched the hashes
+of the extracted OBS package before and after suspend. This distinguishes the
+OBS trial from both the September fallback and the separate llumik build, which
+share the same `uname -r`.
+
+| OBS trial input | Identity |
+| --- | --- |
+| Live GNU build ID | `8df9168e7075ff26c7c8d1fb9e14f1948a7bf4dd` |
+| Target and host compiler | GCC 14.2.0, Debian `14.2.0-19` |
+| Linker | GNU binutils `2.44` |
+| Trial UKI SHA256 | `7b37e1570d9d9c47921f7baed5ddb54ff527ef158a654d42ed55089aff9ab51f` |
+| Private trial `/usr` SHA256 | `66748b6e93801a5dd09b7f72b834018dd6cf60ca7636bae234e41c7192ea0737` |
+
+Twenty checks passed before and after a 15-second RTC/s2idle cycle: kernel and
+package identity, all module hashes, crash-log scan, ADSP/CDSP/modem state,
+Wi-Fi address, Bluetooth power, accelerometer availability, display connection,
+touchscreen binding, haptics device, NFC services, audio card/amplifiers, both
+cameras, decoder-only policy and actual H.264 hardware decoding. USB and Wi-Fi
+SSH worked before and after resume. Suspend success increased from zero to one,
+failure stayed at zero, and the boot ID did not change. Speaker playback and a
+150 ms haptics command completed. The same remote-verification limits listed above
+apply; driver presence is not a physical touchscreen, NFC-tag or sound-quality test.
+
+Microphone capture produced the expected 96000 bytes for one second of mono
+48 kHz signed 16-bit audio, discarded without saving. However, `pw-record
+--sample-count 48000` returned status 1 after reaching that count. The same
+command reproduced the same byte count and status on the preserved September
+system. Track this capture-tool termination behavior separately; this is data-flow
+evidence, not a clean-exit or sound-quality certification.
+
+The OBS and September boots also both logged a missing `regulatory.db`, a failed
+Phosh first-boot importer, a Podman startup failure and a transient busy DRM
+atomic commit. The importer remained failed in the user service manager.
+These reproduced baseline userspace/image findings need triage for a recipient
+image; passing the selected hardware checks does not make them resolved.
+
+The trial used the corrected filesystem-label constraint and the 36 early module
+names from the known working initrd, resolved against the OBS package. Its
+inactive partition passed full hash readback and read-only `systemd-validatefs`
+before boot. The GPT layout, Android boot partitions and boot-control metadata
+retained their recorded values/hashes. No Android slot switch was performed.
+After the hardware tests, a normal reboot skipped the exhausted one-attempt OBS
+entry and automatically returned to the preserved September system. The original
+working default was restored and the completed trial UKI retained outside the boot
+menu. The phone was left running that preserved system with Wi-Fi and USB SSH.
 
 Sources: [OBS source identity](https://api.opensuse.org/public/source/home:realni/linux-sm7150/_scmsync.obsinfo),
 [build status](https://api.opensuse.org/public/build/home:realni/_result?package=linux-sm7150),
