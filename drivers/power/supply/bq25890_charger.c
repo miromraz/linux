@@ -123,6 +123,8 @@ struct bq25890_device {
 	struct work_struct usb_work;
 	struct delayed_work pump_express_work;
 	struct delayed_work status_work;
+	struct delayed_work iinlim_work;
+	bool policy_paused;
 	unsigned long usb_event;
 
 	struct regmap *rmap;
@@ -792,6 +794,23 @@ static int bq25890_charger_get_scaled_iinlim_regval(struct bq25890_device *bq,
 
 static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq);
 
+/* Called with lock held. Keep retrying even without a new supplier event. */
+static void bq25890_write_iinlim(struct bq25890_device *bq, int limit,
+				 bool retry)
+{
+	int ret;
+
+	if (bq->policy_paused)
+		return;
+	ret = bq25890_field_write(bq, F_IINLIM, limit);
+
+	if ((ret || retry) && !bq->policy_paused)
+		mod_delayed_work(system_wq, &bq->iinlim_work,
+				 BQ25890_POLL_INTERVAL);
+	if (ret)
+		dev_err_ratelimited(bq->dev, "Input current limit write failed: %d\n", ret);
+}
+
 /* Re-evaluate the input current limit when a supplier's advertisement changes */
 static void bq25890_charger_external_power_changed(struct power_supply *psy)
 {
@@ -817,8 +836,14 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 	ret = power_supply_get_property_from_supplier(psy,
 						      POWER_SUPPLY_PROP_USB_TYPE,
 						      &val);
-	if (ret)
+	if (ret) {
+		mutex_lock(&bq->lock);
+		if (!bq->policy_paused)
+			mod_delayed_work(system_wq, &bq->iinlim_work,
+					 BQ25890_POLL_INTERVAL);
+		mutex_unlock(&bq->lock);
 		return;
+	}
 
 	switch (val.intval) {
 	case POWER_SUPPLY_USB_TYPE_DCP:
@@ -838,7 +863,9 @@ static void bq25890_charger_external_power_changed(struct power_supply *psy)
 		input_current_limit = bq25890_charger_get_scaled_iinlim_regval(bq, 500000);
 	}
 
-	bq25890_field_write(bq, F_IINLIM, input_current_limit);
+	mutex_lock(&bq->lock);
+	bq25890_write_iinlim(bq, input_current_limit, false);
+	mutex_unlock(&bq->lock);
 	power_supply_changed(psy);
 }
 
@@ -858,7 +885,7 @@ static int bq25896_typec_input_current_ua(struct bq25890_device *bq)
 	if (power_supply_get_property_from_supplier(bq->charger,
 						    POWER_SUPPLY_PROP_CURRENT_MAX,
 						    &val))
-		return 0;
+		return -EAGAIN;
 
 	return val.intval;
 }
@@ -891,11 +918,23 @@ static void bq25890_charger_set_iinlim_from_vbus_stat(struct bq25890_device *bq)
 	}
 
 	typec_ua = bq25896_typec_input_current_ua(bq);
-	if (typec_ua > 0)
+	if (typec_ua < 0)
+		iinlim_ua = 500000;
+	else if (typec_ua > 0)
 		iinlim_ua = typec_ua;
 
-	bq25890_field_write(bq, F_IINLIM,
-			    bq25890_charger_get_scaled_iinlim_regval(bq, iinlim_ua));
+	bq25890_write_iinlim(bq,
+			     bq25890_charger_get_scaled_iinlim_regval(bq, iinlim_ua),
+			     typec_ua < 0);
+}
+
+static void bq25890_iinlim_work(struct work_struct *work)
+{
+	struct bq25890_device *bq =
+		container_of(work, struct bq25890_device, iinlim_work.work);
+
+	if (!IS_ERR_OR_NULL(bq->charger))
+		bq25890_charger_external_power_changed(bq->charger);
 }
 
 static int bq25890_get_chip_state(struct bq25890_device *bq,
@@ -1174,8 +1213,19 @@ static const struct power_supply_desc bq25890_power_supply_desc = {
 	.external_power_changed	= bq25890_charger_external_power_changed,
 };
 
+static void bq25890_stop_iinlim_work(void *data)
+{
+	struct bq25890_device *bq = data;
+
+	mutex_lock(&bq->lock);
+	bq->policy_paused = true;
+	mutex_unlock(&bq->lock);
+	cancel_delayed_work_sync(&bq->iinlim_work);
+}
+
 static int bq25890_power_supply_init(struct bq25890_device *bq)
 {
+	int ret;
 	struct power_supply_config psy_cfg = { .drv_data = bq, };
 
 	/* Get ID for the device */
@@ -1198,8 +1248,14 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	if (IS_ERR(bq->charger))
 		return PTR_ERR(bq->charger);
 
+	/* Stop retries before devres unregisters the power supply. */
+	ret = devm_add_action_or_reset(bq->dev, bq25890_stop_iinlim_work, bq);
+	if (ret)
+		return ret;
+
 	/* The supplier can already be ready before we register. */
 	mutex_lock(&bq->lock);
+	bq->policy_paused = false;
 	if (bq->chip_version == BQ25896)
 		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 	mutex_unlock(&bq->lock);
@@ -1627,8 +1683,13 @@ static int bq25890_probe(struct i2c_client *client)
 	bq->client = client;
 	bq->dev = dev;
 	bq->id = -1;
+	bq->policy_paused = true;
 
 	mutex_init(&bq->lock);
+	ret = devm_delayed_work_autocancel(dev, &bq->iinlim_work,
+					   bq25890_iinlim_work);
+	if (ret)
+		return ret;
 	INIT_DELAYED_WORK(&bq->pump_express_work, bq25890_pump_express_work);
 
 	bq->rmap = devm_regmap_init_i2c(client, &bq25890_regmap_config);
@@ -1731,6 +1792,13 @@ static void bq25890_shutdown(struct i2c_client *client)
 {
 	struct bq25890_device *bq = i2c_get_clientdata(client);
 
+	mutex_lock(&bq->lock);
+	bq->policy_paused = true;
+	mutex_unlock(&bq->lock);
+	cancel_delayed_work_sync(&bq->iinlim_work);
+	if (client->irq <= 0)
+		cancel_delayed_work_sync(&bq->status_work);
+
 	/*
 	 * TODO this if + return should probably be removed, but that would
 	 * introduce a function change for boards using the usb-phy framework.
@@ -1756,6 +1824,10 @@ static int bq25890_suspend(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	int ret;
 
+	mutex_lock(&bq->lock);
+	bq->policy_paused = true;
+	mutex_unlock(&bq->lock);
+	cancel_delayed_work_sync(&bq->iinlim_work);
 	if (client->irq <= 0)
 		cancel_delayed_work_sync(&bq->status_work);
 
@@ -1772,6 +1844,12 @@ static int bq25890_suspend(struct device *dev)
 		 */
 		schedule_delayed_work(&bq->status_work, BQ25890_POLL_INTERVAL);
 
+	if (ret < 0) {
+		mutex_lock(&bq->lock);
+		bq->policy_paused = false;
+		mod_delayed_work(system_wq, &bq->iinlim_work, 0);
+		mutex_unlock(&bq->lock);
+	}
 	return ret;
 }
 
@@ -1782,12 +1860,16 @@ static int bq25890_resume(struct device *dev)
 
 	mutex_lock(&bq->lock);
 
+	bq->policy_paused = false;
+	/* Refresh the supplier even when the subsequent chip-state read fails. */
+	if (bq->chip_version == BQ25896)
+		bq25890_charger_set_iinlim_from_vbus_stat(bq);
+	else if (bq->chip_version == BQ25892)
+		mod_delayed_work(system_wq, &bq->iinlim_work, 0);
+
 	ret = bq25890_get_chip_state(bq, &bq->state);
 	if (ret < 0)
 		goto unlock;
-
-	if (bq->chip_version == BQ25896)
-		bq25890_charger_set_iinlim_from_vbus_stat(bq);
 
 	/* Re-enable ADC only if charger is plugged in. */
 	if (bq->state.online) {

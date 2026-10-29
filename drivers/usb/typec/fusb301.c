@@ -203,13 +203,26 @@ static int fusb301_psy_get_property(struct power_supply *psy,
 				    union power_supply_propval *val)
 {
 	struct fusb301 *fusb = power_supply_get_drvdata(psy);
+	unsigned int status, type, ua = 0;
+	int ret;
+
+	/* Read hardware here: the cached poll result can predate suspend. */
+	ret = regmap_read(fusb->regmap, FUSB301_REG_STATUS, &status);
+	if (ret)
+		return ret;
+	ret = regmap_read(fusb->regmap, FUSB301_REG_TYPE, &type);
+	if (ret)
+		return ret;
+	if ((status & FUSB301_STATUS_ATTACH) &&
+	    (type & FUSB301_TYPE_SOURCE) && !(type & FUSB301_TYPE_SINK))
+		ua = fusb301_sink_current_ua(fusb301_sink_opmode(status));
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_ONLINE:
-		val->intval = fusb->sink_current_ua > 0;
+		val->intval = ua > 0;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
-		val->intval = fusb->sink_current_ua;
+		val->intval = ua;
 		break;
 	default:
 		return -EINVAL;
