@@ -66,6 +66,8 @@ struct mtk_cpu_dvfs_info {
 	struct notifier_block opp_nb;
 	unsigned int opp_cpu;
 	unsigned long current_freq;
+	/* An uncertain transaction requires reinitialization, not a retry. */
+	bool dvfs_fault;
 	const struct mtk_cpufreq_platform_data *soc_data;
 	int vtrack_max;
 	bool ccifreq_bound;
@@ -131,11 +133,8 @@ static int mtk_cpufreq_voltage_tracking(struct mtk_cpu_dvfs_info *info,
 
 			ret = regulator_set_voltage(proc_reg, vproc,
 						    soc_data->proc_max_volt);
-			if (ret) {
-				regulator_set_voltage(sram_reg, pre_vsram,
-						      soc_data->sram_max_volt);
+			if (ret)
 				return ret;
-			}
 		} else {
 			vproc = max(new_vproc,
 				    pre_vsram - soc_data->max_volt_shift);
@@ -152,11 +151,8 @@ static int mtk_cpufreq_voltage_tracking(struct mtk_cpu_dvfs_info *info,
 
 			ret = regulator_set_voltage(sram_reg, vsram,
 						    soc_data->sram_max_volt);
-			if (ret) {
-				regulator_set_voltage(proc_reg, pre_vproc,
-						      soc_data->proc_max_volt);
+			if (ret)
 				return ret;
-			}
 		}
 
 		pre_vproc = vproc;
@@ -177,13 +173,22 @@ static int mtk_cpufreq_set_voltage(struct mtk_cpu_dvfs_info *info, int vproc)
 	const struct mtk_cpufreq_platform_data *soc_data = info->soc_data;
 	int ret;
 
+	if (info->dvfs_fault)
+		return -EIO;
+
 	if (info->need_voltage_tracking)
 		ret = mtk_cpufreq_voltage_tracking(info, vproc);
 	else
 		ret = regulator_set_voltage(info->proc_reg, vproc,
 					    soc_data->proc_max_volt);
-	if (!ret)
+	if (!ret) {
 		info->pre_vproc = vproc;
+	} else {
+		/* A regulator error can follow partially completed tracking. */
+		info->pre_vproc = 0;
+		info->current_freq = 0;
+		info->dvfs_fault = true;
+	}
 
 	return ret;
 }
@@ -219,14 +224,23 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 	struct mtk_cpu_dvfs_info *info = policy->driver_data;
 	struct device *cpu_dev = info->cpu_dev;
 	struct dev_pm_opp *opp;
-	long freq_hz, pre_freq_hz;
+	long freq_hz;
 	int vproc, pre_vproc, inter_vproc, target_vproc, ret;
 
 	inter_vproc = info->intermediate_voltage;
 
-	pre_freq_hz = clk_get_rate(cpu_clk);
 
 	mutex_lock(&info->reg_lock);
+
+	if (info->dvfs_fault) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (!armpll || clk_is_match(armpll, info->inter_clk)) {
+		ret = -EIO;
+		goto fault;
+	}
 
 	if (unlikely(info->pre_vproc <= 0))
 		pre_vproc = regulator_get_voltage(info->proc_reg);
@@ -269,18 +283,17 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		if (ret) {
 			dev_err(cpu_dev,
 				"cpu%d: failed to scale up voltage!\n", policy->cpu);
-			mtk_cpufreq_set_voltage(info, pre_vproc);
 			goto out;
 		}
 	}
 
 	/* Reparent the CPU clock to intermediate clock. */
 	ret = clk_set_parent(cpu_clk, info->inter_clk);
-	if (ret) {
+	if (ret || !clk_is_match(clk_get_parent(cpu_clk), info->inter_clk)) {
+		ret = ret ?: -EIO;
 		dev_err(cpu_dev,
 			"cpu%d: failed to re-parent cpu clock!\n", policy->cpu);
-		mtk_cpufreq_set_voltage(info, pre_vproc);
-		goto out;
+		goto fault;
 	}
 
 	/* Set the original PLL to target rate. */
@@ -288,46 +301,24 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 	if (ret) {
 		dev_err(cpu_dev,
 			"cpu%d: failed to scale cpu clock rate!\n", policy->cpu);
-		clk_set_parent(cpu_clk, armpll);
-		mtk_cpufreq_set_voltage(info, pre_vproc);
-		goto out;
-	}
-
-	/* Set parent of CPU clock back to the original PLL. */
-	ret = clk_set_parent(cpu_clk, armpll);
-	if (ret) {
-		dev_err(cpu_dev,
-			"cpu%d: failed to re-parent cpu clock!\n", policy->cpu);
-		mtk_cpufreq_set_voltage(info, inter_vproc);
-		goto out;
+		goto fault;
 	}
 
 	/*
-	 * A firmware-backed ARMPLL (see mtk_cpufreq_platform_data.firmware_pll)
-	 * can silently refuse a rate change: the clk core discards .set_rate()'s
-	 * return value, so clk_set_rate() above returned 0 even if the SMC failed
-	 * and the PLL stayed at its old, higher rate. Read the rate back before
-	 * scaling Vproc down -- the clock reports its last good rate, so a large
-	 * mismatch means the PLL is still fast and lowering Vproc now would
-	 * undervolt the cluster.
-	 *
-	 * No clock recovery is needed: the firmware set_rate was the no-op, so the
-	 * PLL is already at that last-good rate and cpu_clk is still parented to
-	 * it. Just restore Vproc and bail. During policy initialization the
-	 * initial-OPP sync drops the policy on this error; later transitions
-	 * report the failure to the cpufreq core.
-	 *
-	 * A whole-OPP mismatch (tens to hundreds of MHz) is a genuinely unapplied
-	 * rate; the firmware PLL caches the exact programmed MHz, so a success
-	 * matches within the sub-MHz window.
+	 * Verify acceptance before reconnecting the PLL. Firmware may refuse
+	 * an SMC, leaving its cached rate zero on the first transaction.
+	 * Never invent a boot rate or reduce voltage on that uncertainty.
 	 */
 	if (info->soc_data->firmware_pll &&
-	    abs((long)clk_get_rate(cpu_clk) - freq_hz) >= HZ_PER_MHZ) {
-		dev_err(cpu_dev, "cpu%d: cpu clock rate was not applied!\n",
-			policy->cpu);
-		mtk_cpufreq_set_voltage(info, pre_vproc);
+	    abs((long)clk_get_rate(armpll) - freq_hz) >= HZ_PER_MHZ) {
 		ret = -EIO;
-		goto out;
+		goto fault;
+	}
+
+	ret = clk_set_parent(cpu_clk, armpll);
+	if (ret || !clk_is_match(clk_get_parent(cpu_clk), armpll)) {
+		ret = ret ?: -EIO;
+		goto fault;
 	}
 
 	/*
@@ -339,26 +330,25 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		if (ret) {
 			dev_err(cpu_dev,
 				"cpu%d: failed to scale down voltage!\n", policy->cpu);
-			/*
-			 * A firmware PLL has no known rate before its first set.
-			 * Do not pass that zero to clk_set_rate(): the provider
-			 * would clamp it to its minimum, inventing a rollback rate.
-			 * Keep the successfully programmed target PLL instead. The
-			 * voltage operation failed, so retain the error and let
-			 * policy initialization reject this policy.
-			 */
-			if (!pre_freq_hz && info->soc_data->firmware_pll)
-				goto out;
-
-			clk_set_parent(cpu_clk, info->inter_clk);
-			clk_set_rate(armpll, pre_freq_hz);
-			clk_set_parent(cpu_clk, armpll);
+			/* Keep the lowered clock: voltage may already be reduced. */
 			goto out;
 		}
 	}
 
 	info->current_freq = freq_hz;
+	goto out;
 
+fault:
+	/*
+	 * Retain max(old, intermediate, target) voltage. A failed clock
+	 * operation may have taken effect; neither retune a possibly active
+	 * PLL nor lower voltage without a verified recovery contract. Block
+	 * later transitions and OPP notifiers from trusting stale state.
+	 */
+	info->pre_vproc = 0;
+	info->current_freq = 0;
+	info->dvfs_fault = true;
+	dev_err(cpu_dev, "DVFS state uncertain; further transitions disabled\n");
 out:
 	mutex_unlock(&info->reg_lock);
 
