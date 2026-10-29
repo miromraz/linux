@@ -33,13 +33,7 @@ struct mtk_cpufreq_platform_data {
 	 * SoCs are left untouched.
 	 */
 	bool firmware_pll;
-	/*
-	 * The SoC .dtsi may describe a cluster that a given board does not
-	 * power (e.g. the MT6797 Cortex-A72). On such a platform a cluster
-	 * whose board wired no cpu-supply is skipped at probe instead of
-	 * failing the whole driver; elsewhere a missing supply stays an error.
-	 */
-	bool clusters_may_lack_supply;
+
 };
 
 /*
@@ -673,13 +667,14 @@ static void mtk_cpu_dvfs_info_release(struct mtk_cpu_dvfs_info *info)
 		put_device(info->cci_dev);
 }
 
-/*
- * CPUs whose cluster was deliberately skipped at probe (no cpu-supply on a
- * clusters_may_lack_supply platform). .init has no dvfs info for them and
- * tests this to tell a skipped (unpowered) cluster apart from a genuine init
- * failure. See mtk_cpufreq_init() and mtk_cpufreq_probe().
- */
-static cpumask_t mtk_cpufreq_skipped_cpus;
+/* Keep probe and policy initialization consistent for unmanaged CPUs. */
+static bool mtk_cpu_has_dvfs(struct device *cpu_dev)
+{
+	return cpu_dev &&
+		of_property_present(cpu_dev->of_node, "operating-points-v2") &&
+		(of_property_present(cpu_dev->of_node, "cpu-supply") ||
+		 of_property_present(cpu_dev->of_node, "proc-supply"));
+}
 
 static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 {
@@ -691,14 +686,7 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 
 	info = mtk_cpu_dvfs_info_lookup(policy->cpu);
 	if (!info) {
-		/*
-		 * A cluster deliberately skipped at probe -- its board wired no
-		 * cpu-supply (clusters_may_lack_supply, see mtk_cpufreq_probe) --
-		 * has no dvfs info and was recorded in mtk_cpufreq_skipped_cpus.
-		 * Report it as simply unmanaged (-ENODEV) rather than as a failure,
-		 * so an unpowered cluster does not log an error for every CPU in it.
-		 */
-		if (cpumask_test_cpu(policy->cpu, &mtk_cpufreq_skipped_cpus))
+		if (!mtk_cpu_has_dvfs(get_cpu_device(policy->cpu)))
 			return -ENODEV;
 
 		pr_err("dvfs info for cpu%d is not initialized.\n",
@@ -813,33 +801,10 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 		if (info)
 			continue;
 
-		/*
-		 * Skip a CPU whose node has no "operating-points-v2": its
-		 * cluster is not wired for DVFS (pre-existing behaviour).
-		 */
+		/* A board must describe both the OPPs and their voltage supply. */
 		cpu_dev = get_cpu_device(cpu);
-		if (cpu_dev &&
-		    !of_property_present(cpu_dev->of_node, "operating-points-v2"))
+		if (cpu_dev && !mtk_cpu_has_dvfs(cpu_dev))
 			continue;
-
-		/*
-		 * On a platform whose .dtsi may describe a cluster a given board
-		 * does not power (clusters_may_lack_supply, e.g. the MT6797
-		 * Cortex-A72), skip a cluster for which the board wired no
-		 * cpu-supply, so one unpowered cluster never fails the whole
-		 * probe and drops DVFS for the clusters that do work. Other
-		 * platforms keep the old behaviour, where a missing supply later
-		 * fails probe.
-		 */
-		if (cpu_dev && data->clusters_may_lack_supply &&
-		    !of_property_present(cpu_dev->of_node, "cpu-supply") &&
-		    !of_property_present(cpu_dev->of_node, "proc-supply")) {
-			dev_info(&pdev->dev,
-				 "cpu%d: no cpu-supply, leaving its cluster unmanaged\n",
-				 cpu);
-			cpumask_set_cpu(cpu, &mtk_cpufreq_skipped_cpus);
-			continue;
-		}
 
 		info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
 		if (!info) {
@@ -897,7 +862,6 @@ static const struct mtk_cpufreq_platform_data mt6797_platform_data = {
 	.sram_max_volt = 1200000,
 	.ccifreq_supported = false,
 	.firmware_pll = true,
-	.clusters_may_lack_supply = true,
 };
 
 static const struct mtk_cpufreq_platform_data mt7622_platform_data = {
