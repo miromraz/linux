@@ -10,6 +10,7 @@
 #ifndef __LINUX_DEVFREQ_H__
 #define __LINUX_DEVFREQ_H__
 
+#include <linux/completion.h>
 #include <linux/device.h>
 #include <linux/notifier.h>
 #include <linux/pm_opp.h>
@@ -118,6 +119,9 @@ struct devfreq_outcome {
  *			from devfreq_remove_device() call. If the user
  *			has registered devfreq->nb at a notifier-head,
  *			this is the time to unregister it.
+ * @release_done: Optional initialized completion signalled after the last profile
+ *               access, including failed add. The caller must keep the profile
+ *               and callback data alive until it completes.
  * @freq_table:		Optional list of frequencies to support statistics
  *			and freq_table must be generated in ascending order.
  * @max_state:		The size of freq_table.
@@ -139,6 +143,7 @@ struct devfreq_dev_profile {
 			      struct devfreq_dev_status *stat);
 	int (*get_cur_freq)(struct device *dev, unsigned long *freq);
 	void (*exit)(struct device *dev);
+	struct completion *release_done;
 
 	unsigned long *freq_table;
 	unsigned int max_state;

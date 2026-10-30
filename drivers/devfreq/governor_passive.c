@@ -17,6 +17,10 @@
 #include <linux/devfreq-governor.h>
 #include <linux/units.h>
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "../regulator/mt6797-combined-test.h"
+#endif
+
 /**
  * struct devfreq_cpu_data - Hold the per-cpu data
  * @node:	list node
@@ -248,6 +252,15 @@ static int devfreq_passive_get_target_freq(struct devfreq *devfreq,
 	return ret;
 }
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+static void (*cci_callback_hook)(struct devfreq *);
+
+void mt6797_test_cci_callback_hook(void (*hook)(struct devfreq *))
+{
+	cci_callback_hook = hook;
+}
+#endif
+
 static int cpufreq_passive_notifier_call(struct notifier_block *nb,
 					 unsigned long event, void *ptr)
 {
@@ -294,6 +307,11 @@ static int cpufreq_passive_notifier_call(struct notifier_block *nb,
 	parent_cpu_data->update_error = ret;
 out:
 	mutex_unlock(&devfreq->lock);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	/* Pause inside the SRCU reader, after dropping the child mutex. */
+	if (cci_callback_hook)
+		cci_callback_hook(devfreq);
+#endif
 	/* Child errors must not suppress later CPU completion listeners. */
 	return NOTIFY_DONE;
 }
@@ -563,7 +581,6 @@ MODULE_DESCRIPTION("DEVFREQ Passive governor");
 MODULE_LICENSE("GPL v2");
 
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
-#include "../regulator/mt6797-combined-test.h"
 #include <kunit/test.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>

@@ -2,8 +2,10 @@
 #include <kunit/test.h>
 #include <kunit/resource.h>
 #include <linux/completion.h>
+#include <linux/delay.h>
 #include <linux/clk.h>
 #include <linux/cpufreq.h>
+#include <linux/devfreq.h>
 #include <linux/clk/mediatek-dvfs.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
@@ -1459,6 +1461,208 @@ static int token_release_thread(void *arg)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+struct cci_drain_fixture {
+	struct kunit *test;
+	struct platform_device *pdev;
+	struct devfreq *df;
+	struct notifier_block *nb;
+	struct completion entered, release, draining, drained, removed;
+	bool callback_done;
+};
+
+static struct cci_drain_fixture *cci_drain;
+
+static void cci_callback_barrier(struct devfreq *df)
+{
+	struct cci_drain_fixture *f = cci_drain;
+
+	if (df != f->df)
+		return;
+	complete(&f->entered);
+	KUNIT_EXPECT_NE(f->test,
+			wait_for_completion_timeout(&f->release, 5 * HZ), 0UL);
+	WRITE_ONCE(f->callback_done, true);
+}
+
+static void cci_drain_barrier(struct notifier_block *nb, bool done)
+{
+	struct cci_drain_fixture *f = cci_drain;
+
+	if (nb != f->nb)
+		return;
+	if (done) {
+		KUNIT_EXPECT_TRUE(f->test, READ_ONCE(f->callback_done));
+		complete_all(&f->drained);
+	} else {
+		complete(&f->draining);
+	}
+}
+
+static int cci_post_thread(void *arg)
+{
+	struct cpufreq_policy *policy = cpufreq_cpu_get(0);
+	struct cpufreq_freqs freqs = { .old = policy->cur, .new = policy->cur };
+
+	cpufreq_freq_transition_begin(policy, &freqs);
+	cpufreq_freq_transition_end(policy, &freqs, 0);
+	cpufreq_cpu_put(policy);
+	while (!kthread_should_stop())
+		msleep(20);
+	return 0;
+}
+
+static int cci_remove_thread(void *arg)
+{
+	struct cci_drain_fixture *f = arg;
+
+	mt6797_test_cci_fini(f->pdev);
+	KUNIT_EXPECT_TRUE(f->test, completion_done(&f->drained));
+	complete(&f->removed);
+	while (!kthread_should_stop())
+		msleep(20);
+	return 0;
+}
+
+static void cci_lifecycle_drain(struct kunit *test, struct platform_device *pdev)
+{
+	struct cci_drain_fixture f = { .test = test, .pdev = pdev,
+		.df = mt6797_test_cci_devfreq(pdev) };
+	struct devfreq_passive_data *passive = f.df->data;
+	struct task_struct *post, *remove;
+	struct mt6797_provider_status status;
+
+	get_device(&f.df->dev);
+	f.nb = &passive->nb;
+	init_completion(&f.entered);
+	init_completion(&f.release);
+	init_completion(&f.draining);
+	init_completion(&f.drained);
+	init_completion(&f.removed);
+	cci_drain = &f;
+	mt6797_test_cci_callback_hook(cci_callback_barrier);
+	mt6797_test_srcu_hook(cci_drain_barrier);
+	post = kthread_run(cci_post_thread, &f, "cci-post");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(post));
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f.entered, 2 * HZ), 0UL);
+	remove = kthread_run(cci_remove_thread, &f, "cci-remove");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(remove));
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f.draining, 2 * HZ), 0UL);
+	/* The callback has released df->lock; only its SRCU reader remains. */
+	if (mutex_trylock(&f.df->lock))
+		mutex_unlock(&f.df->lock);
+	else
+		KUNIT_FAIL(test, "child mutex held at SRCU drain");
+	KUNIT_EXPECT_FALSE(test, completion_done(&f.drained));
+	KUNIT_EXPECT_FALSE(test, completion_done(&f.removed));
+	mt6797_provider_status(&status);
+	KUNIT_EXPECT_NE(test, status.active & BIT(2), 0UL);
+	complete(&f.release);
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f.drained, 2 * HZ), 0UL);
+	KUNIT_EXPECT_FALSE(test, completion_done(&f.removed));
+	mt6797_provider_status(&status);
+	KUNIT_EXPECT_NE(test, status.active & BIT(2), 0UL);
+	put_device(&f.df->dev);
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f.removed, 2 * HZ), 0UL);
+	kthread_stop(post);
+	kthread_stop(remove);
+	mt6797_test_srcu_hook(NULL);
+	mt6797_test_cci_callback_hook(NULL);
+	cci_drain = NULL;
+}
+
+static void cci_lifecycle_run(struct kunit *test, void *arg)
+{
+	struct platform_device *pdev = arg;
+	struct mt6797_provider_status status;
+	struct cpufreq_policy *policy;
+	struct cpufreq_freqs freqs;
+	struct devfreq *df;
+	struct clk *clock = clk_get(&pdev->dev, "cci");
+	unsigned int enables, refs;
+	int stage, ret, guard, vote;
+
+	KUNIT_ASSERT_FALSE(test, IS_ERR(clock));
+	enables = __clk_get_enable_count(clock);
+	refs = kref_read(&pdev->dev.kobj.kref);
+	for (stage = 1; stage <= 9; stage++) {
+		ret = mt6797_test_cci_init(pdev, stage);
+		if (stage == 8)
+			KUNIT_EXPECT_LT(test, ret, 0); /* module-loader errno */
+		else
+			KUNIT_EXPECT_EQ(test, ret, stage == 7 ? -EINVAL : -EIO);
+		KUNIT_EXPECT_PTR_EQ(test, platform_get_drvdata(pdev), NULL);
+		mt6797_preflight_test_flush();
+		mt6797_provider_status(&status);
+		KUNIT_EXPECT_EQ(test, status.active & BIT(2), 0UL);
+		KUNIT_EXPECT_EQ(test, kref_read(&pdev->dev.kobj.kref), refs);
+		KUNIT_EXPECT_EQ(test, __clk_get_enable_count(clock), enables);
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 1);
+	}
+	/* Exercise the actual notifier registration refusal, before START targets. */
+	policy = cpufreq_cpu_get(0);
+	KUNIT_ASSERT_NOT_NULL(test, policy);
+	policy->fast_switch_possible = true;
+	down_write(&policy->rwsem);
+	cpufreq_enable_fast_switch(policy);
+	up_write(&policy->rwsem);
+	KUNIT_EXPECT_TRUE(test, policy->fast_switch_enabled);
+	KUNIT_EXPECT_EQ(test, mt6797_test_cci_init(pdev, 0), -EBUSY);
+	cpufreq_disable_fast_switch(policy);
+	policy->fast_switch_possible = false;
+	cpufreq_cpu_put(policy);
+	KUNIT_EXPECT_PTR_EQ(test, platform_get_drvdata(pdev), NULL);
+	mt6797_preflight_test_flush();
+	KUNIT_EXPECT_EQ(test, kref_read(&pdev->dev.kobj.kref), refs);
+	ret = mt6797_test_cci_init(pdev, 0);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	df = mt6797_test_cci_devfreq(pdev);
+	KUNIT_ASSERT_NOT_NULL(test, df);
+	KUNIT_EXPECT_NOT_NULL(test, df->profile->target_outcome);
+	KUNIT_EXPECT_GT(test, df->previous_freq, 0UL);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 2);
+	KUNIT_EXPECT_GE(test, vote, 1080000);
+	policy = cpufreq_cpu_get(0);
+	KUNIT_ASSERT_NOT_NULL(test, policy);
+	freqs.old = policy->cur;
+	freqs.new = 200;
+	cpufreq_freq_transition_begin(policy, &freqs);
+	cpufreq_freq_transition_end(policy, &freqs, 0);
+	KUNIT_EXPECT_EQ(test, df->outcome.error, 0);
+	KUNIT_EXPECT_EQ(test, df->previous_freq, 300UL);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 2);
+	KUNIT_EXPECT_EQ(test, vote, 1080000);
+	cpufreq_cpu_put(policy);
+	mt6797_preflight_test_flush();
+	cci_lifecycle_drain(test, pdev);
+	KUNIT_EXPECT_PTR_EQ(test, platform_get_drvdata(pdev), NULL);
+	mt6797_preflight_test_flush();
+	mt6797_provider_status(&status);
+	KUNIT_EXPECT_EQ(test, status.active & BIT(2), 0UL);
+	KUNIT_EXPECT_EQ(test, kref_read(&pdev->dev.kobj.kref), refs);
+	KUNIT_EXPECT_EQ(test, __clk_get_enable_count(clock), enables);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 1);
+	clk_put(clock);
+}
+
+static void cci_lifecycle(struct kunit *test, struct platform_device *pdev,
+			  struct clk *mux, struct clk *inter)
+{
+	struct clk_lookup *cci, *temporary;
+
+	cci = clkdev_create(mux, "cci", "%s", dev_name(&pdev->dev));
+	temporary = clkdev_create(inter, "intermediate", "%s", dev_name(&pdev->dev));
+	KUNIT_ASSERT_NOT_NULL(test, cci);
+	KUNIT_ASSERT_NOT_NULL(test, temporary);
+	KUNIT_EXPECT_EQ(test, mt6797_test_cci_init(pdev, 0), -EPROBE_DEFER);
+	KUNIT_EXPECT_PTR_EQ(test, platform_get_drvdata(pdev), NULL);
+	mt6797_preflight_test_flush();
+	mt6797_test_cci_policies(test, cci_lifecycle_run, pdev);
+	clkdev_drop(temporary);
+	clkdev_drop(cci);
+}
+#endif
+
 static void operational_clock_token(struct kunit *test, struct clk *mux,
 		struct clk *pll, struct clk *inter, unsigned int user)
 {
@@ -1520,6 +1724,13 @@ static void operational_clock_token(struct kunit *test, struct clk *mux,
 	mt6797_provider_status(&status);
 	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_convert(dev, inter, &status.preflight), 0);
 	mt6797_preflight_test_flush();
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (user == 2) {
+		cci_lifecycle(test, f->dev[2], mux, inter);
+		KUNIT_ASSERT_EQ(test, clk_set_rate(pll, 100), 0);
+		mt6797_preflight_test_flush();
+	}
+#endif
 	KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[user], user, &cookie), 0);
 	listener.dev = dev[user];
 	KUNIT_ASSERT_EQ(test, clk_notifier_register(mux, &listener.nb), 0);

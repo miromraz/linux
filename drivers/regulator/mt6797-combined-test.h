@@ -43,6 +43,13 @@ int mt6797_test_buck(struct platform_device *pdev, struct regmap *map,
 		     struct device_node *np);
 int mt6797_test_sram(struct platform_device *pdev);
 int mt6797_test_cpu_probe(struct platform_device *pdev, int fail_cpu);
+void mt6797_test_cci_policies(struct kunit *test,
+			      void (*run)(struct kunit *, void *), void *arg);
+struct devfreq;
+void mt6797_test_cci_callback_hook(void (*hook)(struct devfreq *));
+int mt6797_test_cci_init(struct platform_device *pdev, int fail_stage);
+void mt6797_test_cci_fini(struct platform_device *pdev);
+struct devfreq *mt6797_test_cci_devfreq(struct platform_device *pdev);
 int mt6797_test_cci_probe(struct platform_device *pdev);
 int mt6797_test_cci_remove(struct platform_device *pdev);
 void mt6797_test_transfer_hook(void (*hook)(void *, unsigned int, bool, int), void *data);

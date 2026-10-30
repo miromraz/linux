@@ -3373,6 +3373,57 @@ static void passive_registration_matrix(struct cpufreq_policy *policy)
 	mt6797_test_policy_free(peer);
 }
 
+/* Run an initialized CCI fixture with real published framework policies. */
+void mt6797_test_cci_policies(struct kunit *test,
+			      void (*run)(struct kunit *, void *), void *arg)
+{
+	struct cpufreq_driver driver = {
+		.name = "cci-life-test",
+		.flags = CPUFREQ_TERMINAL_NOTIFICATION,
+	};
+	struct cpufreq_policy *policies[2];
+	unsigned long saved_ref[2], saved_scale[2];
+	unsigned int cpu;
+	int i;
+
+	KUNIT_ASSERT_PTR_EQ(test, cpufreq_driver, NULL);
+	for (i = 0; i < 2; i++) {
+		struct device *dev = get_cpu_device(i * 4);
+
+		policies[i] = mt6797_test_policy_alloc(i * 4);
+		KUNIT_ASSERT_NOT_NULL(test, policies[i]);
+		saved_ref[i] = per_cpu(capacity_freq_ref, i * 4);
+		saved_scale[i] = per_cpu(arch_freq_scale, i * 4);
+		per_cpu(capacity_freq_ref, i * 4) = 200;
+		policies[i]->cur = 100;
+		policies[i]->cpuinfo.min_freq = 100;
+		policies[i]->cpuinfo.max_freq = 200;
+		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev, 100000, 1040000), 0);
+		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev, 200000, 1100000), 0);
+	}
+	cpufreq_driver = &driver;
+	cpufreq_terminal_driver = true;
+	for_each_possible_cpu(cpu) {
+		struct cpufreq_policy *p = policies[cpu < 4 ? 0 : 1];
+
+		per_cpu(cpufreq_cpu_data, cpu) = p;
+		cpumask_set_cpu(cpu, p->cpus);
+		cpumask_set_cpu(cpu, p->related_cpus);
+	}
+	run(test, arg);
+	for_each_possible_cpu(cpu)
+		per_cpu(cpufreq_cpu_data, cpu) = NULL;
+	cpufreq_terminal_driver = false;
+	cpufreq_driver = NULL;
+	for (i = 0; i < 2; i++) {
+		per_cpu(capacity_freq_ref, i * 4) = saved_ref[i];
+		per_cpu(arch_freq_scale, i * 4) = saved_scale[i];
+		dev_pm_opp_remove(get_cpu_device(i * 4), 100000);
+		dev_pm_opp_remove(get_cpu_device(i * 4), 200000);
+		mt6797_test_policy_free(policies[i]);
+	}
+}
+
 /* Isolated fixture: refuse to replace a registered platform driver. */
 int mt6797_test_core_target(struct cpufreq_policy *policy,
 			   struct cpufreq_driver *driver, unsigned int index)

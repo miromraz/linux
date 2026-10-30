@@ -24,6 +24,12 @@ struct mtk_ccifreq_platform_data {
 };
 
 struct mtk_ccifreq_drv {
+	struct devfreq_dev_profile owned_profile;
+	struct devfreq_passive_data passive;
+	struct completion released;
+	struct opp_table *owned_opps;
+	void *resource_group;
+	bool protected;
 	u64 rail_cookie;
 	struct mutex callback_lock;
 	struct mt6797_txn_outcome outcome;
@@ -179,7 +185,7 @@ static int mtk_ccifreq_set_voltage(struct mtk_ccifreq_drv *drv, int new_voltage)
 /*
  * The registry owns all regulator requests and live OPP reservations. Never
  * hold reg_lock across begin/disposal: deferred OPP puts can notify here.
- * Admission remains closed until devfreq can consume partial/unknown outcomes.
+ * Operational admission remains closed pending thermal containment and review.
  */
 static int mtk_ccifreq_owned_target(struct mtk_ccifreq_drv *drv,
 				  unsigned long *freq,
@@ -386,10 +392,144 @@ static struct devfreq_dev_profile mtk_ccifreq_profile = {
 
 static void mtk_ccifreq_release_protection(struct mtk_ccifreq_drv *drv)
 {
+	if (!drv->rail_cookie)
+		return;
 	mutex_lock(&drv->callback_lock);
 	mt6797_consumer_release(2, drv->rail_cookie);
 	drv->rail_cookie = 0;
 	mutex_unlock(&drv->callback_lock);
+}
+
+/* STOP drains CPU callbacks before the lease or any parent devres disappear.
+ * The core completion also covers delayed final release and QoS callbacks.
+ * No framework unregister or OPP put runs under a driver mutex.
+ */
+static void mtk_ccifreq_owned_stop(struct mtk_ccifreq_drv *drv)
+{
+	if (drv->devfreq) {
+		devfreq_remove_device(drv->devfreq);
+		wait_for_completion(&drv->released);
+		drv->devfreq = NULL;
+	}
+	mtk_ccifreq_release_protection(drv);
+}
+
+/* Registry ownership includes real regulator requests, PLL claims and the
+ * filtered OPP table. Do not duplicate legacy voltage/OPP notifier ownership.
+ * Caller serializes probe/remove, outside CPU transition notification stacks.
+ */
+static int mtk_ccifreq_owned_init(struct device *dev, int fail_stage)
+{
+	struct mtk_ccifreq_drv *drv;
+	unsigned long rate;
+	void *group;
+	int ret;
+
+	group = devres_open_group(dev, NULL, GFP_KERNEL);
+	if (!group)
+		return -ENOMEM;
+	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
+	if (!drv) {
+		ret = -ENOMEM;
+		goto release_group;
+	}
+	drv->dev = dev;
+	drv->protected = true;
+	drv->resource_group = group;
+	mutex_init(&drv->callback_lock);
+	init_completion(&drv->released);
+	ret = mt6797_consumer_acquire(dev, 2, &drv->rail_cookie);
+	if (ret)
+		goto release_group;
+	ret = -EIO;
+	if (fail_stage == 1)
+		goto release_lease;
+	drv->cci_clk = devm_clk_get(dev, "cci");
+	if (IS_ERR(drv->cci_clk)) {
+		ret = PTR_ERR(drv->cci_clk);
+		goto release_lease;
+	}
+	drv->inter_clk = devm_clk_get(dev, "intermediate");
+	if (IS_ERR(drv->inter_clk)) {
+		ret = PTR_ERR(drv->inter_clk);
+		goto release_lease;
+	}
+	if (fail_stage == 2)
+		goto release_lease;
+	ret = clk_prepare_enable(drv->cci_clk);
+	if (ret)
+		goto release_lease;
+	ret = -EIO;
+	if (fail_stage == 3)
+		goto disable_clock;
+	drv->owned_opps = dev_pm_opp_get_opp_table(dev);
+	if (IS_ERR(drv->owned_opps)) {
+		ret = PTR_ERR(drv->owned_opps);
+		goto disable_clock;
+	}
+	if (fail_stage == 4)
+		goto put_opps;
+
+	/* Observe through the owned transaction before publishing the profile. */
+	drv->pre_freq = clk_get_rate(drv->cci_clk);
+	rate = drv->pre_freq;
+	if (!rate) {
+		ret = -EIO;
+		goto put_opps;
+	}
+	ret = mtk_ccifreq_owned_target(drv, &rate, NULL);
+	if (ret)
+		goto put_opps;
+	ret = -EIO;
+	if (fail_stage == 5)
+		goto put_opps;
+	drv->owned_profile = mtk_ccifreq_owned_profile;
+	drv->owned_profile.initial_freq = rate;
+	drv->owned_profile.release_done = &drv->released;
+	if (fail_stage == 7)
+		drv->owned_profile.timer = DEVFREQ_TIMER_NUM;
+	if (fail_stage == 9)
+		drv->dvfs_fault = true;
+	drv->passive.parent_type = CPUFREQ_PARENT_DEV;
+	dev_set_drvdata(dev, drv);
+	drv->devfreq = devfreq_add_device(dev, &drv->owned_profile,
+					  fail_stage == 8 ? "cci-missing" : DEVFREQ_GOV_PASSIVE,
+					  &drv->passive);
+	if (IS_ERR(drv->devfreq)) {
+		ret = PTR_ERR(drv->devfreq);
+		drv->devfreq = NULL;
+		wait_for_completion(&drv->released);
+		goto clear_data;
+	}
+	if (fail_stage == 6) {
+		ret = -EIO;
+		devfreq_remove_device(drv->devfreq);
+		wait_for_completion(&drv->released);
+		goto clear_data;
+	}
+	devres_close_group(dev, group);
+	return 0;
+
+clear_data:
+	dev_set_drvdata(dev, NULL);
+put_opps:
+	mtk_ccifreq_release_protection(drv);
+	dev_pm_opp_put_opp_table(drv->owned_opps);
+disable_clock:
+	/* Return protection before disabling or dropping consumer resources. */
+	mtk_ccifreq_release_protection(drv);
+	clk_disable_unprepare(drv->cci_clk);
+	goto release_group;
+release_lease:
+	mtk_ccifreq_release_protection(drv);
+release_group:
+	devres_release_group(dev, group);
+	return ret;
+}
+
+static bool mtk_ccifreq_operational_admitted(void)
+{
+	return false;
 }
 
 static int mtk_ccifreq_probe(struct platform_device *pdev)
@@ -401,6 +541,10 @@ static int mtk_ccifreq_probe(struct platform_device *pdev)
 	unsigned long rate, opp_volt;
 	int ret;
 
+	if (mtk_ccifreq_operational_admitted() &&
+	    of_machine_is_compatible("planet,gemini-pda"))
+		return mtk_ccifreq_owned_init(dev, 0);
+
 	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)
 		return -ENOMEM;
@@ -411,7 +555,7 @@ static int mtk_ccifreq_probe(struct platform_device *pdev)
 		ret = mt6797_consumer_acquire(dev, 2, &drv->rail_cookie);
 		if (ret)
 			return ret;
-		/* Phase3 remains closed. Use the normal protected release boundary. */
+		/* Thermal/review admission is deliberately closed. */
 		mtk_ccifreq_release_protection(drv);
 		return -EAGAIN;
 	}
@@ -563,6 +707,16 @@ static void mtk_ccifreq_remove(struct platform_device *pdev)
 	struct mtk_ccifreq_drv *drv;
 
 	drv = platform_get_drvdata(pdev);
+	if (drv->protected) {
+		void *group = drv->resource_group;
+
+		mtk_ccifreq_owned_stop(drv);
+		dev_pm_opp_put_opp_table(drv->owned_opps);
+		clk_disable_unprepare(drv->cci_clk);
+		platform_set_drvdata(pdev, NULL);
+		devres_release_group(dev, group);
+		return;
+	}
 	if (drv->rail_cookie) {
 		mtk_ccifreq_release_protection(drv);
 		return;
@@ -623,6 +777,26 @@ MODULE_LICENSE("GPL v2");
 
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 #include "../regulator/mt6797-combined-test.h"
+/* Explicit fixture entry; no module parameter or production gate override. */
+int mt6797_test_cci_init(struct platform_device *pdev, int fail_stage)
+{
+	if (fail_stage < 0 || fail_stage > 9 || platform_get_drvdata(pdev))
+		return -EINVAL;
+	return mtk_ccifreq_owned_init(&pdev->dev, fail_stage);
+}
+
+void mt6797_test_cci_fini(struct platform_device *pdev)
+{
+	mtk_ccifreq_remove(pdev);
+}
+
+struct devfreq *mt6797_test_cci_devfreq(struct platform_device *pdev)
+{
+	struct mtk_ccifreq_drv *drv = platform_get_drvdata(pdev);
+
+	return drv ? drv->devfreq : NULL;
+}
+
 int mt6797_test_cci_probe(struct platform_device *pdev)
 {
 	bool destroyed = false;

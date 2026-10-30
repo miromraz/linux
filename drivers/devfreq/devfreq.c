@@ -801,6 +801,7 @@ static int qos_max_notifier_call(struct notifier_block *nb,
 static void devfreq_dev_release(struct device *dev)
 {
 	struct devfreq *devfreq = to_devfreq(dev);
+	struct completion *done = devfreq->profile->release_done;
 	int err;
 
 	mutex_lock(&devfreq_list_lock);
@@ -840,6 +841,8 @@ static void devfreq_dev_release(struct device *dev)
 	mutex_destroy(&devfreq->lock);
 	srcu_cleanup_notifier_head(&devfreq->transition_notifier_list);
 	kfree(devfreq);
+	if (done)
+		complete(done);
 }
 
 /**
@@ -856,11 +859,13 @@ struct devfreq *devfreq_add_device(struct device *dev,
 {
 	struct devfreq *devfreq;
 	struct devfreq_governor *governor;
+	bool release_pending = false;
 	int err = 0;
 
 	if (!dev || !profile || !governor_name) {
 		dev_err(dev, "%s: Invalid parameters.\n", __func__);
-		return ERR_PTR(-EINVAL);
+		err = -EINVAL;
+		goto err_out;
 	}
 
 	mutex_lock(&devfreq_list_lock);
@@ -932,6 +937,8 @@ struct devfreq *devfreq_add_device(struct device *dev,
 	atomic_set(&devfreq->suspend_count, 0);
 
 	dev_set_name(&devfreq->dev, "%s", dev_name(dev));
+	srcu_init_notifier_head(&devfreq->transition_notifier_list);
+	release_pending = true;
 	err = device_register(&devfreq->dev);
 	if (err) {
 		mutex_unlock(&devfreq->lock);
@@ -962,8 +969,6 @@ struct devfreq *devfreq_add_device(struct device *dev,
 
 	devfreq->stats.total_trans = 0;
 	devfreq->stats.last_update = get_jiffies_64();
-
-	srcu_init_notifier_head(&devfreq->transition_notifier_list);
 
 	mutex_unlock(&devfreq->lock);
 
@@ -1033,6 +1038,8 @@ err_devfreq:
 err_dev:
 	kfree(devfreq);
 err_out:
+	if (!release_pending && profile && profile->release_done)
+		complete(profile->release_done);
 	return ERR_PTR(err);
 }
 EXPORT_SYMBOL(devfreq_add_device);

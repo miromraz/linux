@@ -499,6 +499,15 @@ EXPORT_SYMBOL_GPL(srcu_notifier_chain_register);
  *
  *	Returns zero on success or %-ENOENT on failure.
  */
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+static void (*mt6797_drain_hook)(struct notifier_block *, bool);
+
+void mt6797_test_srcu_hook(void (*hook)(struct notifier_block *, bool))
+{
+	mt6797_drain_hook = hook;
+}
+#endif
+
 int srcu_notifier_chain_unregister(struct srcu_notifier_head *nh,
 		struct notifier_block *n)
 {
@@ -515,7 +524,15 @@ int srcu_notifier_chain_unregister(struct srcu_notifier_head *nh,
 	mutex_lock(&nh->mutex);
 	ret = notifier_chain_unregister(&nh->head, n);
 	mutex_unlock(&nh->mutex);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (mt6797_drain_hook)
+		mt6797_drain_hook(n, false);
+#endif
 	synchronize_srcu(&nh->srcu);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (mt6797_drain_hook)
+		mt6797_drain_hook(n, true);
+#endif
 	return ret;
 }
 EXPORT_SYMBOL_GPL(srcu_notifier_chain_unregister);
