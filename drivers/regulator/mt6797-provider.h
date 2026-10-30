@@ -30,6 +30,9 @@ struct mt6797_provider_status {
 	int readiness;
 	bool converted;
 	unsigned long adopted;
+	unsigned long active, retained;
+	int ownership_error[MT6797_RAIL_USERS];
+	u64 ownership_generation[MT6797_RAIL_USERS];
 	enum mt6797_admission admission;
 	/* Informational final policy, zero until conversion is verified. */
 	int proc_min_uv, proc_max_uv, fixed_sram_uv;

@@ -50,6 +50,8 @@ void mt6797_rail_detach(struct mt6797_rail_coordinator *c,
 /* Requirements must include live and intermediate ceiling OPPs for all users.
  * The caller owns clock/OPP admission until this operation completes.
  */
+int mt6797_rail_recover(struct mt6797_rail_coordinator *c, u64 generation,
+		       const int required[MT6797_RAIL_USERS]);
 int mt6797_rail_prepare(struct mt6797_rail_coordinator *c, u64 generation,
 		       const int floor[MT6797_RAIL_USERS]);
 int mt6797_rail_vote(struct mt6797_rail_coordinator *c, u64 generation,

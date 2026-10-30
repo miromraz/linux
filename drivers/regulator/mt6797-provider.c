@@ -394,6 +394,31 @@ struct protected_supply {
 	unsigned int users;
 };
 static struct protected_supply protected[MT6797_RAIL_USERS];
+/* Published under owner_lock; never take transaction_lock in status/notifiers. */
+static unsigned long active_leases, retained_leases;
+static int ownership_error[MT6797_RAIL_USERS];
+static u64 ownership_generation[MT6797_RAIL_USERS];
+
+static void ownership_publish(int user, int error)
+{
+	int i;
+
+	mutex_lock(&owner_lock);
+	active_leases = 0;
+	retained_leases = 0;
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		if (protected[i].users)
+			active_leases |= BIT(i);
+		else if (protected[i].vote)
+			retained_leases |= BIT(i);
+		if (user < 0 || user == i) {
+			ownership_error[i] = error;
+			ownership_generation[i] = preflight.generation;
+		}
+	}
+	mutex_unlock(&owner_lock);
+}
+
 static struct device *lease_device;
 static struct regulator_dev *sram_rdev;
 static struct regulator *sram_guard;
@@ -690,10 +715,18 @@ static int preflight_transaction(struct preflight_user *users,
 		goto out;
 	}
 	mutex_lock(&owner_lock);
-	if (!preflight_active || supplier_revoked || r->generation != preflight.generation ||
+	if (!preflight_active || (supplier_revoked && user != -2) ||
+	    r->generation != preflight.generation ||
 	    r->provider_generation != owner.generation)
 		ret = -ESTALE;
-	else if (user < 0)
+	else if (user == -2) {
+		for (i = 0; i < MT6797_RAIL_USERS; i++)
+			floor[i] = max(floor[i], max(protected[i].guard_uv,
+						   protected[i].vote_uv));
+		ret = mt6797_rail_recover(&owner, r->provider_generation, floor);
+		if (!ret)
+			supplier_revoked = false;
+	} else if (user < 0)
 		ret = mt6797_rail_prepare(&owner, r->provider_generation, floor);
 	else if (users == pf_users && lease_setting)
 		ret = mt6797_rail_replace(&owner, r->provider_generation, user,
@@ -784,6 +817,7 @@ acquired:
 	*cookie = lease->cookie;
 	lease = NULL;
 out:
+	ownership_publish(user, ret);
 	mutex_unlock(&transaction_lock);
 	kfree(lease);
 	return ret;
@@ -830,10 +864,74 @@ int mt6797_consumer_release(unsigned int user, u64 cookie)
 		put_device(dev);
 	}
 out:
+	ownership_publish(user, ret);
 	mutex_unlock(&transaction_lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mt6797_consumer_release);
+
+/* Explicit process-context retry after all local leases have been released.
+ * No consumed cookie is revived. Device replacement is rejected by acquire;
+ * existing OPP configuration/adjustments remain owned by the registry.
+ */
+int mt6797_consumer_recover(void)
+{
+	struct mt6797_preflight_result result;
+	int i, ret = 0;
+
+	mutex_lock(&transaction_lock);
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		if (protected[i].users) {
+			ret = -EBUSY;
+			goto out;
+		}
+	}
+	mutex_lock(&owner_lock);
+	result = preflight;
+	result.provider_generation = owner.generation;
+	ret = topology();
+	mutex_unlock(&owner_lock);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+	if (fixture_active) {
+		ret = 0;
+	} else
+#endif
+	{
+		if (!ret)
+			ret = preflight_acquire();
+	}
+	if (!ret)
+		ret = preflight_measure(&result);
+	if (!ret)
+		ret = preflight_transaction(pf_users, &result, -2, NULL, 0, false);
+	for (i = 0; !ret && i < MT6797_RAIL_USERS; i++) {
+		struct device *dev;
+
+		if (!protected[i].vote)
+			continue;
+		ret = preflight_transaction(pf_users, &result, i,
+					   pf_users[i].dev, 0, true);
+		if (ret)
+			break;
+		mutex_lock(&owner_lock);
+		dev = consumer_owner[i];
+		consumer_owner[i] = NULL;
+		mutex_unlock(&owner_lock);
+		put_device(dev);
+	}
+	mutex_lock(&owner_lock);
+	if (result.generation == preflight.generation &&
+	    result.provider_generation == owner.generation) {
+		result.error = ret;
+		preflight = result;
+	}
+	mutex_unlock(&owner_lock);
+out:
+	ownership_publish(-1, ret);
+	mutex_unlock(&transaction_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_recover);
 
 static void preflight_work(struct work_struct *work)
 {
@@ -1080,6 +1178,11 @@ void mt6797_provider_status(struct mt6797_provider_status *status)
 	mutex_lock(&owner_lock);
 	mt6797_rail_status(&owner, &status->engine);
 	status->converted = status->engine.ready && !preflight.error;
+	status->active = active_leases;
+	status->retained = retained_leases;
+	memcpy(status->ownership_error, ownership_error, sizeof(ownership_error));
+	memcpy(status->ownership_generation, ownership_generation,
+	       sizeof(ownership_generation));
 	status->adopted = 0;
 	for (i = 0; i < MT6797_RAIL_USERS; i++)
 		if (consumer_owner[i])

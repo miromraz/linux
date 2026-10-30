@@ -109,6 +109,47 @@ static int mt6797_rail_step(struct mt6797_rail_coordinator *c, int id,
 	return ret;
 }
 
+/* Recovery is read-only: never repair an undervolted or disabled live rail.
+ * The caller reserves all clocks/OPPs and supplies durable core requests too.
+ */
+int mt6797_rail_recover(struct mt6797_rail_coordinator *c, u64 generation,
+		       const int required[MT6797_RAIL_USERS])
+{
+	int uv[2], i, ret;
+
+	mutex_lock(&c->lock);
+	if (generation != c->generation) {
+		ret = -ESTALE;
+		goto out;
+	}
+	if (!c->rail[0].read || !c->rail[1].read) {
+		ret = -EPROBE_DEFER;
+		goto out;
+	}
+	ret = mt6797_rail_read(c, uv);
+	if (ret)
+		goto out;
+	if (uv[1] != RAIL_MAX || uv[0] < PROC_MIN) {
+		ret = -ERANGE;
+		goto out;
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		if (required[i] <= 0 || required[i] > uv[0]) {
+			ret = -ERANGE;
+			goto out;
+		}
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		c->floor[i] = max(c->floor[i], required[i]);
+	c->fault = false;
+	c->converted = true;
+	c->requirements_valid = true;
+out:
+	mutex_unlock(&c->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_rail_recover);
+
 int mt6797_rail_prepare(struct mt6797_rail_coordinator *c, u64 generation,
 		       const int floor[MT6797_RAIL_USERS])
 {

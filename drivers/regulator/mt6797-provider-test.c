@@ -857,6 +857,7 @@ static void ownership_run(struct kunit *test, int failure)
 		KUNIT_EXPECT_EQ(test, vote, f->live_floor[i]);
 		KUNIT_EXPECT_EQ(test, kref_read(&dev[i]->kobj.kref), refs[i] + 1);
 	}
+	KUNIT_EXPECT_EQ(test, mt6797_consumer_recover(), -EBUSY);
 	KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[0], 0, &shared), 0);
 	KUNIT_EXPECT_NE(test, shared, cookie[0]);
 	KUNIT_ASSERT_EQ(test, mt6797_consumer_release(0, cookie[0]), 0);
@@ -951,6 +952,11 @@ static void ownership_run(struct kunit *test, int failure)
 		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&f->rail[0]->dev, 0, &io), 0);
 		mt6797_preflight_test_flush();
 		KUNIT_EXPECT_EQ(test, mt6797_consumer_acquire(dev[2], 2, &shared), -EBUSY);
+		KUNIT_ASSERT_EQ(test, mt6797_consumer_recover(), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 1);
+		KUNIT_EXPECT_EQ(test, kref_read(&dev[2]->kobj.kref), refs[2]);
+		KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[2], 2, &shared), 0);
+		KUNIT_ASSERT_EQ(test, mt6797_consumer_release(2, shared), 0);
 		return;
 	}
 	/* A failed last-owner transfer retains the actual core request. */
@@ -961,9 +967,26 @@ static void ownership_run(struct kunit *test, int failure)
 	KUNIT_EXPECT_EQ(test, vote, f->live_floor[2]);
 	mt6797_provider_status(&status);
 	KUNIT_EXPECT_EQ(test, status.adopted, BIT(2));
+	KUNIT_EXPECT_EQ(test, status.retained, BIT(2));
+	KUNIT_EXPECT_EQ(test, status.active, 0UL);
+	KUNIT_EXPECT_EQ(test, status.ownership_error[2], -EIO);
 	KUNIT_EXPECT_EQ(test, kref_read(&dev[2]->kobj.kref), refs[2] + 1);
 	KUNIT_EXPECT_EQ(test, mt6797_consumer_release(2, shared), -ESTALE);
 	KUNIT_EXPECT_GE(test, f->uv[0], f->live_floor[2]);
+	/* Bad selected voltage must not clear the fault or retire a real vote. */
+	f->uv[1] = 1175000;
+	KUNIT_EXPECT_EQ(test, mt6797_consumer_recover(), -ERANGE);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 2);
+	mt6797_provider_status(&status);
+	KUNIT_EXPECT_TRUE(test, status.engine.fault);
+	f->uv[1] = 1200000;
+	KUNIT_ASSERT_EQ(test, mt6797_consumer_recover(), 0);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 1);
+	KUNIT_EXPECT_GE(test, guard, f->live_floor[2]);
+	KUNIT_EXPECT_EQ(test, kref_read(&dev[2]->kobj.kref), refs[2]);
+	KUNIT_EXPECT_EQ(test, mt6797_consumer_release(2, shared), -ESTALE);
+	KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[2], 2, &shared), 0);
+	KUNIT_ASSERT_EQ(test, mt6797_consumer_release(2, shared), 0);
 }
 
 static void production_ownership(struct kunit *test)
