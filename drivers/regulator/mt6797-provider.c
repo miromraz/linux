@@ -36,7 +36,7 @@ struct mt6797_consumer_txn {
 	int floor[MT6797_RAIL_USERS], retained_uv;
 	unsigned long target, rate, scope_old, scope_new;
 	bool cancelled, scope, expected[MT6797_RAIL_USERS][2];
-	bool prepared, use, failed;
+	bool prepared, use, failed, clock_dirty;
 	enum mt6797_txn_path path;
 };
 static struct mt6797_consumer_txn *active_txn;
@@ -77,6 +77,7 @@ static void provider_use_put(void)
 
 static BLOCKING_NOTIFIER_HEAD(events);
 static void preflight_work(struct work_struct *work);
+static void preflight_refresh(bool reacquire);
 static DECLARE_DELAYED_WORK(preflight_job, preflight_work);
 static bool preflight_active;
 /* Supplier teardown is irreversible until ownership is explicitly rebuilt. */
@@ -92,11 +93,16 @@ static struct completion *drain_observer;
 static struct mt6797_preflight_result preflight = { .error = -EPROBE_DEFER };
 
 /* owner_lock serializes invalidation with publication and status snapshots. */
-static void preflight_hint(void)
+static void preflight_bump(void)
 {
 	preflight.generation++;
 	preflight.error = -EAGAIN;
 	preflight.provider_generation = owner.generation;
+}
+
+static void preflight_hint(void)
+{
+	preflight_bump();
 	if (!stopping)
 		schedule_work(&notify_job);
 	if (preflight_active)
@@ -288,10 +294,17 @@ static int preflight_clock_event(struct notifier_block *nb,
 			for (j = 0; j < 2; j++)
 				if (nb == &pf_users[i].clk_nb[j] && t->expected[i][j])
 					expected = true;
-	if (expected)
-		preflight_hint();
-	else
+	if (expected) {
+		/* The token owns this change. Invalidate the snapshot now, but
+		 * refresh synchronously on disposal before CPU POST can run.
+		 * A queued worker would race the next child transaction for the
+		 * transaction mutex even after successful refresh.
+		 */
+		t->clock_dirty = true;
+		preflight_bump();
+	} else {
 		preflight_invalidate();
+	}
 	mutex_unlock(&owner_lock);
 	return NOTIFY_OK;
 }
@@ -1037,6 +1050,7 @@ static int txn_write(struct mt6797_consumer_txn *t, int request)
 
 static void txn_dispose(struct mt6797_consumer_txn *t)
 {
+	bool refresh;
 	int i;
 
 	/* Keep transaction_lock through notification-producing final puts.
@@ -1050,8 +1064,32 @@ static void txn_dispose(struct mt6797_consumer_txn *t)
 		if (t->requirements[i])
 			dev_pm_opp_requirements_put(t->requirements[i]);
 	mutex_lock(&owner_lock);
+	/* The generation-checked remeasure in preflight_refresh() is what
+	 * makes self-readiness safe: it drops its result if any invalidation
+	 * lands during the measure. This guard is defence in depth. A token that
+	 * was cancelled by a foreign event, failed its raw rail write, lost its
+	 * supplier, is detaching, or whose ownership generation moved defers to
+	 * the asynchronous worker instead of refreshing inline. A known-state
+	 * clock abort (e.g. a PLL failure parked at an intermediate rate)
+	 * completes with failed=false and legitimately republishes its measured
+	 * rate.
+	 */
+	refresh = t->clock_dirty && !t->cancelled && !t->failed &&
+		  !supplier_revoked && !detaching &&
+		  t->generation == owner.generation;
 	active_txn = NULL;
 	mutex_unlock(&owner_lock);
+	if (refresh) {
+		/* The token just validated topology and reservations; skip the
+		 * nvmem/clk_get re-acquisition and only remeasure rates.
+		 */
+		preflight_refresh(false);
+	} else if (t->clock_dirty) {
+		mutex_lock(&owner_lock);
+		if (preflight_active)
+			mod_delayed_work(system_wq, &preflight_job, 0);
+		mutex_unlock(&owner_lock);
+	}
 	if (t->use)
 		provider_use_put();
 	kfree(t);
@@ -1512,23 +1550,25 @@ out:
 }
 EXPORT_SYMBOL_GPL(mt6797_consumer_recover);
 
-static void preflight_work(struct work_struct *work)
+/* Caller holds transaction_lock; no token or framework reservations remain.
+ * reacquire re-reads the efuse bin and reclaims clk/OPP handles; the
+ * synchronous post-transaction caller passes false because the just-finished
+ * token already validated them.
+ */
+static void preflight_refresh(bool reacquire)
 {
 	struct mt6797_preflight_result result = {};
 	int ret;
 
-	mutex_lock(&transaction_lock);
 	mutex_lock(&owner_lock);
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 	if (test_hold_preflight) {
 		mutex_unlock(&owner_lock);
-		mutex_unlock(&transaction_lock);
 		return;
 	}
 #endif
 	if (!preflight_active) {
 		mutex_unlock(&owner_lock);
-		mutex_unlock(&transaction_lock);
 		return;
 	}
 	result.generation = preflight.generation;
@@ -1541,7 +1581,7 @@ static void preflight_work(struct work_struct *work)
 	} else
 #endif
 	{
-		if (!ret)
+		if (!ret && reacquire)
 			ret = preflight_acquire();
 	}
 	if (!ret)
@@ -1565,6 +1605,12 @@ static void preflight_work(struct work_struct *work)
 		schedule_work(&notify_job);
 	}
 	mutex_unlock(&owner_lock);
+}
+
+static void preflight_work(struct work_struct *work)
+{
+	mutex_lock(&transaction_lock);
+	preflight_refresh(true);
 	mutex_unlock(&transaction_lock);
 }
 
