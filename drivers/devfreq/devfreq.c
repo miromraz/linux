@@ -218,6 +218,28 @@ int devfreq_update_status(struct devfreq *devfreq, unsigned long freq)
 	lockdep_assert_held(&devfreq->lock);
 	cur_time = get_jiffies_64();
 
+	if (devfreq->profile->target_outcome) {
+		u64 elapsed = cur_time - devfreq->stats.last_update;
+
+		prev_lev = devfreq_get_freq_level(devfreq, devfreq->previous_freq);
+		lev = devfreq_get_freq_level(devfreq, freq);
+		if (!devfreq->previous_freq)
+			devfreq->stats.unknown_time += elapsed;
+		else if (prev_lev < 0)
+			devfreq->stats.unlisted_time += elapsed;
+		else
+			devfreq->stats.time_in_state[prev_lev] += elapsed;
+		if (freq != devfreq->previous_freq) {
+			if (!freq || !devfreq->previous_freq)
+				devfreq->stats.unknown_trans++;
+			else
+				devfreq->stats.total_trans++;
+			if (freq && devfreq->previous_freq && lev >= 0 && prev_lev >= 0)
+				devfreq->stats.trans_table[prev_lev * devfreq->max_state + lev]++;
+		}
+		goto out;
+	}
+
 	/* Immediately exit if previous_freq is not initialized yet. */
 	if (!devfreq->previous_freq)
 		goto out;
@@ -324,6 +346,19 @@ static int devfreq_notify_transition(struct devfreq *devfreq,
 	if (!devfreq)
 		return -EINVAL;
 
+	if (devfreq->profile->target_outcome) {
+		struct srcu_notifier_head *head = &devfreq->transition_notifier_list;
+		struct notifier_block *nb;
+		int idx = srcu_read_lock(&head->srcu);
+
+		for (nb = srcu_dereference(head->head, &head->srcu); nb;
+		     nb = srcu_dereference(nb->next, &head->srcu))
+			nb->notifier_call(nb, state, state == DEVFREQ_TERMINAL ?
+					 (void *)&devfreq->outcome : freqs);
+		srcu_read_unlock(&head->srcu, idx);
+		return 0;
+	}
+
 	switch (state) {
 	case DEVFREQ_PRECHANGE:
 		srcu_notifier_call_chain(&devfreq->transition_notifier_list,
@@ -347,6 +382,27 @@ static int devfreq_set_target(struct devfreq *devfreq, unsigned long new_freq,
 	struct devfreq_freqs freqs;
 	unsigned long cur_freq;
 	int err = 0;
+
+	if (devfreq->profile->target_outcome) {
+		struct devfreq_outcome outcome = { };
+
+		freqs.old = devfreq->previous_freq;
+		freqs.new = new_freq;
+		devfreq_notify_transition(devfreq, &freqs, DEVFREQ_PRECHANGE);
+		err = devfreq->profile->target_outcome(devfreq->dev.parent,
+						     new_freq, flags, &outcome);
+		outcome.error = err;
+		devfreq_update_status(devfreq, outcome.rate);
+		devfreq->previous_freq = outcome.rate;
+		devfreq->last_status.current_frequency = outcome.rate;
+		devfreq->outcome = outcome;
+		if (devfreq->suspend_freq)
+			devfreq->resume_freq = outcome.rate;
+		freqs.new = outcome.rate;
+		devfreq_notify_transition(devfreq, &freqs, outcome.rate ?
+					  DEVFREQ_POSTCHANGE : DEVFREQ_TERMINAL);
+		return err;
+	}
 
 	if (devfreq->profile->get_cur_freq)
 		devfreq->profile->get_cur_freq(devfreq->dev.parent, &cur_freq);
@@ -594,7 +650,8 @@ out_update:
 	devfreq->stats.last_update = get_jiffies_64();
 	devfreq->stop_polling = false;
 
-	if (devfreq->profile->get_cur_freq &&
+	if (!devfreq->profile->target_outcome &&
+	    devfreq->profile->get_cur_freq &&
 		!devfreq->profile->get_cur_freq(devfreq->dev.parent, &freq))
 		devfreq->previous_freq = freq;
 
@@ -1549,6 +1606,14 @@ static ssize_t cur_freq_show(struct device *dev, struct device_attribute *attr,
 	if (!df->profile)
 		return -EINVAL;
 
+	if (df->profile->target_outcome) {
+		guard(mutex)(&df->lock);
+
+		if (!df->previous_freq)
+			return sysfs_emit(buf, "unknown\n");
+		return sysfs_emit(buf, "%lu\n", df->previous_freq);
+	}
+
 	if (df->profile->get_cur_freq &&
 		!df->profile->get_cur_freq(df->dev.parent, &freq))
 		return sprintf(buf, "%lu\n", freq);
@@ -1561,6 +1626,9 @@ static ssize_t target_freq_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct devfreq *df = to_devfreq(dev);
+
+	if (df->profile->target_outcome)
+		return cur_freq_show(dev, attr, buf);
 
 	return sprintf(buf, "%lu\n", df->previous_freq);
 }
@@ -1750,6 +1818,12 @@ static ssize_t trans_stat_show(struct device *dev,
 	if (len < PAGE_SIZE - 1)
 		len += sysfs_emit_at(buf, len, "Total transition : %u\n",
 				     df->stats.total_trans);
+	if (df->profile->target_outcome && len < PAGE_SIZE - 1)
+		len += sysfs_emit_at(buf, len,
+			"Unlisted ms: %llu\nUnknown ms: %llu\nUnknown transitions: %u\n",
+			jiffies64_to_msecs(df->stats.unlisted_time),
+			jiffies64_to_msecs(df->stats.unknown_time),
+			df->stats.unknown_trans);
 	if (len >= PAGE_SIZE - 1) {
 		pr_warn_once("devfreq transition table exceeds PAGE_SIZE. Disabling\n");
 		return -EFBIG;
@@ -1781,6 +1855,9 @@ static ssize_t trans_stat_store(struct device *dev,
 	memset(df->stats.trans_table, 0, array3_size(sizeof(unsigned int),
 					df->max_state,
 					df->max_state));
+	df->stats.unlisted_time = 0;
+	df->stats.unknown_time = 0;
+	df->stats.unknown_trans = 0;
 	df->stats.total_trans = 0;
 	df->stats.last_update = get_jiffies_64();
 	mutex_unlock(&df->lock);
@@ -1967,6 +2044,7 @@ static int devfreq_summary_show(struct seq_file *s, void *data)
 	struct devfreq *devfreq;
 	struct devfreq *p_devfreq = NULL;
 	unsigned long cur_freq, min_freq, max_freq;
+	char current_text[32];
 	unsigned int polling_ms;
 	unsigned int timer;
 
@@ -2006,6 +2084,10 @@ static int devfreq_summary_show(struct seq_file *s, void *data)
 
 		mutex_lock(&devfreq->lock);
 		cur_freq = devfreq->previous_freq;
+		if (devfreq->profile->target_outcome && !cur_freq)
+			strscpy(current_text, "unknown", sizeof(current_text));
+		else
+			snprintf(current_text, sizeof(current_text), "%lu", cur_freq);
 		devfreq_get_freq_range(devfreq, &min_freq, &max_freq);
 		timer = devfreq->profile->timer;
 
@@ -2016,13 +2098,13 @@ static int devfreq_summary_show(struct seq_file *s, void *data)
 		mutex_unlock(&devfreq->lock);
 
 		seq_printf(s,
-			"%-30s %-30s %-15s %-10s %10d %12ld %12ld %12ld\n",
+			"%-30s %-30s %-15s %-10s %10d %12s %12ld %12ld\n",
 			dev_name(&devfreq->dev),
 			p_devfreq ? dev_name(&p_devfreq->dev) : "null",
 			devfreq->governor->name,
 			polling_ms ? timer_name[timer] : "null",
 			polling_ms,
-			cur_freq,
+			current_text,
 			min_freq,
 			max_freq);
 	}
@@ -2193,6 +2275,10 @@ int devfreq_register_notifier(struct devfreq *devfreq,
 
 	switch (list) {
 	case DEVFREQ_TRANSITION_NOTIFIER:
+		if (devfreq->profile->target_outcome)
+			return -EOPNOTSUPP;
+		fallthrough;
+	case DEVFREQ_OUTCOME_NOTIFIER:
 		ret = srcu_notifier_chain_register(
 				&devfreq->transition_notifier_list, nb);
 		break;
@@ -2221,6 +2307,7 @@ int devfreq_unregister_notifier(struct devfreq *devfreq,
 
 	switch (list) {
 	case DEVFREQ_TRANSITION_NOTIFIER:
+	case DEVFREQ_OUTCOME_NOTIFIER:
 		ret = srcu_notifier_chain_unregister(
 				&devfreq->transition_notifier_list, nb);
 		break;
@@ -2298,3 +2385,124 @@ void devm_devfreq_unregister_notifier(struct device *dev,
 			       devm_devfreq_dev_match, devfreq));
 }
 EXPORT_SYMBOL(devm_devfreq_unregister_notifier);
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+int mt6797_test_devfreq_target(struct devfreq *df, unsigned long rate);
+int mt6797_test_devfreq_target(struct devfreq *df, unsigned long rate)
+{
+	guard(mutex)(&df->lock);
+
+	return devfreq_set_target(df, rate, 0);
+}
+#endif
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+#include <kunit/test.h>
+
+struct devfreq_outcome_test {
+	struct kunit *test;
+	struct devfreq df;
+	struct devfreq_outcome next;
+	struct notifier_block observers[2];
+	unsigned int completions;
+};
+
+static int devfreq_test_outcome(struct device *dev, unsigned long freq, u32 flags,
+				struct devfreq_outcome *outcome)
+{
+	struct devfreq_outcome_test *f = dev_get_drvdata(dev);
+
+	*outcome = f->next;
+	return f->next.error;
+}
+
+static int devfreq_test_observer(struct notifier_block *nb, unsigned long event,
+				 void *data)
+{
+	struct devfreq_outcome_test *f;
+
+	/* Both entries have explicit priorities so either can find the fixture. */
+	f = container_of(nb - nb->priority, struct devfreq_outcome_test, observers[0]);
+	if (event == DEVFREQ_POSTCHANGE) {
+		struct devfreq_freqs *freqs = data;
+
+		KUNIT_EXPECT_EQ(f->test, freqs->new, f->next.rate);
+		KUNIT_EXPECT_EQ(f->test, f->df.previous_freq, f->next.rate);
+	}
+	if (event == DEVFREQ_TERMINAL) {
+		struct devfreq_outcome *outcome = data;
+
+		KUNIT_EXPECT_EQ(f->test, outcome->rate, 0UL);
+		KUNIT_EXPECT_EQ(f->test, outcome->error, f->next.error);
+	}
+	if (event != DEVFREQ_PRECHANGE)
+		f->completions++;
+	return NOTIFY_BAD;
+}
+
+static void devfreq_outcome_accounting_test(struct kunit *test)
+{
+	struct devfreq_dev_profile profile = { .target_outcome = devfreq_test_outcome };
+	unsigned long table[] = { 100, 200 };
+	unsigned int transitions[4] = { };
+	u64 residence[2] = { };
+	struct devfreq_outcome_test *f;
+	struct device parent = { };
+	unsigned long rates[] = { 200, 175, 175, 150, 0, 0, 100 };
+	int errors[] = { 0, 0, -EBUSY, -EIO, -EREMOTEIO, -EIO, 0 };
+	unsigned int i;
+
+	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->test = test;
+	mutex_init(&f->df.lock);
+	srcu_init_notifier_head(&f->df.transition_notifier_list);
+	dev_set_drvdata(&parent, f);
+	f->df.dev.parent = &parent;
+	f->df.profile = &profile;
+	f->df.previous_freq = 100;
+	f->df.freq_table = table;
+	f->df.max_state = ARRAY_SIZE(table);
+	f->df.stats.trans_table = transitions;
+	f->df.stats.time_in_state = residence;
+	for (i = 0; i < ARRAY_SIZE(f->observers); i++) {
+		f->observers[i].notifier_call = devfreq_test_observer;
+		f->observers[i].priority = i;
+		KUNIT_EXPECT_EQ(test, devfreq_register_notifier(&f->df,
+			&f->observers[i], DEVFREQ_TRANSITION_NOTIFIER), -EOPNOTSUPP);
+		KUNIT_EXPECT_EQ(test, devfreq_register_notifier(&f->df,
+			&f->observers[i], DEVFREQ_OUTCOME_NOTIFIER), 0);
+	}
+	mutex_lock(&f->df.lock);
+	for (i = 0; i < ARRAY_SIZE(rates); i++) {
+		f->next.rate = rates[i];
+		f->next.error = errors[i];
+		f->df.stats.last_update = get_jiffies_64() - 10;
+		KUNIT_EXPECT_EQ(test, devfreq_set_target(&f->df, 200, 0), errors[i]);
+		KUNIT_EXPECT_EQ(test, f->df.previous_freq, rates[i]);
+		KUNIT_EXPECT_EQ(test, f->df.outcome.error, errors[i]);
+		KUNIT_EXPECT_EQ(test, f->completions, 2 * (i + 1));
+	}
+	KUNIT_EXPECT_EQ(test, f->df.stats.total_trans, 3U);
+	KUNIT_EXPECT_EQ(test, f->df.stats.unknown_trans, 2U);
+	KUNIT_EXPECT_GE(test, f->df.stats.unlisted_time, 30ULL);
+	KUNIT_EXPECT_GE(test, f->df.stats.unknown_time, 20ULL);
+	KUNIT_EXPECT_EQ(test, transitions[1], 1U);
+	mutex_unlock(&f->df.lock);
+	for (i = 0; i < ARRAY_SIZE(f->observers); i++)
+		devfreq_unregister_notifier(&f->df, &f->observers[i],
+					    DEVFREQ_OUTCOME_NOTIFIER);
+	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
+}
+
+static struct kunit_case devfreq_outcome_cases[] = {
+	KUNIT_CASE(devfreq_outcome_accounting_test),
+	{ }
+};
+
+static struct kunit_suite devfreq_outcome_suite = {
+	.name = "devfreq-outcome",
+	.test_cases = devfreq_outcome_cases,
+};
+kunit_test_suite(devfreq_outcome_suite);
+#endif

@@ -24,10 +24,12 @@
 
 /* DEVFREQ notifier interface */
 #define DEVFREQ_TRANSITION_NOTIFIER	(0)
+#define DEVFREQ_OUTCOME_NOTIFIER		(1)
 
 /* Transition notifiers of DEVFREQ_TRANSITION_NOTIFIER */
 #define	DEVFREQ_PRECHANGE		(0)
 #define DEVFREQ_POSTCHANGE		(1)
+#define DEVFREQ_TERMINAL		(2)
 
 /* DEVFREQ work timers */
 enum devfreq_timer {
@@ -72,6 +74,21 @@ struct devfreq_dev_status {
  */
 #define DEVFREQ_FLAG_LEAST_UPPER_BOUND		0x1
 
+/*
+ * Opt-in completion: rate == 0 means unknown, never a numeric POST.
+ * The callback returns the real target errno independently of this observation.
+ * retry permits another request; protection_needed forbids retiring protection.
+ * OUTCOME listeners must dispose PRE resources on POST or TERMINAL. Delivery
+ * continues regardless of notifier return value. TERMINAL carries this object,
+ * not devfreq_freqs. Profiles and their callback selection must remain immutable.
+ */
+struct devfreq_outcome {
+	unsigned long rate;
+	int error;
+	bool retry;
+	bool protection_needed;
+};
+
 /**
  * struct devfreq_dev_profile - Devfreq's user device profile
  * @initial_freq:	The operating frequency when devfreq_add_device() is
@@ -85,6 +102,7 @@ struct devfreq_dev_status {
  *			freq at the current frequency.
  *			The "flags" parameter's possible values are
  *			explained above with "DEVFREQ_FLAG_*" macros.
+ * @target_outcome:	Optional target with explicit error completion semantics.
  * @get_dev_status:	The device should provide the current performance
  *			status to devfreq. Governors are recommended not to
  *			use this directly. Instead, governors are recommended
@@ -112,6 +130,8 @@ struct devfreq_dev_profile {
 	enum devfreq_timer timer;
 
 	int (*target)(struct device *dev, unsigned long *freq, u32 flags);
+	int (*target_outcome)(struct device *dev, unsigned long freq, u32 flags,
+			      struct devfreq_outcome *outcome);
 	int (*get_dev_status)(struct device *dev,
 			      struct devfreq_dev_status *stat);
 	int (*get_cur_freq)(struct device *dev, unsigned long *freq);
@@ -130,6 +150,9 @@ struct devfreq_dev_profile {
  * @total_trans:	Number of devfreq transitions.
  * @trans_table:	Statistics of devfreq transitions.
  * @time_in_state:	Statistics of devfreq states.
+ * @unlisted_time:	Residence at known frequencies outside the table.
+ * @unknown_time:	Residence without a known frequency.
+ * @unknown_trans:	Transitions into or out of unknown state.
  * @last_update:	The last time stats were updated.
  */
 struct devfreq_stats {
@@ -137,6 +160,9 @@ struct devfreq_stats {
 	unsigned int *trans_table;
 	u64 *time_in_state;
 	u64 last_update;
+	u64 unlisted_time;
+	u64 unknown_time;
+	unsigned int unknown_trans;
 };
 
 /**
@@ -156,6 +182,7 @@ struct devfreq_stats {
  * @freq_table:		current frequency table used by the devfreq driver.
  * @max_state:		count of entry present in the frequency table.
  * @previous_freq:	previously configured frequency value.
+ * @outcome:	Last opt-in target completion.
  * @last_status:	devfreq user device info, performance statistics
  * @data:	devfreq driver pass to governors, governor should not change it.
  * @governor_data:	private data for governors, devfreq core doesn't touch it.
@@ -196,6 +223,7 @@ struct devfreq {
 	unsigned int max_state;
 
 	unsigned long previous_freq;
+	struct devfreq_outcome outcome;
 	struct devfreq_dev_status last_status;
 
 	void *data;
@@ -318,6 +346,7 @@ enum devfreq_parent_dev_type {
  * @this:		the devfreq instance of own device.
  * @nb:			the notifier block for DEVFREQ_TRANSITION_NOTIFIER or
  *			CPUFREQ_TRANSITION_NOTIFIER list.
+ * @cpu_starting:	CPU parent subscription is being constructed.
  * @cpu_data_list:	the list of cpu frequency data for all cpufreq_policy.
  *
  * The devfreq_passive_data have to set the devfreq instance of parent
@@ -339,6 +368,7 @@ struct devfreq_passive_data {
 	struct devfreq *this;
 	struct notifier_block nb;
 	struct list_head cpu_data_list;
+	bool cpu_starting;
 };
 
 #if !defined(CONFIG_PM_DEVFREQ)

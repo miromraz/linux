@@ -64,8 +64,13 @@ get_parent_cpu_data(struct devfreq_passive_data *p_data,
 static void delete_parent_cpu_data(struct devfreq_passive_data *p_data)
 {
 	struct devfreq_cpu_data *parent_cpu_data, *tmp;
+	LIST_HEAD(retired);
 
-	list_for_each_entry_safe(parent_cpu_data, tmp, &p_data->cpu_data_list, node) {
+	mutex_lock(&p_data->this->lock);
+	list_splice_init(&p_data->cpu_data_list, &retired);
+	mutex_unlock(&p_data->this->lock);
+
+	list_for_each_entry_safe(parent_cpu_data, tmp, &retired, node) {
 		list_del(&parent_cpu_data->node);
 
 		if (parent_cpu_data->opp_table)
@@ -253,42 +258,43 @@ static int cpufreq_passive_notifier_call(struct notifier_block *nb,
 	struct cpufreq_freqs *freqs = ptr;
 	int ret;
 
+	if (event != CPUFREQ_TERMINAL && event != CPUFREQ_POSTCHANGE)
+		return NOTIFY_DONE;
+
+	mutex_lock(&devfreq->lock);
 	if (event == CPUFREQ_TERMINAL) {
 		struct cpufreq_terminal *terminal = ptr;
 
 		parent_cpu_data = get_parent_cpu_data(p_data, terminal->policy);
 		if (parent_cpu_data) {
-			mutex_lock(&devfreq->lock);
 			parent_cpu_data->unknown = true;
 			parent_cpu_data->update_pending = true;
 			parent_cpu_data->update_error = terminal->error;
-			mutex_unlock(&devfreq->lock);
 		}
-		return NOTIFY_DONE;
+		goto out;
 	}
-
-	if (event != CPUFREQ_POSTCHANGE || !freqs)
-		return 0;
-
+	if (!freqs)
+		goto out;
 	parent_cpu_data = get_parent_cpu_data(p_data, freqs->policy);
 	if (!parent_cpu_data || (parent_cpu_data->cur_freq == freqs->new &&
 				 !parent_cpu_data->update_pending))
-		return 0;
+		goto out;
 
 	parent_cpu_data->cur_freq = freqs->new;
 	parent_cpu_data->unknown = false;
-
-	mutex_lock(&devfreq->lock);
+	if (p_data->cpu_starting) {
+		parent_cpu_data->update_pending = true;
+		goto out;
+	}
+	if (devfreq->profile->target_outcome && devfreq->outcome.error &&
+	    !devfreq->outcome.retry)
+		goto out;
 	ret = devfreq_update_target(devfreq, freqs->new);
 	parent_cpu_data->update_pending = !!ret;
 	parent_cpu_data->update_error = ret;
+out:
 	mutex_unlock(&devfreq->lock);
-	if (ret) {
-		/* CPU observation remains true even when the CCI request fails. */
-		dev_err(&devfreq->dev, "failed to update the frequency: %d\n", ret);
-	}
-
-	/* A child failure must not suppress other CPU completion listeners. */
+	/* Child errors must not suppress later CPU completion listeners. */
 	return NOTIFY_DONE;
 }
 
@@ -320,17 +326,19 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 	struct cpufreq_policy *policy;
 	struct device *cpu_dev;
 	unsigned int cpu;
+	unsigned long flags;
 	int ret;
 
 	p_data->cpu_data_list
 		= (struct list_head)LIST_HEAD_INIT(p_data->cpu_data_list);
 
+	p_data->cpu_starting = true;
 	p_data->nb.notifier_call = cpufreq_passive_notifier_call;
 	ret = cpufreq_register_notifier(&p_data->nb, CPUFREQ_TERMINAL_NOTIFIER);
 	if (ret) {
 		dev_err(dev, "failed to register cpufreq notifier\n");
 		p_data->nb.notifier_call = NULL;
-		goto err;
+		return ret;
 	}
 
 	for_each_possible_cpu(cpu) {
@@ -345,7 +353,9 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 			goto err;
 		}
 
+		mutex_lock(&devfreq->lock);
 		parent_cpu_data = get_parent_cpu_data(p_data, policy);
+		mutex_unlock(&devfreq->lock);
 		if (parent_cpu_data) {
 			cpufreq_cpu_put(policy);
 			continue;
@@ -374,6 +384,26 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 		parent_cpu_data->dev = cpu_dev;
 		parent_cpu_data->opp_table = opp_table;
 		parent_cpu_data->first_cpu = cpumask_first(policy->related_cpus);
+		/*
+		 * cur is committed AFTER POST delivery. Wait for that commit, then
+		 * exclude a new transition through snapshot and list publication.
+		 * Never wait while holding the mutex needed by a POST callback.
+		 */
+		for (;;) {
+			if (READ_ONCE(policy->transition_task) == current) {
+				ret = -EBUSY;
+				dev_pm_opp_put_opp_table(opp_table);
+				goto err_free_cpu_data;
+			}
+			wait_event(policy->transition_wait,
+				   !READ_ONCE(policy->transition_ongoing));
+			mutex_lock(&devfreq->lock);
+			spin_lock_irqsave(&policy->transition_lock, flags);
+			if (!policy->transition_ongoing)
+				break;
+			spin_unlock_irqrestore(&policy->transition_lock, flags);
+			mutex_unlock(&devfreq->lock);
+		}
 		/* A terminal policy's cur is history, never an initial observation. */
 		parent_cpu_data->unknown = READ_ONCE(policy->cur_unknown);
 		parent_cpu_data->cur_freq = parent_cpu_data->unknown ? 0 : policy->cur;
@@ -381,6 +411,8 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 		parent_cpu_data->max_freq = policy->cpuinfo.max_freq;
 
 		list_add_tail(&parent_cpu_data->node, &p_data->cpu_data_list);
+		spin_unlock_irqrestore(&policy->transition_lock, flags);
+		mutex_unlock(&devfreq->lock);
 		cpufreq_cpu_put(policy);
 	}
 
@@ -389,6 +421,7 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 		goto err;
 	}
 	mutex_lock(&devfreq->lock);
+	p_data->cpu_starting = false;
 	ret = devfreq_update_target(devfreq, 0L);
 	mutex_unlock(&devfreq->lock);
 	if (ret) {
