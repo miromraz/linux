@@ -77,6 +77,26 @@ static void preflight_opp_core(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 100,
 						     &freq, &uv), 0);
 	KUNIT_EXPECT_EQ(test, uv, 800000UL);
+	{
+		struct opp_table *table = dev_pm_opp_get_opp_table(&pdev->dev);
+		unsigned long rates[2] = { 100, 101 }, freqs[2], volts[2];
+		int ret;
+
+		KUNIT_ASSERT_FALSE(test, IS_ERR(table));
+		ret = dev_pm_opp_snapshot_lock(table, rates, freqs, volts, 2);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		if (!ret) {
+			KUNIT_EXPECT_EQ(test, volts[0], 800000UL);
+			KUNIT_EXPECT_EQ(test, volts[1], 900000UL);
+			KUNIT_EXPECT_EQ(test, dev_pm_opp_snapshot_lock(table,
+				 rates, freqs, volts, 2), -EAGAIN);
+			dev_pm_opp_snapshot_unlock(table);
+		}
+		rates[0] = 99;
+		KUNIT_EXPECT_EQ(test, dev_pm_opp_snapshot_lock(table,
+			 rates, freqs, volts, 2), -ERANGE);
+		dev_pm_opp_put_opp_table(table);
+	}
 	kunit_release_action(test, remove_opps, &pdev->dev);
 	kunit_release_action(test, clear_config, (void *)(long)token);
 	/* Reinstallation after clearing must work on the same device. */
@@ -666,6 +686,154 @@ static void preflight_init_unwind(struct kunit *test)
 	}
 }
 
+struct conversion_fixture {
+	struct kunit *test;
+	struct platform_device *dev[3], *rail[2];
+	struct clk *clk;
+	int uv[2], writes, fail_write;
+	bool started;
+};
+
+struct conversion_endpoint {
+	struct conversion_fixture *fixture;
+	int id;
+};
+
+static int conversion_read(void *data)
+{
+	struct conversion_endpoint *e = data;
+
+	return e->fixture->uv[e->id];
+}
+
+static int conversion_write(void *data, int uv)
+{
+	struct conversion_endpoint *e = data;
+	struct conversion_fixture *f = e->fixture;
+
+	if (++f->writes == f->fail_write)
+		return -EIO;
+	f->uv[e->id] = uv;
+	KUNIT_EXPECT_GE(f->test, f->uv[0], 1040000);
+	KUNIT_EXPECT_LE(f->test, f->uv[0], f->uv[1]);
+	KUNIT_EXPECT_LE(f->test, f->uv[1] - f->uv[0], 160000);
+	return 0;
+}
+
+static void conversion_cleanup(void *data)
+{
+	struct conversion_fixture *f = data;
+	int i;
+
+	if (f->started)
+		mt6797_preflight_test_stop();
+	for (i = 0; i < 2; i++)
+		if (!IS_ERR_OR_NULL(f->rail[i]))
+			platform_device_unregister(f->rail[i]);
+	for (i = 0; i < 3; i++)
+		if (!IS_ERR_OR_NULL(f->dev[i])) {
+			dev_pm_opp_remove_all_dynamic(&f->dev[i]->dev);
+			platform_device_unregister(f->dev[i]);
+		}
+	if (!IS_ERR_OR_NULL(f->clk))
+		clk_unregister_fixed_rate(f->clk);
+}
+
+/* Production reservation, registry and engine, real CCF/OPP. Discovery and
+ * transports are injected: this does not claim OF/NVMEM or adapter coverage.
+ */
+static void production_conversion(struct kunit *test)
+{
+	struct conversion_fixture *f;
+	struct conversion_endpoint *e;
+	struct mt6797_provider_status status;
+	struct device *dev[3];
+	int i, writes;
+
+	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	e = kunit_kcalloc(test, 2, sizeof(*e), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_NOT_NULL(test, e);
+	f->test = test;
+	f->uv[0] = 1040000;
+	f->uv[1] = 1100000;
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, conversion_cleanup, f), 0);
+	f->clk = clk_register_fixed_rate(NULL, "conversion-clock", NULL, 0, 100);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(f->clk));
+	for (i = 0; i < 3; i++) {
+		f->dev[i] = platform_device_register_simple("conversion-user", i, NULL, 0);
+		KUNIT_ASSERT_FALSE(test, IS_ERR(f->dev[i]));
+		dev[i] = &f->dev[i]->dev;
+		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev[i], 100, 1040000), 0);
+	}
+	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_start(dev[0], f->clk), 0);
+	f->started = true;
+	for (i = 0; i < 2; i++) {
+		struct mt6797_rail_io io = {
+			.read = conversion_read, .write = conversion_write,
+			.data = &e[i], .step_uv = i ? 25000 : 10000,
+		};
+
+		e[i].fixture = f;
+		e[i].id = i;
+		f->rail[i] = platform_device_register_simple("conversion-rail", i, NULL, 0);
+		KUNIT_ASSERT_FALSE(test, IS_ERR(f->rail[i]));
+		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&f->rail[i]->dev, i, &io), 0);
+		mt6797_preflight_test_flush();
+		mt6797_provider_status(&status);
+		if (!i)
+			KUNIT_EXPECT_EQ(test, mt6797_preflight_test_convert(dev, f->clk,
+				&status.preflight), -EPROBE_DEFER);
+	}
+	mt6797_provider_status(&status);
+	status.preflight.generation--;
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_convert(dev, f->clk,
+		&status.preflight), -ESTALE);
+	KUNIT_EXPECT_EQ(test, f->writes, 0);
+	mt6797_provider_status(&status);
+	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_convert(dev, f->clk,
+		&status.preflight), 0);
+	KUNIT_EXPECT_GT(test, f->writes, 0);
+	KUNIT_EXPECT_EQ(test, f->uv[1], 1200000);
+	mt6797_provider_status(&status);
+	KUNIT_EXPECT_FALSE(test, status.engine.ready);
+	KUNIT_EXPECT_EQ(test, status.readiness, -EAGAIN);
+	for (i = 0; i < 3; i++)
+		KUNIT_EXPECT_EQ(test, status.engine.floor[i], 1040000);
+	writes = f->writes;
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_disable(dev[1], 100), 0);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_convert(dev, f->clk,
+		&status.preflight), -ERANGE);
+	KUNIT_EXPECT_EQ(test, f->writes, writes);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_enable(dev[1], 100), 0);
+	platform_device_unregister(f->rail[1]);
+	f->rail[1] = NULL;
+	f->uv[1] = 1100000;
+	f->rail[1] = platform_device_register_simple("conversion-rail", 1, NULL, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(f->rail[1]));
+	{
+		struct mt6797_rail_io io = {
+			.read = conversion_read, .write = conversion_write,
+			.data = &e[1], .step_uv = 25000,
+		};
+
+		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&f->rail[1]->dev,
+			MT6797_SRAM, &io), 0);
+	}
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_convert(dev, f->clk,
+		&status.preflight), -ESTALE);
+	mt6797_preflight_test_flush();
+	mt6797_provider_status(&status);
+	f->fail_write = f->writes + 1;
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_convert(dev, f->clk,
+		&status.preflight), -EIO);
+	mt6797_provider_status(&status);
+	KUNIT_EXPECT_TRUE(test, status.engine.fault);
+	KUNIT_EXPECT_FALSE(test, status.converted);
+	KUNIT_EXPECT_EQ(test, status.engine.floor[2], 1040000);
+	KUNIT_EXPECT_EQ(test, status.readiness, -EAGAIN);
+}
+
 static struct kunit_case provider_cases[] = {
 	KUNIT_CASE(preflight_init_unwind),
 	KUNIT_CASE(preflight_opp_core),
@@ -675,6 +843,7 @@ static struct kunit_case provider_cases[] = {
 	KUNIT_CASE(provider_orders),
 	KUNIT_CASE(provider_invalid),
 	KUNIT_CASE(provider_inflight),
+	KUNIT_CASE(production_conversion),
 	{}
 };
 static struct kunit_suite provider_suite = {

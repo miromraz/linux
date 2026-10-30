@@ -9,6 +9,7 @@ struct rail_fixture {
 	int writes;
 	int fail_at;
 	int read_error;
+	int reads, fail_read;
 };
 
 struct rail_endpoint {
@@ -20,6 +21,8 @@ static int rail_read(void *data)
 {
 	struct rail_endpoint *e = data;
 
+	if (++e->fixture->reads == e->fixture->fail_read)
+		return -EIO;
 	return e->fixture->read_error ?: e->fixture->uv[e->id];
 }
 
@@ -44,11 +47,11 @@ static int rail_write(void *data, int uv)
 static void rail_conversion(struct kunit *test)
 {
 	int p, s, order;
-	const int floor[3] = { 1040000, 1040000, 1040000 };
+	const int floor[3] = { 840000, 840000, 840000 };
 
 	for (order = 0; order < 2; order++) {
-		for (p = 1040000; p <= 1200000; p += 10000) {
-			for (s = 1050000; s <= 1200000; s += 25000) {
+		for (p = 840000; p <= 1200000; p += 10000) {
+			for (s = 1000000; s <= 1200000; s += 25000) {
 				struct rail_fixture f = { .test = test, .uv = { p, s } };
 				struct rail_endpoint e[2] = { { &f, 0 }, { &f, 1 } };
 				struct mt6797_rail_io io[2] = {
@@ -196,8 +199,44 @@ static void rail_reprepare(struct kunit *test)
 	mutex_destroy(&f.coordinator.lock);
 }
 
+static void rail_conversion_faults(struct kunit *test)
+{
+	const int floor[3] = { 1000000, 1000000, 1000000 };
+	int mode, fail;
+
+	/* Baseline is six SRAM steps and four proc steps (1.00/1.05). */
+	for (mode = 0; mode < 2; mode++) {
+		for (fail = 1; fail <= (mode ? 22 : 10); fail++) {
+			struct rail_fixture f = { .test = test, .uv = { 1000000, 1050000 } };
+			struct rail_endpoint e[2] = { { &f, 0 }, { &f, 1 } };
+			struct mt6797_rail_io io[2] = {
+				{ rail_read, rail_write, &e[0], 10000 },
+				{ rail_read, rail_write, &e[1], 25000 },
+			};
+			struct mt6797_rail_status status;
+
+			if (mode)
+				f.fail_read = fail;
+			else
+				f.fail_at = fail;
+			mt6797_rail_init(&f.coordinator);
+			KUNIT_ASSERT_EQ(test, mt6797_rail_attach(&f.coordinator, 0, &io[0]), 0);
+			KUNIT_ASSERT_EQ(test, mt6797_rail_attach(&f.coordinator, 1, &io[1]), 0);
+			KUNIT_EXPECT_EQ(test, mt6797_rail_prepare(&f.coordinator,
+				f.coordinator.generation, floor), -EIO);
+			mt6797_rail_status(&f.coordinator, &status);
+			KUNIT_EXPECT_FALSE(test, status.ready);
+			KUNIT_EXPECT_EQ(test, status.floor[2], 1000000);
+			if (!mode || fail > 2)
+				KUNIT_EXPECT_TRUE(test, status.fault);
+			mutex_destroy(&f.coordinator.lock);
+		}
+	}
+}
+
 static struct kunit_case rail_cases[] = {
 	KUNIT_CASE(rail_conversion),
+	KUNIT_CASE(rail_conversion_faults),
 	KUNIT_CASE(rail_lifetime),
 	KUNIT_CASE(rail_reprepare),
 	{}

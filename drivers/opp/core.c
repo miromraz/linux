@@ -3128,3 +3128,47 @@ void dev_pm_opp_remove_table(struct device *dev)
 		dev_pm_opp_put_opp_table(opp_table);
 }
 EXPORT_SYMBOL_GPL(dev_pm_opp_remove_table);
+
+/* Serialize the snapshot and a bounded raw-hardware transaction with OPP
+ * insertion, deletion, availability and voltage changes. Trylock permits
+ * callers to reserve multiple tables without introducing an ABBA order.
+ */
+int dev_pm_opp_snapshot_lock(struct opp_table *table, const unsigned long *rates,
+			     unsigned long *freq, unsigned long *uv, unsigned int count)
+{
+	struct dev_pm_opp *opp, *ceil;
+	unsigned int i;
+	bool lower;
+
+	if (!assert_single_clk(table, 0) || table->regulator_count != 1)
+		return -EINVAL;
+	if (!mutex_trylock(&table->lock))
+		return -EAGAIN;
+	for (i = 0; i < count; i++) {
+		ceil = NULL;
+		lower = false;
+		list_for_each_entry(opp, &table->opp_list, node) {
+			if (!opp->available)
+				continue;
+			if (opp->rates[0] <= rates[i])
+				lower = true;
+			if (opp->rates[0] >= rates[i] && !ceil)
+				ceil = opp;
+		}
+		if (!rates[i] || !lower || !ceil || !ceil->supplies->u_volt ||
+		    ceil->supplies->u_volt > INT_MAX) {
+			mutex_unlock(&table->lock);
+			return -ERANGE;
+		}
+		freq[i] = ceil->rates[0];
+		uv[i] = ceil->supplies->u_volt;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dev_pm_opp_snapshot_lock);
+
+void dev_pm_opp_snapshot_unlock(struct opp_table *table)
+{
+	mutex_unlock(&table->lock);
+}
+EXPORT_SYMBOL_GPL(dev_pm_opp_snapshot_unlock);

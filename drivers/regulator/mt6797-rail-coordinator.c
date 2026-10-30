@@ -77,7 +77,7 @@ static int mt6797_rail_read(struct mt6797_rail_coordinator *c, int uv[2])
 		if (uv[i] < 0)
 			return uv[i];
 	}
-	if (uv[0] < PROC_MIN || uv[1] > RAIL_MAX || uv[0] > uv[1] ||
+	if (uv[0] < 840000 || uv[1] < 1000000 || uv[1] > RAIL_MAX || uv[0] > uv[1] ||
 	    uv[1] - uv[0] > MAX_SPREAD ||
 	    uv[0] % 10000 || uv[1] % 25000)
 		return -ERANGE;
@@ -128,7 +128,7 @@ int mt6797_rail_prepare(struct mt6797_rail_coordinator *c, u64 generation,
 		goto out;
 	}
 	for (i = 0; i < MT6797_RAIL_USERS; i++) {
-		if (floor[i] < PROC_MIN || floor[i] > RAIL_MAX) {
+		if (floor[i] <= 0 || floor[i] > RAIL_MAX) {
 			ret = -ERANGE;
 			goto out;
 		}

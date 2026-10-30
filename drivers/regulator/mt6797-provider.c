@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Immutable production ownership. No conversion/admission entry point. */
+/* Production conversion ownership; consumer admission remains blocked. */
 #include <linux/clk.h>
 #include <linux/cpu.h>
 #include <linux/module.h>
@@ -20,8 +20,10 @@ static struct device_node *rails[MT6797_RAILS];
 static unsigned long attached;
 static BLOCKING_NOTIFIER_HEAD(events);
 static void preflight_work(struct work_struct *work);
-static DECLARE_WORK(preflight_job, preflight_work);
+static DECLARE_DELAYED_WORK(preflight_job, preflight_work);
 static bool preflight_active;
+/* Supplier teardown is irreversible until ownership is explicitly rebuilt. */
+static bool supplier_revoked;
 static void preflight_notify(struct work_struct *work);
 static DECLARE_WORK(notify_job, preflight_notify);
 static bool stopping;
@@ -40,7 +42,7 @@ static void preflight_invalidate(void)
 	if (!stopping)
 		schedule_work(&notify_job);
 	if (preflight_active)
-		schedule_work(&preflight_job);
+		mod_delayed_work(system_wq, &preflight_job, 0);
 }
 
 /* Accept either spelling, but never accept conflicting or broken aliases. */
@@ -391,6 +393,67 @@ static int preflight_measure(struct mt6797_preflight_result *r)
 	return mt6797_provider_sample(r->provider_generation, r->rail_uv);
 }
 
+/* Framework reservation precedes owner/engine/provider locks. Table refs are
+ * obtained before locking any table; no framework calls occur in conversion.
+ * The normal CPU/CCI drivers remain gated, including after success.
+ */
+static int preflight_convert(struct preflight_user *users,
+			     struct mt6797_preflight_result *r)
+{
+	struct opp_table *tables[MT6797_RAIL_USERS] = {};
+	int floor[MT6797_RAIL_USERS];
+	int i, j, ret = 0, clocks = 0, locked = 0;
+
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		tables[i] = dev_pm_opp_get_opp_table(users[i].dev);
+		if (IS_ERR(tables[i])) {
+			ret = PTR_ERR(tables[i]);
+			tables[i] = NULL;
+			goto out;
+		}
+		for (j = 0; j < i; j++)
+			if (tables[j] == tables[i]) {
+				ret = -EINVAL;
+				goto out;
+			}
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		for (j = 0; j < 2; j++) {
+			ret = clk_rate_exclusive_get(users[i].clk[j]);
+			if (ret)
+				goto out;
+			clocks++;
+			r->rate[i][j] = clk_get_rate(users[i].clk[j]);
+		}
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		ret = dev_pm_opp_snapshot_lock(tables[i], r->rate[i],
+					       r->ceiling[i], r->uv[i], 2);
+		if (ret)
+			goto out;
+		locked++;
+		floor[i] = max(r->uv[i][0], r->uv[i][1]);
+	}
+	mutex_lock(&owner_lock);
+	if (!preflight_active || supplier_revoked || r->generation != preflight.generation ||
+	    r->provider_generation != owner.generation)
+		ret = -ESTALE;
+	else
+		ret = mt6797_rail_prepare(&owner, r->provider_generation, floor);
+	mutex_unlock(&owner_lock);
+out:
+	while (locked)
+		dev_pm_opp_snapshot_unlock(tables[--locked]);
+	while (clocks) {
+		clocks--;
+		clk_rate_exclusive_put(users[clocks / 2].clk[clocks % 2]);
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		if (tables[i])
+			dev_pm_opp_put_opp_table(tables[i]);
+	return ret;
+}
+
 static void preflight_work(struct work_struct *work)
 {
 	struct mt6797_preflight_result result = {};
@@ -416,11 +479,22 @@ static void preflight_work(struct work_struct *work)
 	}
 	if (!ret)
 		ret = preflight_measure(&result);
+	if (!ret
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+	    && !fixture_active
+#endif
+	   )
+		ret = preflight_convert(pf_users, &result);
+	if (!ret)
+		ret = mt6797_provider_sample(result.provider_generation, result.rail_uv);
 	result.error = ret;
 	mutex_lock(&owner_lock);
 	if (result.generation == preflight.generation &&
 	    result.provider_generation == owner.generation && preflight_active) {
 		preflight = result;
+		/* A table reader can contend without emitting an invalidation. */
+		if (ret == -EAGAIN)
+			mod_delayed_work(system_wq, &preflight_job, msecs_to_jiffies(20));
 		schedule_work(&notify_job);
 	}
 	mutex_unlock(&owner_lock);
@@ -476,6 +550,9 @@ static int preflight_nvmem_event(struct notifier_block *nb,
 	 * retain every table/configuration, including on transient read errors.
 	 */
 	mutex_lock(&owner_lock);
+	if (event == NVMEM_REMOVE || event == NVMEM_CELL_REMOVE ||
+	    event == NVMEM_LAYOUT_REMOVE)
+		supplier_revoked = true;
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
 	return NOTIFY_OK;
@@ -487,6 +564,8 @@ static int preflight_supplier_event(struct notifier_block *nb,
 	if (!preflight_bus_relevant(data))
 		return NOTIFY_DONE;
 	mutex_lock(&owner_lock);
+	if (event == BUS_NOTIFY_UNBIND_DRIVER || event == BUS_NOTIFY_DEL_DEVICE)
+		supplier_revoked = true;
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
 	return NOTIFY_OK;
@@ -553,7 +632,9 @@ int mt6797_provider_attach(struct device *dev, enum mt6797_rail_id id,
 		return -ENOMEM;
 	a->id = id;
 	guarded = *io;
-	guarded.write = blocked_write;
+	/* Legacy read-only fixtures remain immutable. */
+	if (!guarded.write)
+		guarded.write = blocked_write;
 	mutex_lock(&owner_lock);
 	ret = io->read(io->data);
 	if (ret >= 0)
@@ -607,6 +688,12 @@ void mt6797_provider_status(struct mt6797_provider_status *status)
 {
 	mutex_lock(&owner_lock);
 	mt6797_rail_status(&owner, &status->engine);
+	status->converted = status->engine.ready && !preflight.error;
+	status->proc_min_uv = status->converted ? 1040000 : 0;
+	status->proc_max_uv = status->converted ? 1200000 : 0;
+	status->fixed_sram_uv = status->converted ? 1200000 : 0;
+	/* Conversion is not operational admission. Group4 owns that handoff. */
+	status->engine.ready = false;
 	status->attached = attached;
 	status->preflight = preflight;
 	status->readiness = attached == GENMASK(1, 0) ? -EAGAIN : -EPROBE_DEFER;
@@ -653,6 +740,23 @@ EXPORT_SYMBOL_GPL(mt6797_provider_unsubscribe);
  * notification, generation checking or publication. Never enabled on Gemini.
  * The caller owns dynamic OPPs and clock references until stop returns.
  */
+int mt6797_preflight_test_convert(struct device **dev, struct clk *clk,
+				  struct mt6797_preflight_result *result)
+{
+	struct preflight_user users[MT6797_RAIL_USERS] = {};
+	int i;
+
+	if (of_machine_is_compatible("planet,gemini-pda"))
+		return -EPERM;
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		users[i].dev = dev[i];
+		users[i].clk[0] = clk;
+		users[i].clk[1] = clk;
+	}
+	return preflight_convert(users, result);
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_convert);
+
 int mt6797_preflight_test_start(struct device *dev, struct clk *clk)
 {
 	int i, j, ret;
@@ -691,7 +795,7 @@ EXPORT_SYMBOL_GPL(mt6797_preflight_test_start);
 
 void mt6797_preflight_test_flush(void)
 {
-	flush_work(&preflight_job);
+	flush_delayed_work(&preflight_job);
 	flush_work(&notify_job);
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_flush);
@@ -710,7 +814,7 @@ void mt6797_preflight_test_stop(void)
 	preflight_active = false;
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
-	cancel_work_sync(&preflight_job);
+	cancel_delayed_work_sync(&preflight_job);
 	for (i = 0; i < MT6797_RAIL_USERS; i++) {
 		struct preflight_user *u = &pf_users[i];
 
@@ -745,7 +849,7 @@ static void preflight_shutdown(void)
 	if (sources & BIT(0))
 		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
 	sources = 0;
-	cancel_work_sync(&preflight_job);
+	cancel_delayed_work_sync(&preflight_job);
 	preflight_release();
 	cancel_work_sync(&notify_job);
 }

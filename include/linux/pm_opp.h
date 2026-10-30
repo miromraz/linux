@@ -119,6 +119,13 @@ struct dev_pm_opp_key {
 
 #if defined(CONFIG_PM_OPP)
 
+/* Bounded raw-hardware transaction. No OPP/framework calls while held.
+ * Caller retains the table reference and releases on the acquiring task.
+ */
+int dev_pm_opp_snapshot_lock(struct opp_table *table, const unsigned long *rates,
+			     unsigned long *freq, unsigned long *uv, unsigned int count);
+void dev_pm_opp_snapshot_unlock(struct opp_table *table);
+
 struct opp_table *dev_pm_opp_get_opp_table(struct device *dev);
 struct opp_table *dev_pm_opp_get_opp_table_ref(struct opp_table *opp_table);
 void dev_pm_opp_put_opp_table(struct opp_table *opp_table);

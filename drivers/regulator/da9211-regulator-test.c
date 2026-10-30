@@ -10,6 +10,7 @@ struct da9211_test_bus {
 	unsigned int regs[512];
 	unsigned int a_writes;
 	int a_error;
+	int calls, fail;
 	bool unguarded;
 	int mask_error;
 	int ack_error;
@@ -18,6 +19,9 @@ struct da9211_test_bus {
 static int da9211_test_read(void *context, unsigned int reg, unsigned int *val)
 {
 	struct da9211_test_bus *bus = context;
+
+	if (++bus->calls == bus->fail)
+		return -EIO;
 
 	if (reg == DA9211_REG_BUCKA_CONT && bus->a_error)
 		return bus->a_error;
@@ -28,6 +32,9 @@ static int da9211_test_read(void *context, unsigned int reg, unsigned int *val)
 static int da9211_test_write(void *context, unsigned int reg, unsigned int val)
 {
 	struct da9211_test_bus *bus = context;
+
+	if (++bus->calls == bus->fail)
+		return -EIO;
 
 	if (reg == DA9211_REG_MASK_B && bus->mask_error)
 		return bus->mask_error;
@@ -123,6 +130,29 @@ static void da9211_test_independent(struct kunit *test)
 	bus->regs[DA9211_REG_CONFIG_E] = 0;
 	KUNIT_EXPECT_EQ(test, da9211_owned_read(&chip), -EINVAL);
 	bus->regs[DA9211_REG_CONFIG_E] = DA9211_SLAVE_SEL;
+	/* Actual raw writer: validate all transport failure boundaries. */
+	{
+		int count, fail;
+
+		bus->unguarded = true;
+		bus->calls = 0;
+		KUNIT_EXPECT_EQ(test, da9211_owned_write(&chip, 1160000), 0);
+		count = bus->calls;
+		KUNIT_EXPECT_EQ(test, da9211_owned_read(&chip), 1160000);
+		for (fail = 1; fail <= count; fail++) {
+			bus->regs[DA9211_REG_VBUCKA_A] = 85;
+			bus->calls = 0;
+			bus->fail = fail;
+			KUNIT_EXPECT_LT(test, da9211_owned_write(&chip, 1160000), 0);
+			KUNIT_EXPECT_EQ(test, bus->regs[DA9211_REG_BUCKA_CONT],
+				(unsigned int)DA9211_BUCKA_EN);
+			KUNIT_EXPECT_EQ(test, bus->regs[DA9211_REG_VBUCKB_A], 85U);
+		}
+		bus->fail = 0;
+		bus->a_writes = 0;
+		bus->regs[DA9211_REG_VBUCKA_A] = 85;
+		bus->unguarded = false;
+	}
 	id = 0;
 	a = platform_device_register_data(chip.dev, "da9211-buck",
 					PLATFORM_DEVID_AUTO, &id, sizeof(id));
@@ -179,7 +209,9 @@ static void da9211_test_independent(struct kunit *test)
 	init[0].constraints.min_uV = 1040000;
 	init[0].constraints.max_uV = 1200000;
 	KUNIT_EXPECT_EQ(test, device_reprobe(&a->dev), 0);
-	KUNIT_EXPECT_NOT_NULL(test, chip.rdev[0]);
+	/* Preregistration retains enabled A without core normalization. */
+	KUNIT_EXPECT_PTR_EQ(test, chip.rdev[0], NULL);
+	KUNIT_EXPECT_NOT_NULL(test, a->dev.driver);
 	device_release_driver(&a->dev);
 	KUNIT_EXPECT_EQ(test, regulator_register_notifier(consumer, &notifier.nb), 0);
 	bus->ack_error = -EIO;

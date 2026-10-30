@@ -4,6 +4,7 @@
 // /DA9213/DA9223/DA9214/DA9224/DA9215/DA9225
 // Copyright (C) 2015  Dialog Semiconductor Ltd.
 
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
@@ -609,7 +610,7 @@ static void da9211_regulator_unregister(void *data)
 	regulator_unregister(data);
 }
 
-/* Called before core registration; production ownership has no write API. */
+/* Enabled physical A bank validation for preregistration ownership. */
 static int da9211_owned_read_unlocked(void *data)
 {
 	struct da9211 *chip = data;
@@ -645,6 +646,29 @@ static int da9211_owned_read(void *data)
 	return ret;
 }
 
+static int da9211_owned_write(void *data, int uv)
+{
+	struct da9211 *chip = data;
+	int ret;
+
+	if (uv < 840000 || uv > 1200000 || uv % 10000)
+		return -EINVAL;
+	mutex_lock(&chip->rail_lock);
+	ret = da9211_owned_read_unlocked(chip);
+	if (ret >= 0) {
+		ret = regmap_update_bits(chip->regmap, DA9211_REG_VBUCKA_A,
+					0x7f, (uv - 300000) / 10000);
+		/* Conversion issues only 10 mV steps. Wait also on uncertain writes. */
+		udelay(100);
+		if (!ret) {
+			ret = da9211_owned_read_unlocked(chip);
+			ret = ret < 0 ? ret : (ret == uv ? 0 : -EIO);
+		}
+	}
+	mutex_unlock(&chip->rail_lock);
+	return ret;
+}
+
 static int da9211_buck_probe(struct platform_device *pdev)
 {
 	struct da9211 *chip = dev_get_drvdata(pdev->dev.parent);
@@ -660,6 +684,7 @@ static int da9211_buck_probe(struct platform_device *pdev)
 	struct regulator_dev *rdev;
 	struct mt6797_rail_io io = {
 		.read = da9211_owned_read,
+		.write = da9211_owned_write,
 		.data = chip,
 		.step_uv = 10000,
 	};
@@ -682,9 +707,8 @@ static int da9211_buck_probe(struct platform_device *pdev)
 		    of_property_present(config.of_node, "enable-gpio") ||
 		    of_property_present(config.of_node, "enable-gpios"))
 			return -EOPNOTSUPP;
-		ret = mt6797_provider_attach(&pdev->dev, MT6797_PROC, &io);
-		if (ret)
-			return ret;
+		/* Preserve boot state until transactional Group4 adoption. */
+		return mt6797_provider_attach(&pdev->dev, MT6797_PROC, &io);
 	}
 
 	if (config.ena_gpiod) {

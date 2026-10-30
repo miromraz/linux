@@ -65,6 +65,7 @@ struct mt6797_cpu_sram {
 	bool unresolved;
 	bool boot_barrier;
 	struct regmap *regmap;
+	struct device *dev;
 };
 
 static int mt6797_cpu_sram_read_bank(struct regmap *regmap, unsigned int words[2])
@@ -142,10 +143,9 @@ static int mt6797_cpu_sram_get_voltage_sel(struct regulator_dev *rdev)
 	return ret;
 }
 
-static int mt6797_cpu_sram_set_voltage_sel_unlocked(struct regulator_dev *rdev,
-					   unsigned int sel)
+static int mt6797_cpu_sram_program(struct mt6797_cpu_sram *sram,
+				   unsigned int sel)
 {
-	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
 	unsigned int saved[2], check[2], code, packed;
 	int old_sel, ret, restore = 0, err, i;
 
@@ -153,25 +153,22 @@ static int mt6797_cpu_sram_set_voltage_sel_unlocked(struct regulator_dev *rdev,
 		return -EINVAL;
 	if (sram->unresolved)
 		return -EIO;
-	old_sel = mt6797_cpu_sram_read(rdev, saved);
+	old_sel = mt6797_cpu_sram_read_bank(sram->regmap, saved);
 	if (old_sel < 0) {
-		dev_err(&rdev->dev, "cannot snapshot SRAM bank: %d\n", old_sel);
+		dev_err(sram->dev, "cannot snapshot SRAM bank: %d\n", old_sel);
 		return old_sel;
 	}
-	if (sram->boot_barrier)
-		return mt6797_boot_barrier_check(
-			regulator_is_enabled_regmap(rdev), old_sel, sel);
 	code = sel + MT6797_CPULDO_MIN_SEL;
 	packed = code | (code << 8) | (code << 16) | (code << 24);
 	for (i = 0; i < 2; i++) {
-		ret = regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
+		ret = regmap_update_bits(sram->regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
 					 MT6797_CPULDO_VOLT_FIELDS_MASK, packed);
 		if (ret)
 			goto recover;
 	}
 	/* Own the wait: the core does not delay after a failed setter. */
 	udelay(mt6797_cpu_sram_delay(old_sel, sel));
-	ret = mt6797_cpu_sram_read(rdev, check);
+	ret = mt6797_cpu_sram_read_bank(sram->regmap, check);
 	if (ret < 0)
 		goto recover;
 	if (ret == sel &&
@@ -188,13 +185,13 @@ recover:
 	 */
 	udelay(mt6797_cpu_sram_delay(MT6797_CPULDO_N_VOLTAGES - 1, 0));
 	for (i = 0; i < 2; i++) {
-		err = regmap_update_bits(rdev->regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
+		err = regmap_update_bits(sram->regmap, MT6797_CPULDO_CTRL_1 + 4 * i,
 					 MT6797_CPULDO_VOLT_FIELDS_MASK, saved[i]);
 		if (err)
 			restore = err;
 	}
 	udelay(mt6797_cpu_sram_delay(MT6797_CPULDO_N_VOLTAGES - 1, 0));
-	err = mt6797_cpu_sram_read(rdev, check);
+	err = mt6797_cpu_sram_read_bank(sram->regmap, check);
 	if (err != old_sel ||
 	    (check[0] & MT6797_CPULDO_VOLT_FIELDS_MASK) !=
 	    (saved[0] & MT6797_CPULDO_VOLT_FIELDS_MASK) ||
@@ -203,12 +200,23 @@ recover:
 		restore = -EIO;
 	if (restore) {
 		sram->unresolved = true;
-		dev_err(&rdev->dev, "SRAM recovery unresolved (%d), operations blocked\n",
+		dev_err(sram->dev, "SRAM recovery unresolved (%d), operations blocked\n",
 			restore);
 	} else {
-		dev_err(&rdev->dev, "SRAM programming failed (%d), bank restored\n", ret);
+		dev_err(sram->dev, "SRAM programming failed (%d), bank restored\n", ret);
 	}
 	return ret;
+}
+
+static int mt6797_cpu_sram_set_voltage_sel_unlocked(struct regulator_dev *rdev,
+						 unsigned int sel)
+{
+	struct mt6797_cpu_sram *sram = rdev_get_drvdata(rdev);
+
+	if (sram->boot_barrier)
+		return mt6797_boot_barrier_check(regulator_is_enabled_regmap(rdev),
+			mt6797_cpu_sram_get_voltage_sel(rdev), sel);
+	return mt6797_cpu_sram_program(sram, sel);
 }
 
 static int mt6797_cpu_sram_set_voltage_sel(struct regulator_dev *rdev, unsigned int sel)
@@ -324,6 +332,23 @@ static int mt6797_cpu_sram_owned_read(void *data)
 	return ret;
 }
 
+static int mt6797_cpu_sram_owned_write(void *data, int uv)
+{
+	struct mt6797_cpu_sram *sram = data;
+	int ret;
+
+	if (uv < MT6797_CPULDO_MIN_UV || uv > 1200000 ||
+	    uv % MT6797_CPULDO_STEP_UV)
+		return -EINVAL;
+	mutex_lock(&sram->rail_lock);
+	ret = mt6797_cpu_sram_owned_read_unlocked(sram);
+	if (ret >= 0)
+		ret = mt6797_cpu_sram_program(sram,
+			(uv - MT6797_CPULDO_MIN_UV) / MT6797_CPULDO_STEP_UV);
+	mutex_unlock(&sram->rail_lock);
+	return ret;
+}
+
 static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -334,6 +359,7 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 	struct regmap *regmap;
 	struct mt6797_rail_io io = {
 		.read = mt6797_cpu_sram_owned_read,
+		.write = mt6797_cpu_sram_owned_write,
 		.step_uv = MT6797_CPULDO_STEP_UV,
 	};
 	int ret;
@@ -348,15 +374,15 @@ static int mt6797_cpu_sram_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	mutex_init(&sram->rail_lock);
 	sram->regmap = regmap;
+	sram->dev = dev;
 	ret = mt6797_boot_barrier_supply(np, "mem-supply");
 	if (ret < 0)
 		return ret;
 	sram->boot_barrier = ret;
 	if (sram->boot_barrier) {
 		io.data = sram;
-		ret = mt6797_provider_attach(dev, MT6797_SRAM, &io);
-		if (ret)
-			return ret;
+		/* Group4 will adopt this preregistered, enabled endpoint. */
+		return mt6797_provider_attach(dev, MT6797_SRAM, &io);
 	}
 	config.driver_data = sram;
 	config.dev = dev;
@@ -392,3 +418,7 @@ module_platform_driver(mt6797_cpu_sram_driver);
 
 MODULE_DESCRIPTION("MediaTek MT6797 CPU SRAM LDO regulator");
 MODULE_LICENSE("GPL");
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+#include "mt6797-cpu-sram-test.c"
+#endif
