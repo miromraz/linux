@@ -35,7 +35,15 @@ int mt6797_provider_attach(struct device *dev, enum mt6797_rail_id id,
 			   const struct mt6797_rail_io *io);
 int mt6797_provider_sample(u64 generation, int uv[MT6797_RAILS]);
 void mt6797_provider_status(struct mt6797_provider_status *status);
-/* Callbacks can overlap and run during probe/remove under driver-core locks.
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+struct clk;
+int mt6797_preflight_test_start(struct device *dev, struct clk *clk);
+void mt6797_preflight_test_stop(void);
+void mt6797_preflight_test_flush(void);
+void mt6797_preflight_test_hint(struct device *dev);
+#endif
+/* Callbacks run serially on a worker, with a borrowed status snapshot in data.
+ * Events may coalesce; payload generation/error describe that snapshot only.
  * Queue framework work; never recursively subscribe/unsubscribe or return STOP.
  * Unsubscribe drains callbacks; owners must then cancel their queued work.
  */

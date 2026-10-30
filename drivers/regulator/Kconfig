@@ -1987,6 +1987,7 @@ config REGULATOR_MT6797_PROVIDER
 config REGULATOR_MT6797_PROVIDER_KUNIT_TEST
 	tristate "MT6797 production provider registry tests" if !KUNIT_ALL_TESTS
 	depends on KUNIT
+	select COMMON_CLK
 	select REGULATOR_MT6797_PROVIDER
 	default KUNIT_ALL_TESTS
 	help

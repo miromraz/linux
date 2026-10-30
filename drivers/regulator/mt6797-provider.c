@@ -21,8 +21,13 @@ static unsigned long attached;
 static BLOCKING_NOTIFIER_HEAD(events);
 static void preflight_work(struct work_struct *work);
 static DECLARE_WORK(preflight_job, preflight_work);
-static bool preflight_active, rebuild;
-static unsigned int clock_changes;
+static bool preflight_active;
+static void preflight_notify(struct work_struct *work);
+static DECLARE_WORK(notify_job, preflight_notify);
+static bool stopping;
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+static bool fixture_active;
+#endif
 static struct mt6797_preflight_result preflight = { .error = -EPROBE_DEFER };
 
 /* owner_lock serializes invalidation with publication and status snapshots. */
@@ -30,6 +35,9 @@ static void preflight_invalidate(void)
 {
 	preflight.generation++;
 	preflight.error = -EAGAIN;
+	preflight.provider_generation = owner.generation;
+	if (!stopping)
+		schedule_work(&notify_job);
 	if (preflight_active)
 		schedule_work(&preflight_job);
 }
@@ -198,10 +206,10 @@ static int preflight_clock_event(struct notifier_block *nb,
 				 unsigned long event, void *data)
 {
 	mutex_lock(&owner_lock);
-	if (event == PRE_RATE_CHANGE)
-		clock_changes++;
-	else if (clock_changes)
-		clock_changes--;
+	/* clk_get_rate() in the worker takes CCF's prepare lock, so it waits
+	 * for this operation even when CCF emits no POST after a failed write.
+	 * Generation validation rejects a new PRE during measurement.
+	 */
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
 	return NOTIFY_OK;
@@ -241,50 +249,83 @@ static int preflight_acquire(void)
 	for (i = 0; i < MT6797_RAIL_USERS; i++) {
 		struct preflight_user *u = &pf_users[i];
 		struct dev_pm_opp_config config = {};
+		struct device *dev;
+		u8 bin;
 		unsigned int hw;
 
 		if (i < 2) {
-			u->dev = get_device(get_cpu_device(i * 4));
+			dev = get_device(get_cpu_device(i * 4));
 		} else {
 			np = of_find_compatible_node(NULL, NULL, "mediatek,mt6797-cci");
 			pdev = of_find_device_by_node(np);
 			of_node_put(np);
-			u->dev = pdev ? &pdev->dev : NULL;
+			dev = pdev ? &pdev->dev : NULL;
 		}
-		if (!u->dev)
+		if (!dev)
 			return -EPROBE_DEFER;
-		ret = nvmem_cell_read_u8(u->dev, "speed_grade", &u->bin);
+		if (u->dev) {
+			put_device(dev);
+			if (u->dev != dev)
+				return -ESTALE;
+		} else {
+			u->dev = dev;
+		}
+		ret = nvmem_cell_read_u8(u->dev, "speed_grade", &bin);
 		if (ret)
 			return ret;
 		/* FUNC_CODE_1 is four bits. Never shift an unchecked efuse. */
-		ret = mt6797_preflight_hw(u->bin, &hw);
+		ret = mt6797_preflight_hw(bin, &hw);
 		if (ret)
 			return ret;
+		/* Never recreate a filtered table: that would restore disabled OPPs
+		 * and discard adjusted voltages. A changed bin needs explicit
+		 * policy reconciliation, which this immutable owner cannot grant.
+		 */
+		if (u->token > 0 && u->bin != bin)
+			return -ESTALE;
+		u->bin = bin;
 		if (i && u->bin != pf_users[0].bin)
 			return -EINVAL;
 		config.supported_hw = &hw;
 		config.supported_hw_count = 1;
-		ret = dev_pm_opp_set_config(u->dev, &config);
+		ret = u->token > 0 ? u->token :
+			dev_pm_opp_set_config(u->dev, &config);
 		if (ret < 0)
 			return ret;
 		u->token = ret;
-		ret = dev_pm_opp_of_add_table(u->dev);
+		ret = u->table ? 0 : dev_pm_opp_of_add_table(u->dev);
 		if (ret)
 			return ret;
 		u->table = true;
-		u->opp_nb.notifier_call = preflight_opp_event;
-		ret = dev_pm_opp_register_notifier(u->dev, &u->opp_nb);
-		if (ret)
-			return ret;
-		u->opp_notify = true;
-		for (j = 0; j < 2; j++) {
-			u->clk[j] = clk_get(u->dev, j ? "intermediate" :
-					   (i == 2 ? "cci" : "cpu"));
-			if (IS_ERR(u->clk[j])) {
-				ret = PTR_ERR(u->clk[j]);
-				u->clk[j] = NULL;
+		if (!u->opp_notify) {
+			u->opp_nb.notifier_call = preflight_opp_event;
+			ret = dev_pm_opp_register_notifier(u->dev, &u->opp_nb);
+			if (ret)
 				return ret;
+			u->opp_notify = true;
+		}
+		for (j = 0; j < 2; j++) {
+			struct clk *clk = clk_get(u->dev, j ? "intermediate" :
+						 (i == 2 ? "cci" : "cpu"));
+
+			if (IS_ERR(clk))
+				return PTR_ERR(clk);
+			if (u->clk[j] && !clk_is_match(u->clk[j], clk)) {
+				/* Replace only the clock reference, never the OPP policy.
+				 * Unregistration drains callbacks outside owner_lock.
+				 */
+				if (u->clk_notify[j])
+					clk_notifier_unregister(u->clk[j], &u->clk_nb[j]);
+				u->clk_notify[j] = false;
+				clk_put(u->clk[j]);
+				u->clk[j] = NULL;
 			}
+			if (u->clk[j])
+				clk_put(clk);
+			else
+				u->clk[j] = clk;
+			if (u->clk_notify[j])
+				continue;
 			u->clk_nb[j].notifier_call = preflight_clock_event;
 			ret = clk_notifier_register(u->clk[j], &u->clk_nb[j]);
 			if (ret)
@@ -352,45 +393,99 @@ static int preflight_measure(struct mt6797_preflight_result *r)
 static void preflight_work(struct work_struct *work)
 {
 	struct mt6797_preflight_result result = {};
-	bool reset;
 	int ret;
 
 	mutex_lock(&owner_lock);
-	if (!preflight_active || clock_changes) {
+	if (!preflight_active) {
 		mutex_unlock(&owner_lock);
 		return;
 	}
 	result.generation = preflight.generation;
 	result.provider_generation = owner.generation;
-	reset = rebuild;
-	rebuild = false;
 	ret = topology();
 	mutex_unlock(&owner_lock);
-	if (reset)
-		preflight_release();
-	if (!ret && !pf_users[2].table) {
-		ret = preflight_acquire();
-		if (ret)
-			preflight_release();
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+	if (fixture_active) {
+		ret = 0;
+	} else
+#endif
+	{
+		if (!ret)
+			ret = preflight_acquire();
 	}
 	if (!ret)
 		ret = preflight_measure(&result);
 	result.error = ret;
 	mutex_lock(&owner_lock);
 	if (result.generation == preflight.generation &&
-	    result.provider_generation == owner.generation && !clock_changes)
+	    result.provider_generation == owner.generation && preflight_active) {
 		preflight = result;
+		schedule_work(&notify_job);
+	}
 	mutex_unlock(&owner_lock);
+}
+
+/* Match consumer nodes and their clock/NVMEM supplier ancestry. No device
+ * references or framework locks are borrowed from the notification payload.
+ */
+static bool preflight_node_contains(struct device_node *np,
+				    struct device_node *supplier)
+{
+	for (; np; np = np->parent)
+		if (np == supplier)
+			return true;
+	return false;
+}
+
+static bool preflight_bus_relevant(struct device *dev)
+{
+	struct device_node *users[3], *cell;
+	struct of_phandle_args args;
+	bool relevant = false;
+	int i, j;
+
+	if (!dev->of_node)
+		return false;
+	users[0] = of_get_cpu_node(0, NULL);
+	users[1] = of_get_cpu_node(4, NULL);
+	users[2] = of_find_compatible_node(NULL, NULL, "mediatek,mt6797-cci");
+	for (i = 0; i < ARRAY_SIZE(users); i++) {
+		relevant |= preflight_node_contains(users[i], dev->of_node);
+		for (j = 0; !of_parse_phandle_with_args(users[i], "clocks",
+						      "#clock-cells", j, &args); j++) {
+			relevant |= preflight_node_contains(args.np, dev->of_node);
+			of_node_put(args.np);
+		}
+		for (j = 0; (cell = of_parse_phandle(users[i], "nvmem-cells", j)); j++) {
+			relevant |= preflight_node_contains(cell, dev->of_node);
+			of_node_put(cell);
+		}
+		of_node_put(users[i]);
+	}
+	return relevant;
 }
 
 /* Supplier arrival/removal wakes even without a cpufreq/devfreq driver.
  * No framework calls on driver-core or NVMEM notification stacks.
  */
+static int preflight_nvmem_event(struct notifier_block *nb,
+				 unsigned long event, void *data)
+{
+	/* NVMEM payload is opaque. Re-read the mandatory cells on this hint;
+	 * retain every table/configuration, including on transient read errors.
+	 */
+	mutex_lock(&owner_lock);
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	return NOTIFY_OK;
+}
+
 static int preflight_supplier_event(struct notifier_block *nb,
 				    unsigned long event, void *data)
 {
+	if (!preflight_bus_relevant(data))
+		return NOTIFY_DONE;
 	mutex_lock(&owner_lock);
-	rebuild = true;
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
 	return NOTIFY_OK;
@@ -402,7 +497,7 @@ static struct notifier_block cpu_nb = {
 	.notifier_call = preflight_supplier_event,
 };
 static struct notifier_block nvmem_nb = {
-	.notifier_call = preflight_supplier_event,
+	.notifier_call = preflight_nvmem_event,
 };
 
 int mt6797_boot_barrier_supply(struct device_node *provider, const char *name)
@@ -435,7 +530,7 @@ static void detach(void *data)
 	attached &= ~BIT(a->id);
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
-	blocking_notifier_call_chain(&events, 0, NULL);
+	schedule_work(&notify_job);
 }
 
 /* An immutable endpoint cannot accidentally expose the engine's converter. */
@@ -474,7 +569,7 @@ int mt6797_provider_attach(struct device *dev, enum mt6797_rail_id id,
 	}
 	ret = devm_add_action_or_reset(dev, detach, a);
 	if (!ret)
-		blocking_notifier_call_chain(&events, 0, NULL);
+		schedule_work(&notify_job);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mt6797_provider_attach);
@@ -521,6 +616,19 @@ void mt6797_provider_status(struct mt6797_provider_status *status)
 }
 EXPORT_SYMBOL_GPL(mt6797_provider_status);
 
+/* A single delivery worker serializes coalesced snapshots. Callbacks run
+ * without owner or supplier locks, and may query status or queue work. They
+ * must not synchronously unregister themselves from this blocking chain.
+ * New invalidations during delivery queue another run (no lost wakeup).
+ */
+static void preflight_notify(struct work_struct *work)
+{
+	struct mt6797_provider_status status;
+
+	mt6797_provider_status(&status);
+	blocking_notifier_call_chain(&events, 0, &status);
+}
+
 int mt6797_provider_subscribe(struct notifier_block *nb)
 {
 	int ret = blocking_notifier_chain_register(&events, nb);
@@ -529,7 +637,7 @@ int mt6797_provider_subscribe(struct notifier_block *nb)
 	 * Callbacks may snapshot; they must not register/unregister subscribers.
 	 */
 	if (!ret)
-		blocking_notifier_call_chain(&events, 0, NULL);
+		schedule_work(&notify_job);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mt6797_provider_subscribe);
@@ -539,6 +647,85 @@ int mt6797_provider_unsubscribe(struct notifier_block *nb)
 	return blocking_notifier_chain_unregister(&events, nb);
 }
 EXPORT_SYMBOL_GPL(mt6797_provider_unsubscribe);
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+/* Focused framework fixture: replaces ONLY discovery, not measurement,
+ * notification, generation checking or publication. Never enabled on Gemini.
+ * The caller owns dynamic OPPs and clock references until stop returns.
+ */
+int mt6797_preflight_test_start(struct device *dev, struct clk *clk)
+{
+	int i, j, ret;
+
+	if (of_machine_is_compatible("planet,gemini-pda"))
+		return -EBUSY;
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		struct preflight_user *u = &pf_users[i];
+
+		u->dev = dev;
+		u->opp_nb.notifier_call = preflight_opp_event;
+		ret = dev_pm_opp_register_notifier(dev, &u->opp_nb);
+		if (ret)
+			goto fail;
+		u->opp_notify = true;
+		for (j = 0; j < 2; j++) {
+			u->clk[j] = clk;
+			u->clk_nb[j].notifier_call = preflight_clock_event;
+			ret = clk_notifier_register(clk, &u->clk_nb[j]);
+			if (ret)
+				goto fail;
+			u->clk_notify[j] = true;
+		}
+	}
+	mutex_lock(&owner_lock);
+	fixture_active = true;
+	preflight_active = true;
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	return 0;
+fail:
+	mt6797_preflight_test_stop();
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_start);
+
+void mt6797_preflight_test_flush(void)
+{
+	flush_work(&preflight_job);
+	flush_work(&notify_job);
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_flush);
+
+void mt6797_preflight_test_hint(struct device *dev)
+{
+	preflight_supplier_event(NULL, BUS_NOTIFY_ADD_DEVICE, dev);
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_hint);
+
+void mt6797_preflight_test_stop(void)
+{
+	int i, j;
+
+	mutex_lock(&owner_lock);
+	preflight_active = false;
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	cancel_work_sync(&preflight_job);
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		struct preflight_user *u = &pf_users[i];
+
+		for (j = 0; j < 2; j++)
+			if (u->clk_notify[j])
+				clk_notifier_unregister(u->clk[j], &u->clk_nb[j]);
+		if (u->opp_notify)
+			dev_pm_opp_unregister_notifier(u->dev, &u->opp_nb);
+		memset(u, 0, sizeof(*u));
+	}
+	fixture_active = false;
+	flush_work(&notify_job);
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_stop);
+#endif
 
 static int __init mt6797_provider_init(void)
 {
@@ -577,10 +764,12 @@ static void __exit mt6797_provider_exit(void)
 	}
 	mutex_lock(&owner_lock);
 	preflight_active = false;
+	stopping = true;
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
 	cancel_work_sync(&preflight_job);
 	preflight_release();
+	cancel_work_sync(&notify_job);
 	of_node_put(rails[0]);
 	of_node_put(rails[1]);
 }
