@@ -12,6 +12,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/regulator/consumer.h>
+#include <linux/regulator/mt6797.h>
 
 struct mtk_ccifreq_platform_data {
 	int min_volt_shift;
@@ -315,9 +316,9 @@ static int mtk_ccifreq_probe(struct platform_device *pdev)
 	unsigned long rate, opp_volt;
 	int ret;
 
-	/* The registry prepares clocks/OPPs independently of this consumer. */
+	/* Handover and secure unwind precede the still-closed Phase3 gate. */
 	if (of_machine_is_compatible("planet,gemini-pda"))
-		return -EPROBE_DEFER;
+		return mt6797_consumer_bind_gate(dev, 2);
 
 	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)

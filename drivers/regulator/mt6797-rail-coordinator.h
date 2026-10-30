@@ -54,4 +54,7 @@ int mt6797_rail_prepare(struct mt6797_rail_coordinator *c, u64 generation,
 		       const int floor[MT6797_RAIL_USERS]);
 int mt6797_rail_vote(struct mt6797_rail_coordinator *c, u64 generation,
 		    unsigned int user, int uv);
+int mt6797_rail_replace(struct mt6797_rail_coordinator *c, u64 generation,
+		       unsigned int user, int request,
+		       const int required[MT6797_RAIL_USERS]);
 #endif

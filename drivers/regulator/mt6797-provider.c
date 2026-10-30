@@ -10,9 +10,13 @@
 #include <linux/workqueue.h>
 #include <linux/of.h>
 #include <linux/slab.h>
+#include <linux/regulator/mt6797.h>
 #include "mt6797-provider.h"
 
 static DEFINE_MUTEX(owner_lock);
+/* Serializes reference acquisition/replacement, never taken by notifiers. */
+static DEFINE_MUTEX(transaction_lock);
+static struct device *consumer_owner[MT6797_RAIL_USERS];
 static struct mt6797_rail_coordinator owner = {
 	.lock = __MUTEX_INITIALIZER(owner.lock),
 };
@@ -397,8 +401,10 @@ static int preflight_measure(struct mt6797_preflight_result *r)
  * obtained before locking any table; no framework calls occur in conversion.
  * The normal CPU/CCI drivers remain gated, including after success.
  */
-static int preflight_convert(struct preflight_user *users,
-			     struct mt6797_preflight_result *r)
+static int preflight_transaction(struct preflight_user *users,
+				 struct mt6797_preflight_result *r,
+				 int user, struct device *consumer,
+				 int request, bool returning)
 {
 	struct opp_table *tables[MT6797_RAIL_USERS] = {};
 	int floor[MT6797_RAIL_USERS];
@@ -438,8 +444,22 @@ static int preflight_convert(struct preflight_user *users,
 	if (!preflight_active || supplier_revoked || r->generation != preflight.generation ||
 	    r->provider_generation != owner.generation)
 		ret = -ESTALE;
-	else
+	else if (user < 0)
 		ret = mt6797_rail_prepare(&owner, r->provider_generation, floor);
+	else if (consumer_owner[user] && consumer_owner[user] != consumer)
+		ret = -EBUSY;
+	else if (returning && !consumer_owner[user])
+		ret = -ENOENT;
+	else {
+		ret = mt6797_rail_replace(&owner, r->provider_generation, user,
+			returning ? max(floor[user], 1040000) : request, floor);
+		if (!ret) {
+			if (returning)
+				consumer_owner[user] = NULL;
+			else
+				consumer_owner[user] = consumer;
+		}
+	}
 	mutex_unlock(&owner_lock);
 out:
 	while (locked)
@@ -454,14 +474,73 @@ out:
 	return ret;
 }
 
+static int preflight_convert(struct preflight_user *users,
+			     struct mt6797_preflight_result *r)
+{
+	return preflight_transaction(users, r, -1, NULL, 0, false);
+}
+
+/* The device reference belongs to the registry until successful return. A
+ * failed bind may discard its local state without destroying this protection.
+ */
+static int consumer_handover(struct device *dev, unsigned int user,
+			    bool returning)
+{
+	struct mt6797_preflight_result result;
+	bool owned;
+	int request, ret;
+
+	if (!dev || user >= MT6797_RAIL_USERS)
+		return -EINVAL;
+	mutex_lock(&transaction_lock);
+	mutex_lock(&owner_lock);
+	result = preflight;
+	owned = consumer_owner[user] == dev;
+	ret = !preflight_active || supplier_revoked ? -EPROBE_DEFER : result.error;
+	mutex_unlock(&owner_lock);
+	if (ret)
+		goto out;
+	if (pf_users[user].dev != dev) {
+		ret = -EINVAL;
+		goto out;
+	}
+	request = max_t(unsigned long, 1040000,
+			max(result.uv[user][0], result.uv[user][1]));
+	if (!returning && !owned)
+		get_device(dev);
+	ret = preflight_transaction(pf_users, &result, user, dev, request, returning);
+	if ((!returning && !owned && ret) || (returning && !ret))
+		put_device(dev);
+out:
+	mutex_unlock(&transaction_lock);
+	return ret;
+}
+
+int mt6797_consumer_bind_gate(struct device *dev, unsigned int user)
+{
+	int ret;
+
+	ret = consumer_handover(dev, user, false);
+	if (ret)
+		return ret;
+	/* Phase3 rollback/accounting/thermal contracts are not admitted. Exercise
+	 * balanced bind unwind, retaining the owner if secure return fails.
+	 */
+	ret = consumer_handover(dev, user, true);
+	return ret ?: -EAGAIN;
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_bind_gate);
+
 static void preflight_work(struct work_struct *work)
 {
 	struct mt6797_preflight_result result = {};
 	int ret;
 
+	mutex_lock(&transaction_lock);
 	mutex_lock(&owner_lock);
 	if (!preflight_active) {
 		mutex_unlock(&owner_lock);
+		mutex_unlock(&transaction_lock);
 		return;
 	}
 	result.generation = preflight.generation;
@@ -498,6 +577,7 @@ static void preflight_work(struct work_struct *work)
 		schedule_work(&notify_job);
 	}
 	mutex_unlock(&owner_lock);
+	mutex_unlock(&transaction_lock);
 }
 
 /* Match consumer nodes and their clock/NVMEM supplier ancestry. No device
@@ -686,9 +766,17 @@ EXPORT_SYMBOL_GPL(mt6797_provider_sample);
 
 void mt6797_provider_status(struct mt6797_provider_status *status)
 {
+	int i;
+
 	mutex_lock(&owner_lock);
 	mt6797_rail_status(&owner, &status->engine);
 	status->converted = status->engine.ready && !preflight.error;
+	status->adopted = 0;
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		if (consumer_owner[i])
+			status->adopted |= BIT(i);
+	status->admission = status->converted ? MT6797_ADMISSION_PHASE3_BLOCKED :
+		MT6797_ADMISSION_PROTECTED;
 	status->proc_min_uv = status->converted ? 1040000 : 0;
 	status->proc_max_uv = status->converted ? 1200000 : 0;
 	status->fixed_sram_uv = status->converted ? 1200000 : 0;
@@ -756,6 +844,26 @@ int mt6797_preflight_test_convert(struct device **dev, struct clk *clk,
 	return preflight_convert(users, result);
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_convert);
+
+int mt6797_preflight_test_handover(struct device **dev, struct clk *clk,
+		struct mt6797_preflight_result *result, unsigned int user,
+		int request, bool returning)
+{
+	struct preflight_user users[MT6797_RAIL_USERS] = {};
+	int i;
+
+	if (of_machine_is_compatible("planet,gemini-pda"))
+		return -EPERM;
+	if (user >= MT6797_RAIL_USERS)
+		return -EINVAL;
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		users[i].dev = dev[i];
+		users[i].clk[0] = clk;
+		users[i].clk[1] = clk;
+	}
+	return preflight_transaction(users, result, user, dev[user], request, returning);
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_handover);
 
 int mt6797_preflight_test_start(struct device *dev, struct clk *clk)
 {
@@ -825,6 +933,10 @@ void mt6797_preflight_test_stop(void)
 			dev_pm_opp_unregister_notifier(u->dev, &u->opp_nb);
 		memset(u, 0, sizeof(*u));
 	}
+	mutex_lock(&owner_lock);
+	/* Fixture transactions borrow devices; production retains references. */
+	memset(consumer_owner, 0, sizeof(consumer_owner));
+	mutex_unlock(&owner_lock);
 	fixture_active = false;
 	flush_work(&notify_job);
 }
@@ -837,6 +949,8 @@ EXPORT_SYMBOL_GPL(mt6797_preflight_test_stop);
  */
 static void preflight_shutdown(void)
 {
+	int i;
+
 	mutex_lock(&owner_lock);
 	preflight_active = false;
 	stopping = true;
@@ -850,7 +964,19 @@ static void preflight_shutdown(void)
 		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
 	sources = 0;
 	cancel_delayed_work_sync(&preflight_job);
+	mutex_lock(&transaction_lock);
 	preflight_release();
+	/* Raw providers depend on this module: shutdown follows their detach. */
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		struct device *dev;
+
+		mutex_lock(&owner_lock);
+		dev = consumer_owner[i];
+		consumer_owner[i] = NULL;
+		mutex_unlock(&owner_lock);
+		put_device(dev);
+	}
+	mutex_unlock(&transaction_lock);
 	cancel_work_sync(&notify_job);
 }
 

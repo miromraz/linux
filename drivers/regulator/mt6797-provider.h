@@ -18,12 +18,19 @@ struct mt6797_preflight_result {
 	int rail_uv[MT6797_RAILS];
 };
 
+enum mt6797_admission {
+	MT6797_ADMISSION_PROTECTED,
+	MT6797_ADMISSION_PHASE3_BLOCKED,
+};
+
 /* Events are hints to take a fresh snapshot, never admission tokens. */
 struct mt6797_provider_status {
 	struct mt6797_rail_status engine;
 	unsigned long attached;
 	int readiness;
 	bool converted;
+	unsigned long adopted;
+	enum mt6797_admission admission;
 	/* Informational final policy, zero until conversion is verified. */
 	int proc_min_uv, proc_max_uv, fixed_sram_uv;
 	struct mt6797_preflight_result preflight;
@@ -40,6 +47,9 @@ int mt6797_provider_sample(u64 generation, int uv[MT6797_RAILS]);
 void mt6797_provider_status(struct mt6797_provider_status *status);
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 struct clk;
+int mt6797_preflight_test_handover(struct device **dev, struct clk *clk,
+		struct mt6797_preflight_result *result, unsigned int user,
+		int request, bool returning);
 int mt6797_preflight_test_convert(struct device **dev, struct clk *clk,
 				  struct mt6797_preflight_result *result);
 int mt6797_preflight_test_init_failure(int fail_after, void (*step)(void));

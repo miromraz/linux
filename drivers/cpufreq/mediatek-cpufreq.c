@@ -16,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/regulator/consumer.h>
+#include <linux/regulator/mt6797.h>
 #include <linux/units.h>
 
 struct mtk_cpufreq_platform_data {
@@ -469,9 +470,9 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 	unsigned long rate;
 	int ret;
 
-	/* The registry owns Gemini shared OPPs until consumer adoption exists. */
+	/* Handover and secure unwind precede the still-closed Phase3 gate. */
 	if (cpu < 8 && of_machine_is_compatible("planet,gemini-pda"))
-		return -EPROBE_DEFER;
+		return mt6797_consumer_bind_gate(get_cpu_device(cpu / 4 * 4), cpu / 4);
 
 	cpu_dev = get_cpu_device(cpu);
 	if (!cpu_dev)

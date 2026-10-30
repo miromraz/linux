@@ -691,7 +691,7 @@ struct conversion_fixture {
 	struct platform_device *dev[3], *rail[2];
 	struct clk *clk;
 	int uv[2], writes, fail_write;
-	bool started;
+	bool started, commit_error;
 };
 
 struct conversion_endpoint {
@@ -711,8 +711,11 @@ static int conversion_write(void *data, int uv)
 	struct conversion_endpoint *e = data;
 	struct conversion_fixture *f = e->fixture;
 
-	if (++f->writes == f->fail_write)
+	if (++f->writes == f->fail_write) {
+		if (f->commit_error)
+			f->uv[e->id] = uv;
 		return -EIO;
+	}
 	f->uv[e->id] = uv;
 	KUNIT_EXPECT_GE(f->test, f->uv[0], 1040000);
 	KUNIT_EXPECT_LE(f->test, f->uv[0], f->uv[1]);
@@ -800,12 +803,45 @@ static void production_conversion(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, status.readiness, -EAGAIN);
 	for (i = 0; i < 3; i++)
 		KUNIT_EXPECT_EQ(test, status.engine.floor[i], 1040000);
+	/* Each real user request selects the actual 10 mV grid. Return must
+	 * install the reserved live/intermediate requirement before ownership
+	 * disappears. Repeating return proves the ownership state changed.
+	 */
+	for (i = 0; i < 3; i++) {
+		KUNIT_ASSERT_EQ(test, mt6797_preflight_test_handover(dev, f->clk,
+			&status.preflight, i, 1111000, false), 0);
+		KUNIT_EXPECT_EQ(test, f->uv[0], 1120000);
+		mt6797_provider_status(&status);
+		KUNIT_EXPECT_EQ(test, status.adopted, BIT(i));
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_handover(dev, f->clk,
+			&status.preflight, i, 1030000, false), -EINVAL);
+		KUNIT_ASSERT_EQ(test, mt6797_preflight_test_handover(dev, f->clk,
+			&status.preflight, i, 0, true), 0);
+		KUNIT_EXPECT_EQ(test, f->uv[0], 1040000);
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_handover(dev, f->clk,
+			&status.preflight, i, 0, true), -ENOENT);
+	}
 	writes = f->writes;
 	KUNIT_ASSERT_EQ(test, dev_pm_opp_disable(dev[1], 100), 0);
 	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_convert(dev, f->clk,
 		&status.preflight), -ERANGE);
 	KUNIT_EXPECT_EQ(test, f->writes, writes);
 	KUNIT_ASSERT_EQ(test, dev_pm_opp_enable(dev[1], 100), 0);
+	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_handover(dev, f->clk,
+		&status.preflight, 2, 1111000, false), 0);
+	f->fail_write = f->writes + 1;
+	f->commit_error = true;
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_handover(dev, f->clk,
+		&status.preflight, 2, 0, true), -EIO);
+	mt6797_provider_status(&status);
+	KUNIT_EXPECT_EQ(test, status.adopted, BIT(2));
+	KUNIT_EXPECT_EQ(test, status.engine.floor[2], 1111000);
+	KUNIT_EXPECT_EQ(test, f->uv[0], 1040000);
+	KUNIT_EXPECT_TRUE(test, status.engine.fault);
+	writes = f->writes;
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_handover(dev, f->clk,
+		&status.preflight, 2, 0, true), -EBUSY);
+	KUNIT_EXPECT_EQ(test, f->writes, writes);
 	platform_device_unregister(f->rail[1]);
 	f->rail[1] = NULL;
 	f->uv[1] = 1100000;
@@ -830,7 +866,7 @@ static void production_conversion(struct kunit *test)
 	mt6797_provider_status(&status);
 	KUNIT_EXPECT_TRUE(test, status.engine.fault);
 	KUNIT_EXPECT_FALSE(test, status.converted);
-	KUNIT_EXPECT_EQ(test, status.engine.floor[2], 1040000);
+	KUNIT_EXPECT_EQ(test, status.engine.floor[2], 1111000);
 	KUNIT_EXPECT_EQ(test, status.readiness, -EAGAIN);
 }
 

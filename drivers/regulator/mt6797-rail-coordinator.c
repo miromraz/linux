@@ -207,4 +207,68 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mt6797_rail_vote);
+
+/* The caller reserves every live/intermediate clock and OPP table throughout
+ * this transaction. A lowered request is legal only against that fresh proof.
+ * Failure retains accounting, even if an uncertain physical write committed.
+ */
+int mt6797_rail_replace(struct mt6797_rail_coordinator *c, u64 generation,
+		       unsigned int user, int request,
+		       const int required[MT6797_RAIL_USERS])
+{
+	int old[MT6797_RAIL_USERS], actual[2], target = PROC_MIN;
+	int i, ret;
+
+	if (user >= MT6797_RAIL_USERS || request < PROC_MIN || request > RAIL_MAX)
+		return -EINVAL;
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		if (required[i] <= 0 || required[i] > RAIL_MAX)
+			return -ERANGE;
+	if (request < required[user])
+		return -ERANGE;
+	mutex_lock(&c->lock);
+	if (generation != c->generation) {
+		ret = -ESTALE;
+		goto out;
+	}
+	if (!c->converted || !c->requirements_valid || c->fault) {
+		ret = -EBUSY;
+		goto out;
+	}
+	memcpy(old, c->floor, sizeof(old));
+	ret = mt6797_rail_read(c, actual);
+	if (ret || actual[MT6797_SRAM] != RAIL_MAX) {
+		ret = ret ?: -ERANGE;
+		c->requirements_valid = false;
+		goto retain;
+	}
+	/* Never repair a newly discovered undervolted live clock by raising it. */
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		if (actual[MT6797_PROC] < required[i]) {
+			ret = -ERANGE;
+			c->requirements_valid = false;
+			goto retain;
+		}
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		target = max(target, i == user ? request : max(old[i], required[i]));
+	target = roundup(target, c->rail[MT6797_PROC].step_uv);
+	/* Raised requests are committed only after readback, so validate each
+	 * physical step against the live requirements rather than the new vote.
+	 */
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		c->floor[i] = i == user ? min(request, old[i]) : max(old[i], required[i]);
+	ret = mt6797_rail_step(c, MT6797_PROC, target, actual);
+	if (!ret) {
+		c->floor[user] = request;
+		goto out;
+	}
+retain:
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		c->floor[i] = max(old[i], required[i]);
+out:
+	mutex_unlock(&c->lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_rail_replace);
 MODULE_LICENSE("GPL");
