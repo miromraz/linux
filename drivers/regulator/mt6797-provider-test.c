@@ -723,7 +723,7 @@ struct conversion_fixture {
 	struct kunit *test;
 	struct conversion_endpoint *replacement;
 	struct platform_device *dev[3], *rail[2];
-	struct clk *clk;
+	struct clk *clk, *pll;
 	int uv[2], writes, fail_write;
 	int live_floor[3];
 	bool started, commit_error;
@@ -775,6 +775,8 @@ static void conversion_cleanup(void *data)
 		}
 	if (!IS_ERR_OR_NULL(f->clk))
 		clk_unregister_fixed_rate(f->clk);
+	if (!IS_ERR_OR_NULL(f->pll))
+		clk_unregister_fixed_rate(f->pll);
 }
 
 /* Production reservation, registry and engine, real CCF/OPP. Discovery and
@@ -838,7 +840,9 @@ static void ownership_run(struct kunit *test, int failure)
 	f->uv[0] = 1120000;
 	f->uv[1] = 1150000;
 	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, conversion_cleanup, f), 0);
-	f->clk = clk_register_fixed_rate(NULL, "conversion-clock", NULL, 0, 100);
+	f->pll = clk_register_fixed_rate(NULL, "conversion-pll", NULL, 0, 100);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(f->pll));
+	f->clk = clk_register_fixed_rate(NULL, "conversion-clock", "conversion-pll", 0, 100);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(f->clk));
 	for (i = 0; i < 3; i++) {
 		f->dev[i] = platform_device_register_simple("conversion-user", i, NULL, 0);
@@ -914,6 +918,57 @@ static void ownership_run(struct kunit *test, int failure)
 		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(i, &guard, &vote), 2);
 		KUNIT_EXPECT_EQ(test, vote, f->live_floor[i]);
 		KUNIT_EXPECT_EQ(test, kref_read(&dev[i]->kobj.kref), refs[i] + 1);
+	}
+	/* Exercise the exported token against the owned regulator and all three
+	 * real OPP tables. The fixed clock covers no-change completion; changing
+	 * rate callback integration has a separate mutable-clock fixture.
+	 */
+	if (!failure) {
+		struct mt6797_consumer_txn *txn, *nested;
+		struct mt6797_txn_outcome outcome;
+		int writes = f->writes;
+
+		for (int stage = 1; stage <= 11; stage++) {
+			mt6797_txn_test_fail_acquisition(stage);
+			KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_begin(0, cookie[0],
+								100, &txn), -EIO);
+			KUNIT_EXPECT_PTR_EQ(test, txn, NULL);
+			mt6797_txn_test_fail_acquisition(0);
+			KUNIT_EXPECT_EQ(test, dev_pm_opp_disable(dev[0], 100), 0);
+			KUNIT_EXPECT_EQ(test, dev_pm_opp_enable(dev[0], 100), 0);
+			mt6797_preflight_test_flush();
+			KUNIT_EXPECT_EQ(test, kref_read(&dev[0]->kobj.kref), refs[0] + 1);
+		}
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_begin(2, cookie[2], 100, &txn),
+				-EINVAL);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_begin(0, 0xdead, 100, &txn),
+				-ESTALE);
+		/* Failure after CCF acquisition and one snapshot: exact unwind is
+		 * checked by the successful retry and subsequent OPP mutation.
+		 */
+		KUNIT_EXPECT_LT(test, mt6797_consumer_txn_begin(1, cookie[1], 999, &txn), 0);
+		KUNIT_ASSERT_EQ(test, mt6797_consumer_txn_begin(0, cookie[0], 100, &txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_begin(1, cookie[1], 100, &nested),
+				-EBUSY);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_release(0, cookie[0]), -EBUSY);
+		KUNIT_EXPECT_EQ(test, dev_pm_opp_disable(dev[0], 100), -EBUSY);
+		KUNIT_EXPECT_EQ(test, dev_pm_opp_get_opp_count(dev[0]), 1);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_prepare(txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_switch(txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_finish(txn, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, outcome.path, MT6797_TXN_TARGET);
+		KUNIT_EXPECT_EQ(test, outcome.retained_uv, f->live_floor[0]);
+		KUNIT_EXPECT_EQ(test, f->writes, writes + 2);
+		KUNIT_ASSERT_EQ(test, mt6797_consumer_txn_begin(1, cookie[1], 100, &txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_prepare(txn), 0);
+		mt6797_preflight_test_event();
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_validate(txn), -ESTALE);
+		mt6797_consumer_txn_abort(txn, -ESTALE, &outcome);
+		KUNIT_EXPECT_FALSE(test, outcome.retry);
+		KUNIT_EXPECT_EQ(test, outcome.retained_uv, f->live_floor[1]);
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(1, &guard, &vote), 2);
+		KUNIT_EXPECT_EQ(test, vote, f->live_floor[1]);
+		mt6797_preflight_test_flush();
 	}
 	KUNIT_EXPECT_EQ(test, mt6797_consumer_recover(), -EBUSY);
 	KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[0], 0, &shared), 0);
@@ -1113,7 +1168,9 @@ static void production_conversion(struct kunit *test)
 	f->uv[0] = 1040000;
 	f->uv[1] = 1100000;
 	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, conversion_cleanup, f), 0);
-	f->clk = clk_register_fixed_rate(NULL, "conversion-clock", NULL, 0, 100);
+	f->pll = clk_register_fixed_rate(NULL, "conversion-pll", NULL, 0, 100);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(f->pll));
+	f->clk = clk_register_fixed_rate(NULL, "conversion-clock", "conversion-pll", 0, 100);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(f->clk));
 	for (i = 0; i < 3; i++) {
 		f->dev[i] = platform_device_register_simple("conversion-user", i, NULL, 0);
@@ -1370,6 +1427,161 @@ device:
 	platform_device_unregister(pdev);
 }
 
+static int token_release_thread(void *arg)
+{
+	struct ownership_thread *t = arg;
+
+	complete(t->start);
+	t->ret = mt6797_consumer_release(t->user, t->cookie);
+	complete(&t->done);
+	return 0;
+}
+
+static void operational_clock_token(struct kunit *test, struct clk *mux,
+		struct clk *pll, struct clk *inter, unsigned int user)
+{
+	struct conversion_fixture *f;
+	struct conversion_endpoint *e;
+	struct mt6797_provider_status status;
+	struct mt6797_consumer_txn *txn;
+	struct mt6797_txn_outcome outcome;
+	struct reserved_clock_listener listener = {
+		.nb.notifier_call = reserved_clock_event, .test = test,
+	};
+	struct device *dev[3];
+	struct clk *clocks[3][2] = { { inter, inter }, { inter, inter }, { inter, inter } };
+	struct clk *external;
+	struct task_struct *remover, *releaser;
+	struct detach_task detach = {};
+	struct ownership_thread release = {};
+	struct completion cancelled, started;
+	struct notifier_block veto = { .notifier_call = transition_veto };
+	u64 cookie;
+	int i, ret;
+
+	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	e = kunit_kcalloc(test, 2, sizeof(*e), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_NOT_NULL(test, e);
+	clocks[user][0] = mux;
+	f->test = test;
+	f->uv[0] = 1120000;
+	f->uv[1] = 1200000;
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, conversion_cleanup, f), 0);
+	KUNIT_ASSERT_EQ(test, clk_set_parent(mux, inter), 0);
+	KUNIT_ASSERT_EQ(test, clk_set_rate(pll, 100), 0);
+	KUNIT_ASSERT_EQ(test, clk_set_parent(mux, pll), 0);
+	for (i = 0; i < 3; i++) {
+		f->live_floor[i] = 1040000;
+		f->dev[i] = platform_device_register_simple("token-user", i, NULL, 0);
+		KUNIT_ASSERT_FALSE(test, IS_ERR(f->dev[i]));
+		dev[i] = &f->dev[i]->dev;
+		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev[i], 100, 1040000), 0);
+		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev[i], 200, 1100000), 0);
+		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev[i], 300, 1080000), 0);
+	}
+	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_start_clocks(dev, clocks), 0);
+	f->started = true;
+	for (i = 0; i < 2; i++) {
+		struct mt6797_rail_io io = {
+			.read = conversion_read, .write = conversion_write,
+			.data = &e[i], .step_uv = i ? 25000 : 10000,
+		};
+
+		e[i].fixture = f;
+		e[i].id = i;
+		f->rail[i] = platform_device_register_simple("token-rail", i, NULL, 0);
+		KUNIT_ASSERT_FALSE(test, IS_ERR(f->rail[i]));
+		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&f->rail[i]->dev, i, &io), 0);
+	}
+	mt6797_preflight_test_flush();
+	mt6797_provider_status(&status);
+	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_convert(dev, inter, &status.preflight), 0);
+	mt6797_preflight_test_flush();
+	KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[user], user, &cookie), 0);
+	listener.dev = dev[user];
+	KUNIT_ASSERT_EQ(test, clk_notifier_register(mux, &listener.nb), 0);
+	external = clk_hw_get_clk(__clk_get_hw(pll), NULL);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(external));
+	KUNIT_ASSERT_EQ(test, clk_notifier_register(mux, &veto), 0);
+	ret = mt6797_consumer_txn_begin(user, cookie, 200, &txn);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (!ret) {
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_prepare(txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_switch(txn), -EBUSY);
+		mt6797_consumer_txn_abort(txn, -EBUSY, &outcome);
+		KUNIT_EXPECT_EQ(test, outcome.path, MT6797_TXN_OLD);
+		KUNIT_EXPECT_TRUE(test, outcome.retry);
+		KUNIT_EXPECT_EQ(test, outcome.retained_uv, 1100000);
+	}
+	clk_notifier_unregister(mux, &veto);
+	mt6797_preflight_test_flush();
+	ret = mt6797_consumer_txn_begin(user, cookie, 200, &txn);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (!ret) {
+		KUNIT_EXPECT_EQ(test, clk_set_rate(external, 200), -EBUSY);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_prepare(txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_switch(txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_validate(txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_finish(txn, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, outcome.path, MT6797_TXN_TARGET);
+		KUNIT_EXPECT_EQ(test, outcome.rate, 200UL);
+		KUNIT_EXPECT_EQ(test, outcome.retained_uv, 1100000);
+		KUNIT_EXPECT_GT(test, listener.events, 0U);
+	}
+	/* A second operation uses the same owned vote and ends at a lower OPP. */
+	mt6797_preflight_test_flush();
+	ret = mt6797_consumer_txn_begin(user, cookie, 100, &txn);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (!ret) {
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_prepare(txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_switch(txn), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_finish(txn, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, outcome.rate, 100UL);
+		KUNIT_EXPECT_EQ(test, outcome.retained_uv, 1080000);
+	}
+	clk_put(external);
+	clk_notifier_unregister(mux, &listener.nb);
+	mt6797_preflight_test_flush();
+	KUNIT_ASSERT_EQ(test, mt6797_consumer_txn_begin(user, cookie, 200, &txn), 0);
+	KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_prepare(txn), 0);
+	init_completion(&started);
+	init_completion(&release.done);
+	release.start = &started;
+	release.user = user;
+	release.cookie = cookie;
+	releaser = kthread_run(token_release_thread, &release, "token-release");
+	if (IS_ERR(releaser)) {
+		mt6797_consumer_txn_abort(txn, PTR_ERR(releaser), &outcome);
+		KUNIT_FAIL(test, "release thread creation failed");
+		return;
+	}
+	wait_for_completion(&started);
+	KUNIT_EXPECT_FALSE(test, completion_done(&release.done));
+	init_completion(&cancelled);
+	init_completion(&detach.started);
+	init_completion(&detach.done);
+	detach.dev = f->rail[1];
+	mt6797_preflight_test_drain_observer(&cancelled);
+	remover = kthread_run(detach_thread, &detach, "token-detach");
+	if (!IS_ERR(remover)) {
+		wait_for_completion(&cancelled);
+		KUNIT_EXPECT_FALSE(test, completion_done(&detach.done));
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_validate(txn), -ESTALE);
+	}
+	mt6797_consumer_txn_abort(txn, -ESTALE, &outcome);
+	KUNIT_EXPECT_EQ(test, outcome.retained_uv, 1100000);
+	if (!IS_ERR(remover)) {
+		wait_for_completion(&detach.done);
+		kthread_stop(remover);
+		f->rail[1] = NULL;
+	}
+	wait_for_completion(&release.done);
+	kthread_stop(releaser);
+	mt6797_preflight_test_drain_observer(NULL);
+	kunit_release_action(test, conversion_cleanup, f);
+}
+
 static void transition_clock_contract(struct kunit *test)
 {
 	struct lifecycle_clock *pll, *inter;
@@ -1445,6 +1657,8 @@ static void transition_clock_contract(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 100), 0);
 	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 100UL);
 	reserved_clock_contract(test, &mux->hw, &pll->hw, &inter->hw);
+	operational_clock_token(test, output, source, temporary, 0);
+	operational_clock_token(test, output, source, temporary, 1);
 }
 
 struct requirements_listener {

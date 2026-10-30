@@ -51,6 +51,7 @@ void mt6797_provider_status(struct mt6797_provider_status *status);
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 struct clk;
 struct completion;
+void mt6797_txn_test_fail_acquisition(unsigned int stage);
 int mt6797_preflight_test_hold_provider(u64 generation, struct completion *entered,
 		struct completion *resume);
 void mt6797_preflight_test_drain_observer(struct completion *cancelled);
@@ -64,6 +65,7 @@ void mt6797_preflight_test_event(void);
 int mt6797_preflight_test_regulator_notifier(unsigned int user,
 					    struct notifier_block *nb, bool add);
 int mt6797_preflight_test_requests(unsigned int user, int *guard, int *vote);
+int mt6797_preflight_test_start_clocks(struct device **dev, struct clk *clocks[3][2]);
 int mt6797_preflight_test_start_users(struct device **dev, struct clk *clk);
 int mt6797_preflight_test_start(struct device *dev, struct clk *clk);
 void mt6797_preflight_test_stop(void);

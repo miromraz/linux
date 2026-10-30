@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Production conversion ownership; consumer admission remains blocked. */
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/cpu.h>
 #include <linux/module.h>
 #include <linux/nvmem-consumer.h>
@@ -24,6 +25,22 @@
 static DEFINE_MUTEX(owner_lock);
 /* Serializes reference acquisition/replacement, never taken by notifiers. */
 static DEFINE_MUTEX(transaction_lock);
+/* transaction_lock owns the token, owner_lock protects cancellation/scope. */
+struct mt6797_consumer_txn {
+	struct task_struct *task;
+	unsigned int user, claims;
+	u64 generation;
+	struct clk *clocks[7], *pll;
+	struct dev_pm_opp_requirements *requirements[MT6797_RAIL_USERS];
+	struct dev_pm_opp_requirement selected[MT6797_RAIL_USERS][3];
+	int floor[MT6797_RAIL_USERS], retained_uv;
+	unsigned long target, rate, scope_old, scope_new;
+	bool cancelled, scope, expected[MT6797_RAIL_USERS][2];
+	bool prepared, use, failed;
+	enum mt6797_txn_path path;
+};
+static struct mt6797_consumer_txn *active_txn;
+
 static struct device *consumer_owner[MT6797_RAIL_USERS];
 static struct mt6797_rail_coordinator owner = {
 	.lock = __MUTEX_INITIALIZER(owner.lock),
@@ -75,7 +92,7 @@ static struct completion *drain_observer;
 static struct mt6797_preflight_result preflight = { .error = -EPROBE_DEFER };
 
 /* owner_lock serializes invalidation with publication and status snapshots. */
-static void preflight_invalidate(void)
+static void preflight_hint(void)
 {
 	preflight.generation++;
 	preflight.error = -EAGAIN;
@@ -84,6 +101,13 @@ static void preflight_invalidate(void)
 		schedule_work(&notify_job);
 	if (preflight_active)
 		mod_delayed_work(system_wq, &preflight_job, 0);
+}
+
+static void preflight_invalidate(void)
+{
+	if (active_txn)
+		active_txn->cancelled = true;
+	preflight_hint();
 }
 
 /* Accept either spelling, but never accept conflicting or broken aliases. */
@@ -229,7 +253,7 @@ out:
  */
 struct preflight_user {
 	struct device *dev;
-	struct clk *clk[2];
+	struct clk *clk[2], *pll;
 	struct notifier_block opp_nb, clk_nb[2];
 	int token;
 	bool table, opp_notify, clk_notify[2];
@@ -249,12 +273,25 @@ static int preflight_opp_event(struct notifier_block *nb,
 static int preflight_clock_event(struct notifier_block *nb,
 				 unsigned long event, void *data)
 {
+	struct mt6797_consumer_txn *t;
+	struct clk_notifier_data *change = data;
+	bool expected = false;
+	int i, j;
+
 	mutex_lock(&owner_lock);
-	/* clk_get_rate() in the worker takes CCF's prepare lock, so it waits
-	 * for this operation even when CCF emits no POST after a failed write.
-	 * Generation validation rejects a new PRE during measurement.
-	 */
-	preflight_invalidate();
+	t = active_txn;
+	if (t && t->scope && t->task == current &&
+	    (event == PRE_RATE_CHANGE || event == POST_RATE_CHANGE ||
+	     event == ABORT_RATE_CHANGE) &&
+	    change->old_rate == t->scope_old && change->new_rate == t->scope_new)
+		for (i = 0; i < MT6797_RAIL_USERS; i++)
+			for (j = 0; j < 2; j++)
+				if (nb == &pf_users[i].clk_nb[j] && t->expected[i][j])
+					expected = true;
+	if (expected)
+		preflight_hint();
+	else
+		preflight_invalidate();
 	mutex_unlock(&owner_lock);
 	return NOTIFY_OK;
 }
@@ -273,6 +310,7 @@ static void preflight_release(void)
 				clk_notifier_unregister(u->clk[j], &u->clk_nb[j]);
 			clk_put(u->clk[j]);
 		}
+		clk_put(u->pll);
 		if (u->opp_notify)
 			dev_pm_opp_unregister_notifier(u->dev, &u->opp_nb);
 		if (u->table)
@@ -375,6 +413,18 @@ static int preflight_acquire(void)
 			if (ret)
 				return ret;
 			u->clk_notify[j] = true;
+		}
+		if (i < 2 && !u->pll) {
+			struct clk *parent = clk_get_parent(u->clk[0]);
+
+			if (parent) {
+				u->pll = clk_hw_get_clk(__clk_get_hw(parent), NULL);
+				if (IS_ERR(u->pll)) {
+					ret = PTR_ERR(u->pll);
+					u->pll = NULL;
+					return ret;
+				}
+			}
 		}
 	}
 	return 0;
@@ -490,12 +540,17 @@ static int preflight_transaction(struct preflight_user *users,
 				 int user, struct device *consumer,
 				 int request, bool returning);
 
+static int txn_write(struct mt6797_consumer_txn *t, int request);
+
 static int lease_write(struct regulator_dev *rdev, int min_uv, int max_uv,
 		       unsigned int *selector)
 {
 	struct protected_supply *s = rdev_get_drvdata(rdev);
 	int ret;
 
+	if (active_txn && current == active_txn->task)
+		return s - protected == active_txn->user ?
+			txn_write(active_txn, min_uv) : -ESTALE;
 	if (current != lease_task || !lease_snapshot || lease_setting)
 		return -ESTALE;
 	/* Regulator notifications run without clock/table reservations. Take a
@@ -842,6 +897,13 @@ int mt6797_consumer_acquire(struct device *dev, unsigned int user, u64 *cookie)
 	lease = kzalloc_obj(*lease);
 	if (!lease)
 		return -ENOMEM;
+	mutex_lock(&owner_lock);
+	if (active_txn && active_txn->task == current) {
+		mutex_unlock(&owner_lock);
+		kfree(lease);
+		return -EBUSY;
+	}
+	mutex_unlock(&owner_lock);
 	mutex_lock(&transaction_lock);
 	s = &protected[user];
 	mutex_lock(&owner_lock);
@@ -895,6 +957,12 @@ int mt6797_consumer_release(unsigned int user, u64 cookie)
 
 	if (user >= MT6797_RAIL_USERS || !cookie)
 		return -EINVAL;
+	mutex_lock(&owner_lock);
+	if (active_txn && active_txn->task == current) {
+		mutex_unlock(&owner_lock);
+		return -EBUSY;
+	}
+	mutex_unlock(&owner_lock);
 	mutex_lock(&transaction_lock);
 	s = &protected[user];
 	list_for_each_entry(lease, &consumer_leases, node)
@@ -931,6 +999,415 @@ out:
 }
 EXPORT_SYMBOL_GPL(mt6797_consumer_release);
 
+/* owner_lock serializes cancellation with each raw authorization, including
+ * final reduction. No framework notifier runs with this mutex held.
+ */
+static int txn_check(struct mt6797_consumer_txn *t)
+{
+	return active_txn != t || t->task != current || t->cancelled || t->failed ||
+		detaching || supplier_revoked || t->generation != owner.generation ?
+		-ESTALE : 0;
+}
+
+int mt6797_consumer_txn_validate(struct mt6797_consumer_txn *t)
+{
+	int ret;
+
+	mutex_lock(&owner_lock);
+	ret = txn_check(t);
+	mutex_unlock(&owner_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_txn_validate);
+
+static int txn_write(struct mt6797_consumer_txn *t, int request)
+{
+	int ret;
+
+	mutex_lock(&owner_lock);
+	ret = txn_check(t);
+	if (!ret)
+		ret = mt6797_rail_replace(&owner, t->generation, t->user,
+					  request, t->floor);
+	if (ret)
+		t->failed = true;
+	mutex_unlock(&owner_lock);
+	return ret;
+}
+
+static void txn_dispose(struct mt6797_consumer_txn *t)
+{
+	int i;
+
+	/* Keep transaction_lock through notification-producing final puts.
+	 * Notifiers only take owner_lock; recursive begin uses trylock.
+	 */
+	while (t->claims)
+		clk_rate_exclusive_put(t->clocks[--t->claims]);
+	if (t->pll)
+		clk_put(t->pll);
+	for (i = MT6797_RAIL_USERS - 1; i >= 0; i--)
+		if (t->requirements[i])
+			dev_pm_opp_requirements_put(t->requirements[i]);
+	mutex_lock(&owner_lock);
+	active_txn = NULL;
+	mutex_unlock(&owner_lock);
+	if (t->use)
+		provider_use_put();
+	kfree(t);
+	mutex_unlock(&transaction_lock);
+}
+
+static int txn_claim(struct mt6797_consumer_txn *t, struct clk *clk)
+{
+	int i, ret;
+
+	/* Deduplicate handles, not cores: distinct owner handles have independent
+	 * CCF protection. pf_users owns these handles until transaction unlock.
+	 */
+	for (i = 0; i < t->claims; i++)
+		if (t->clocks[i] == clk)
+			return 0;
+	ret = clk_rate_exclusive_get(clk);
+	if (!ret)
+		t->clocks[t->claims++] = clk;
+	return ret;
+}
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+static unsigned int txn_fail_stage;
+
+void mt6797_txn_test_fail_acquisition(unsigned int stage)
+{
+	txn_fail_stage = stage;
+}
+EXPORT_SYMBOL_GPL(mt6797_txn_test_fail_acquisition);
+#endif
+
+static int txn_acquired(void)
+{
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+	if (txn_fail_stage && !--txn_fail_stage)
+		return -EIO;
+#endif
+	return 0;
+}
+
+int mt6797_consumer_txn_begin(unsigned int user, u64 cookie,
+		unsigned long target_hz, struct mt6797_consumer_txn **txn)
+{
+	struct mt6797_consumer_txn *t;
+	struct consumer_lease *lease;
+	struct opp_table *tables[MT6797_RAIL_USERS] = {};
+	unsigned long rates[MT6797_RAIL_USERS][9];
+	unsigned int count[MT6797_RAIL_USERS] = {};
+	unsigned int table_id[MT6797_RAIL_USERS], offset[MT6797_RAIL_USERS];
+	unsigned int nr = 0;
+	struct mt6797_rail_status status;
+	struct clk *parent;
+	bool found = false;
+	int i, j, ret, uv[MT6797_RAILS];
+
+	if (!txn || user > 1 || !cookie || !target_hz)
+		return -EINVAL;
+	*txn = NULL;
+	if (!mutex_trylock(&transaction_lock))
+		return -EBUSY;
+	t = kzalloc_obj(*t);
+	if (!t) {
+		mutex_unlock(&transaction_lock);
+		return -ENOMEM;
+	}
+	t->task = current;
+	t->user = user;
+	t->target = target_hz;
+	t->path = MT6797_TXN_OLD;
+	list_for_each_entry(lease, &consumer_leases, node)
+		if (lease->user == user && lease->cookie == cookie)
+			found = true;
+	mutex_lock(&owner_lock);
+	ret = !found || !protected[user].vote || !protected[user].users ||
+		consumer_owner[user] != pf_users[user].dev ? -ESTALE : 0;
+	if (!ret && (!preflight_active || supplier_revoked || preflight.error))
+		ret = -EAGAIN;
+	t->generation = owner.generation;
+	active_txn = t;
+	mutex_unlock(&owner_lock);
+	if (ret)
+		goto fail;
+	ret = provider_use_get(t->generation);
+	if (ret)
+		goto fail;
+	t->use = true;
+	ret = txn_acquired();
+	if (ret)
+		goto fail;
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		for (j = 0; j < 2; j++) {
+			ret = txn_claim(t, pf_users[i].clk[j]);
+			if (!ret)
+				ret = txn_acquired();
+			if (ret)
+				goto fail;
+		}
+	parent = clk_get_parent(pf_users[user].clk[0]);
+	if (!parent || !pf_users[user].pll ||
+	    !clk_is_match(parent, pf_users[user].pll) ||
+	    clk_is_match(parent, pf_users[user].clk[1])) {
+		ret = -EINVAL;
+		goto fail;
+	}
+	t->pll = clk_hw_get_clk(__clk_get_hw(parent), NULL);
+	if (IS_ERR(t->pll)) {
+		ret = PTR_ERR(t->pll);
+		t->pll = NULL;
+		goto fail;
+	}
+	ret = txn_claim(t, t->pll);
+	if (!ret)
+		ret = txn_acquired();
+	if (ret)
+		goto fail;
+	/* Collect and deduplicate shared tables before reserving any of them. */
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		struct opp_table *table = dev_pm_opp_get_opp_table(pf_users[i].dev);
+		unsigned int id, at;
+
+		if (IS_ERR(table)) {
+			ret = PTR_ERR(table);
+			goto fail;
+		}
+		for (id = 0; id < nr; id++)
+			if (tables[id] == table)
+				break;
+		if (id == nr)
+			tables[nr++] = table;
+		else
+			dev_pm_opp_put_opp_table(table);
+		table_id[i] = id;
+		at = count[id];
+		offset[i] = at;
+		rates[id][at] = clk_get_rate(pf_users[i].clk[0]);
+		rates[id][at + 1] = clk_get_rate(pf_users[i].clk[1]);
+		rates[id][at + 2] = i == user ? target_hz : rates[id][at];
+		count[id] += 3;
+		if (i == user)
+			t->rate = rates[id][at];
+	}
+	for (i = 0; i < nr; i++) {
+		ret = dev_pm_opp_requirements_get(tables[i], rates[i], count[i],
+						&t->requirements[i]);
+		dev_pm_opp_put_opp_table(tables[i]);
+		tables[i] = NULL;
+		if (!ret)
+			ret = txn_acquired();
+		if (ret)
+			goto fail;
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		for (j = 0; j < 3; j++)
+			dev_pm_opp_requirements_read(t->requirements[table_id[i]],
+						offset[i] + j, &t->selected[i][j]);
+		t->floor[i] = max(t->selected[i][0].uv, t->selected[i][1].uv);
+	}
+	ret = mt6797_consumer_txn_validate(t);
+	if (ret)
+		goto fail;
+	ret = mt6797_provider_sample(t->generation, uv);
+	if (ret)
+		goto fail;
+	mt6797_rail_status(&owner, &status);
+	if (uv[MT6797_SRAM] != 1200000 || status.fault) {
+		ret = -ERANGE;
+		goto fail;
+	}
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		if (uv[MT6797_PROC] < t->floor[i] || status.floor[i] < t->floor[i]) {
+			ret = -ERANGE;
+			goto fail;
+		}
+	if (protected[user].vote_uv < t->floor[user]) {
+		ret = -ERANGE;
+		goto fail;
+	}
+	t->retained_uv = protected[user].vote_uv;
+	*txn = t;
+	return 0;
+fail:
+	for (i = 0; i < nr; i++)
+		if (tables[i])
+			dev_pm_opp_put_opp_table(tables[i]);
+	txn_dispose(t);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_txn_begin);
+
+static int txn_vote(struct mt6797_consumer_txn *t, int uv)
+{
+	struct protected_supply *s = &protected[t->user];
+	int ret = mt6797_consumer_txn_validate(t);
+
+	if (ret)
+		return ret;
+	ret = regulator_set_voltage(s->vote, uv, 1200000);
+	if (!ret) {
+		s->vote_uv = uv;
+		t->retained_uv = uv;
+		/* Core may skip an identical request; still validate the live rail. */
+		ret = txn_write(t, uv);
+	}
+	return ret;
+}
+
+int mt6797_consumer_txn_prepare(struct mt6797_consumer_txn *t)
+{
+	int ret = txn_vote(t, max_t(int, t->retained_uv,
+		max_t(int, t->floor[t->user], t->selected[t->user][2].uv)));
+
+	if (!ret)
+		t->prepared = true;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_txn_prepare);
+
+/* Only the selected mux may emit events for these explicit calls. No blanket
+ * task exemption: peer/intermediate events or mismatched rates cancel.
+ */
+static int txn_scope(struct mt6797_consumer_txn *t, unsigned long old,
+		     unsigned long new)
+{
+	int i, j, ret;
+
+	for (i = 0; i < MT6797_RAIL_USERS; i++)
+		for (j = 0; j < 2; j++)
+			t->expected[i][j] = clk_is_match(pf_users[i].clk[j],
+						       pf_users[t->user].clk[0]);
+	mutex_lock(&owner_lock);
+	ret = txn_check(t);
+	if (!ret) {
+		t->scope_old = old;
+		t->scope_new = new;
+		t->scope = true;
+	}
+	mutex_unlock(&owner_lock);
+	return ret;
+}
+
+static void txn_unscope(struct mt6797_consumer_txn *t)
+{
+	mutex_lock(&owner_lock);
+	t->scope = false;
+	mutex_unlock(&owner_lock);
+}
+
+int mt6797_consumer_txn_switch(struct mt6797_consumer_txn *t)
+{
+	struct clk *mux = pf_users[t->user].clk[0];
+	struct clk *intermediate = pf_users[t->user].clk[1];
+	unsigned long rate = clk_get_rate(intermediate);
+	bool attempted = false;
+	long rounded;
+	int ret;
+
+	if (!t->prepared || t->path != MT6797_TXN_OLD)
+		return -EINVAL;
+	if (t->target == t->rate) {
+		ret = mt6797_consumer_txn_validate(t);
+		if (!ret)
+			t->path = MT6797_TXN_TARGET;
+		return ret;
+	}
+	ret = txn_scope(t, t->rate, rate);
+	if (ret)
+		return ret;
+	ret = clk_set_parent_tracked(mux, intermediate, &attempted);
+	txn_unscope(t);
+	if (ret) {
+		if (attempted)
+			t->path = MT6797_TXN_UNKNOWN;
+		return ret < 0 ? ret : -EBUSY;
+	}
+	t->path = MT6797_TXN_UNKNOWN;
+	if (!clk_is_match(clk_get_parent(mux), intermediate) || clk_get_rate(mux) != rate)
+		return -EIO;
+	t->path = MT6797_TXN_INTERMEDIATE;
+	t->rate = rate;
+	ret = mt6797_consumer_txn_validate(t);
+	if (ret)
+		return ret;
+	/* Active mux ancestry no longer protects the PLL. Round ONLY here. */
+	rounded = clk_round_rate(t->pll, t->target);
+	if (rounded <= 0 || rounded > t->selected[t->user][2].rate)
+		return -ERANGE;
+	ret = txn_scope(t, clk_get_rate(t->pll), rounded);
+	if (ret)
+		return ret;
+	ret = clk_set_rate(t->pll, rounded);
+	txn_unscope(t);
+	if (ret || clk_get_rate(t->pll) != rounded)
+		return ret ?: -EIO;
+	ret = txn_scope(t, rate, rounded);
+	if (ret)
+		return ret;
+	ret = clk_set_parent_tracked(mux, t->pll, &attempted);
+	txn_unscope(t);
+	if (ret) {
+		if (attempted)
+			t->path = MT6797_TXN_UNKNOWN;
+		return ret < 0 ? ret : -EBUSY;
+	}
+	t->path = MT6797_TXN_UNKNOWN;
+	if (!clk_is_match(clk_get_parent(mux), t->pll) || clk_get_rate(mux) != rounded)
+		return -EIO;
+	t->path = MT6797_TXN_TARGET;
+	t->rate = rounded;
+	return mt6797_consumer_txn_validate(t);
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_txn_switch);
+
+void mt6797_consumer_txn_abort(struct mt6797_consumer_txn *t, int error,
+		struct mt6797_txn_outcome *outcome)
+{
+	*outcome = (struct mt6797_txn_outcome) {
+		.error = error, .retained_uv = t->retained_uv, .path = t->path,
+		.rate = t->path == MT6797_TXN_UNKNOWN ? 0 : t->rate,
+		.retry = !t->cancelled && !t->failed && t->path == MT6797_TXN_OLD,
+	};
+	if (t->path == MT6797_TXN_UNKNOWN) {
+		/* Cached CCF topology cannot prove a failed mux write's outcome.
+		 * Block fresh reservations and guard retirement until recovery.
+		 */
+		mutex_lock(&owner_lock);
+		supplier_revoked = true;
+		mutex_lock(&owner.lock);
+		owner.fault = true;
+		owner.requirements_valid = false;
+		mutex_unlock(&owner.lock);
+		preflight_invalidate();
+		mutex_unlock(&owner_lock);
+	}
+	/* Never withdraw ownership or attempt voltage rollback on abort. */
+	txn_dispose(t);
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_txn_abort);
+
+int mt6797_consumer_txn_finish(struct mt6797_consumer_txn *t,
+		struct mt6797_txn_outcome *outcome)
+{
+	int ret = mt6797_consumer_txn_validate(t);
+
+	if (!ret && t->path != MT6797_TXN_TARGET)
+		ret = -EINVAL;
+	if (!ret) {
+		t->floor[t->user] = max(t->selected[t->user][1].uv,
+				       t->selected[t->user][2].uv);
+		ret = txn_vote(t, max(t->floor[t->user], 1040000));
+	}
+	mt6797_consumer_txn_abort(t, ret, outcome);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_txn_finish);
+
 /* Explicit process-context retry after all local leases have been released.
  * No consumed cookie is revived. Device replacement is rejected by acquire;
  * existing OPP configuration/adjustments remain owned by the registry.
@@ -940,6 +1417,12 @@ int mt6797_consumer_recover(void)
 	struct mt6797_preflight_result result;
 	int i, ret = 0;
 
+	mutex_lock(&owner_lock);
+	if (active_txn && active_txn->task == current) {
+		mutex_unlock(&owner_lock);
+		return -EBUSY;
+	}
+	mutex_unlock(&owner_lock);
 	mutex_lock(&transaction_lock);
 	for (i = 0; i < MT6797_RAIL_USERS; i++) {
 		if (protected[i].users) {
@@ -1416,7 +1899,7 @@ int mt6797_preflight_test_requests(unsigned int user, int *guard, int *vote)
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_requests);
 
-int mt6797_preflight_test_start_users(struct device **dev, struct clk *clk)
+int mt6797_preflight_test_start_clocks(struct device **dev, struct clk *clocks[3][2])
 {
 	int i, j, ret;
 
@@ -1439,12 +1922,24 @@ int mt6797_preflight_test_start_users(struct device **dev, struct clk *clk)
 			goto fail;
 		u->opp_notify = true;
 		for (j = 0; j < 2; j++) {
-			u->clk[j] = clk;
+			u->clk[j] = clocks[i][j];
 			u->clk_nb[j].notifier_call = preflight_clock_event;
-			ret = clk_notifier_register(clk, &u->clk_nb[j]);
+			ret = clk_notifier_register(u->clk[j], &u->clk_nb[j]);
 			if (ret)
 				goto fail;
 			u->clk_notify[j] = true;
+		}
+		if (i < 2 && !u->pll) {
+			struct clk *parent = clk_get_parent(u->clk[0]);
+
+			if (parent) {
+				u->pll = clk_hw_get_clk(__clk_get_hw(parent), NULL);
+				if (IS_ERR(u->pll)) {
+					ret = PTR_ERR(u->pll);
+					u->pll = NULL;
+					goto fail;
+				}
+			}
 		}
 	}
 	mutex_lock(&owner_lock);
@@ -1456,6 +1951,14 @@ int mt6797_preflight_test_start_users(struct device **dev, struct clk *clk)
 fail:
 	mt6797_preflight_test_stop();
 	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_start_clocks);
+
+int mt6797_preflight_test_start_users(struct device **dev, struct clk *clk)
+{
+	struct clk *clocks[3][2] = { { clk, clk }, { clk, clk }, { clk, clk } };
+
+	return mt6797_preflight_test_start_clocks(dev, clocks);
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_start_users);
 
@@ -1495,6 +1998,7 @@ void mt6797_preflight_test_stop(void)
 		for (j = 0; j < 2; j++)
 			if (u->clk_notify[j])
 				clk_notifier_unregister(u->clk[j], &u->clk_nb[j]);
+		clk_put(u->pll);
 		if (u->opp_notify)
 			dev_pm_opp_unregister_notifier(u->dev, &u->opp_nb);
 		memset(u, 0, sizeof(*u));
