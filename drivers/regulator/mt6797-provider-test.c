@@ -1320,7 +1320,8 @@ static int transition_reparent(struct clk_hw *hw, u8 index)
 	m->parent = index;
 	if (m->live_floor)
 		*m->live_floor = index ? 1080000 :
-			(*m->pll_rate == 200000 ? 1100000 : 1040000);
+			(*m->pll_rate > 100000 && *m->pll_rate <= 200000 ?
+			 1100000 : 1040000);
 	return fail ? -EIO : 0;
 }
 
@@ -2069,12 +2070,38 @@ static int chain_event(struct notifier_block *nb, unsigned long event, void *dat
 	return NOTIFY_BAD;
 }
 
+/* Full-chain fixture modes; cpu_callback_case() receives them offset by
+ * CHAIN_CALLBACK_BASE so they do not collide with the plain failure codes.
+ */
+enum chain_mode {
+	CHAIN_IMMEDIATE,	/* four alternating immediate up/down transitions */
+	CHAIN_CCI_PLL_FAIL,	/* CCI PLL set fails after parking */
+	CHAIN_CCI_MUX_FAIL,	/* CCI reconnect write fails -> unknown */
+	CHAIN_CCI_ROUND_DOWN,	/* CCI PLL rounds 200 down to 150 kHz */
+	CHAIN_CPU_VETO,		/* CPU CCF veto returns EBUSY */
+	CHAIN_PEER_OPP_REMOVE,	/* peer OPP removed after the CPU switch */
+	CHAIN_CPU_MUX_FAIL,	/* CPU reconnect write fails -> unknown */
+	CHAIN_CPU_ROUND_DOWN,	/* CPU PLL rounds 200 down to 150 kHz */
+	CHAIN_CPU_PLL_FAIL,	/* CPU PLL set fails, parks at intermediate */
+	CHAIN_MODE_COUNT,
+};
+
+#define CHAIN_CALLBACK_BASE 21
+
 struct initialized_chain {
 	struct kunit *test;
 	struct platform_device *pdev;
 	void *info;
-	struct clk *clock;
+	struct clk *clock, *cpu_clock;
+	unsigned int mode;
+	struct device *peer;
 };
+
+static void chain_peer_remove(void *arg, int phase)
+{
+	if (phase == 1)
+		dev_pm_opp_remove(arg, 200000);
+}
 
 static void initialized_chain_run(void *arg)
 {
@@ -2129,11 +2156,111 @@ static void initialized_chain_run(void *arg)
 	if (ret)
 		goto unregister;
 	cpu_b = true;
+	if (f->mode >= CHAIN_CPU_MUX_FAIL) {
+		struct clk_hw *mhw = __clk_get_hw(f->cpu_clock);
+		struct transition_mux *mux = container_of(mhw, struct transition_mux, hw);
+		struct clk_hw *phw = clk_hw_get_parent_by_index(mhw, 0);
+		struct lifecycle_clock *pll = container_of(phw, struct lifecycle_clock, hw);
+
+		if (f->mode == CHAIN_CPU_MUX_FAIL)
+			mux->fail_at = mux->writes + 2;
+		pll->round_down = f->mode == CHAIN_CPU_ROUND_DOWN;
+		pll->fail = f->mode == CHAIN_CPU_PLL_FAIL;
+		ret = mt6797_test_cpu_target(f->info, 200, &outcome);
+		KUNIT_EXPECT_EQ(test, ret, f->mode == CHAIN_CPU_ROUND_DOWN ? 0 : -EIO);
+		KUNIT_EXPECT_EQ(test, outcome.rate,
+				f->mode == CHAIN_CPU_MUX_FAIL ? 0UL :
+				f->mode == CHAIN_CPU_ROUND_DOWN ? 150000UL : 300000UL);
+		KUNIT_EXPECT_EQ(test, df->previous_freq,
+				f->mode == CHAIN_CPU_MUX_FAIL ? 100000UL :
+				f->mode == CHAIN_CPU_ROUND_DOWN ? 150000UL : 300000UL);
+		if (f->mode == CHAIN_CPU_MUX_FAIL) {
+			KUNIT_EXPECT_EQ(test, a.terminal, 1U);
+			KUNIT_EXPECT_EQ(test, b.terminal, 1U);
+			KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), -EIO);
+		}
+		mux->fail_at = 0;
+		pll->round_down = false;
+		pll->fail = false;
+		goto unregister;
+	}
+	if (f->mode == CHAIN_PEER_OPP_REMOVE) {
+		/* Remove an unreserved peer OPP after the CPU clock switch.
+		 * Hold only the worker so external invalidation cannot race away.
+		 */
+		mt6797_preflight_test_hold(true);
+		mt6797_test_cpu_hook(chain_peer_remove, f->peer);
+		ret = mt6797_test_cpu_target(f->info, 200, &outcome);
+		mt6797_test_cpu_hook(NULL, NULL);
+		KUNIT_EXPECT_EQ(test, ret, -ESTALE);
+		KUNIT_EXPECT_EQ(test, df->outcome.error, -EAGAIN);
+		KUNIT_EXPECT_EQ(test, df->previous_freq, 100000UL);
+		KUNIT_EXPECT_EQ(test, dev_pm_opp_get_opp_count(f->peer), 2);
+		mt6797_preflight_test_hold(false);
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), -EIO);
+		KUNIT_EXPECT_EQ(test, df->outcome.error, 0);
+		KUNIT_EXPECT_EQ(test, df->previous_freq, 200000UL);
+		goto unregister;
+	}
+	if (f->mode == CHAIN_CPU_VETO) {
+		struct notifier_block veto = { .notifier_call = transition_veto };
+
+		ret = clk_notifier_register(f->cpu_clock, &veto);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		if (ret)
+			goto unregister;
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), -EBUSY);
+		KUNIT_EXPECT_TRUE(test, outcome.retry);
+		KUNIT_EXPECT_EQ(test, outcome.rate, 100000UL);
+		KUNIT_EXPECT_EQ(test, df->previous_freq, 100000UL);
+		clk_notifier_unregister(f->cpu_clock, &veto);
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, df->outcome.error, 0);
+		KUNIT_EXPECT_EQ(test, df->previous_freq, 200000UL);
+		goto unregister;
+	}
+	if (f->mode != CHAIN_IMMEDIATE) {
+		struct clk_hw *mhw = __clk_get_hw(f->clock);
+		struct transition_mux *mux = container_of(mhw, struct transition_mux, hw);
+		struct clk_hw *phw = clk_hw_get_parent_by_index(mhw, 0);
+		struct lifecycle_clock *pll = container_of(phw, struct lifecycle_clock, hw);
+		unsigned long rate = f->mode == CHAIN_CCI_PLL_FAIL ? 300000 :
+				     f->mode == CHAIN_CCI_MUX_FAIL ? 0 : 150000;
+
+		pll->fail = f->mode == CHAIN_CCI_PLL_FAIL;
+		if (f->mode == CHAIN_CCI_MUX_FAIL)
+			mux->fail_at = mux->writes + 2;
+		pll->round_down = f->mode == CHAIN_CCI_ROUND_DOWN;
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, outcome.rate, 200000UL);
+		KUNIT_EXPECT_EQ(test, df->outcome.error,
+				f->mode == CHAIN_CCI_ROUND_DOWN ? 0 : -EIO);
+		KUNIT_EXPECT_EQ(test, df->previous_freq, rate);
+		KUNIT_EXPECT_EQ(test, listeners[0].rate, rate);
+		KUNIT_EXPECT_EQ(test, listeners[1].rate, rate);
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 2);
+		KUNIT_EXPECT_EQ(test, vote, 1100000);
+		if (f->mode != CHAIN_CCI_ROUND_DOWN) {
+			KUNIT_EXPECT_FALSE(test, df->outcome.retry);
+			/* Real core retry must observe the driver's fault latch. */
+			mutex_lock(&df->lock);
+			KUNIT_EXPECT_EQ(test, update_devfreq(df), -EIO);
+			mutex_unlock(&df->lock);
+			KUNIT_EXPECT_EQ(test, df->previous_freq, rate);
+		}
+		pll->fail = false;
+		pll->round_down = false;
+		mux->fail_at = 0;
+		kunit_info(test, "initialized CPU%u CCI mode=%u rate=%lu error=%d vote=%d\n",
+			   mt6797_test_cpu_policy(f->info)->cpu, f->mode,
+			   df->previous_freq, df->outcome.error, vote);
+		goto unregister;
+	}
 	for (i = 0; i < 4; i++) {
 		unsigned int khz = i % 2 ? 100 : 200;
 		unsigned long expected = i % 2 ? 100000 : 200000;
 
-		mt6797_preflight_test_flush();
 		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, khz, &outcome), 0);
 		KUNIT_EXPECT_EQ(test, outcome.rate, expected);
 		kunit_info(test, "CPU%u request=%u CPU=%lu/%d CCI=%lu/%d retry=%d stats=%u\n",
@@ -2163,20 +2290,27 @@ static void initialized_chain_run(void *arg)
 		KUNIT_EXPECT_EQ(test, ret, 0);
 		if (ret)
 			goto unregister;
-		mt6797_preflight_test_flush();
 		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), 0);
 		KUNIT_EXPECT_EQ(test, df->outcome.error, -EBUSY);
 		KUNIT_EXPECT_TRUE(test, df->outcome.retry);
 		KUNIT_EXPECT_EQ(test, df->previous_freq, 100000UL);
 		KUNIT_EXPECT_EQ(test, df->stats.total_trans, transitions);
 		clk_notifier_unregister(f->clock, &veto);
-		mt6797_preflight_test_flush();
 		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), 0);
 		KUNIT_EXPECT_EQ(test, df->outcome.error, 0);
 		KUNIT_EXPECT_EQ(test, df->previous_freq, 200000UL);
 		KUNIT_EXPECT_EQ(test, df->stats.total_trans, ++transitions);
 	}
 unregister:
+	/* Observers own waiter tasks even when the first outcome is terminal. */
+	if (!IS_ERR_OR_NULL(a.task)) {
+		KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&a.waiter.done, HZ), 0UL);
+		kthread_stop(a.task);
+	}
+	if (!IS_ERR_OR_NULL(b.task)) {
+		KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&b.waiter.done, HZ), 0UL);
+		kthread_stop(b.task);
+	}
 	while (registered)
 		devfreq_unregister_notifier(df, &listeners[--registered].nb,
 					    DEVFREQ_OUTCOME_NOTIFIER);
@@ -2188,11 +2322,13 @@ remove:
 	mt6797_test_cci_fini(f->pdev);
 	mt6797_preflight_test_flush();
 	KUNIT_EXPECT_PTR_EQ(test, platform_get_drvdata(f->pdev), NULL);
-	KUNIT_EXPECT_EQ(test, kref_read(&f->pdev->dev.kobj.kref), refs);
+	KUNIT_EXPECT_EQ(test, kref_read(&f->pdev->dev.kobj.kref),
+			refs + (f->mode == CHAIN_CCI_MUX_FAIL || f->mode == CHAIN_CPU_MUX_FAIL));
 	KUNIT_EXPECT_EQ(test, __clk_get_enable_count(f->clock), enables);
-	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 1);
-	kunit_info(test, "initialized owned CPU%u -> passive -> CCI: four transitions attempted; child drained\n",
-		   mt6797_test_cpu_policy(f->info)->cpu);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote),
+			f->mode == CHAIN_CCI_MUX_FAIL || f->mode == CHAIN_CPU_MUX_FAIL ? 2 : 1);
+	kunit_info(test, "initialized owned CPU%u -> passive -> CCI mode=%u: child drained\n",
+		   mt6797_test_cpu_policy(f->info)->cpu, f->mode);
 }
 
 /* Independent CCI CCF tree: CPU and child must not share a PLL claim. */
@@ -2265,7 +2401,7 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	KUNIT_ASSERT_NOT_NULL(test, f);
 	KUNIT_ASSERT_NOT_NULL(test, e);
 	clocks[user][0] = mux;
-	if (failure == 21) {
+	if (failure >= CHAIN_CALLBACK_BASE) {
 		chain_clock(test, inter, &child);
 		KUNIT_ASSERT_NOT_NULL(test, child);
 		clocks[2][0] = child;
@@ -2317,12 +2453,25 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 		goto cleanup;
 	policy = mt6797_test_cpu_policy(info);
 	old_cookie = mt6797_test_cpu_cookie(info);
-	if (failure == 21) {
+	if (failure >= CHAIN_CALLBACK_BASE) {
 		struct clk_lookup *cci, *temporary;
 		struct initialized_chain chain = {
 			.test = test, .pdev = f->dev[2], .info = info, .clock = child,
+			.mode = failure - CHAIN_CALLBACK_BASE, .cpu_clock = mux,
+			.peer = dev[user ^ 1],
 		};
 
+		m->live_floor = &f->live_floor[user];
+		m->pll_rate = &p->rate;
+		{
+			struct clk_hw *cmhw = __clk_get_hw(child);
+			struct transition_mux *cm = container_of(cmhw, struct transition_mux, hw);
+			struct clk_hw *cphw = clk_hw_get_parent_by_index(cmhw, 0);
+			struct lifecycle_clock *cp = container_of(cphw, struct lifecycle_clock, hw);
+
+			cm->live_floor = &f->live_floor[2];
+			cm->pll_rate = &cp->rate;
+		}
 		cci = clkdev_create(child, "cci", "%s", dev_name(dev[2]));
 		temporary = clkdev_create(inter, "intermediate", "%s", dev_name(dev[2]));
 		KUNIT_EXPECT_NOT_NULL(test, cci);
@@ -2334,6 +2483,7 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 		if (cci)
 			clkdev_drop(cci);
 		mt6797_test_cpu_close(info);
+		m->live_floor = NULL;
 		goto cleanup;
 	}
 	observer.test = test;
@@ -2627,7 +2777,7 @@ cleanup:
 	kunit_release_action(test, conversion_cleanup, f);
 	if (child) {
 		struct clk_hw *hw = __clk_get_hw(child);
-		struct clk_hw *parent = clk_hw_get_parent(hw);
+		struct clk_hw *parent = clk_hw_get_parent_by_index(hw, 0);
 
 		kunit_release_action(test, transition_unregister, hw);
 		kunit_release_action(test, transition_unregister, parent);
@@ -2679,7 +2829,9 @@ static void transition_clock_fixture(struct kunit *test, bool fullchain)
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 	if (fullchain) {
 		for (unsigned int user = 0; user < 2; user++)
-			cpu_callback_case(test, output, source, temporary, user, 21);
+			for (unsigned int m = 0; m < CHAIN_MODE_COUNT; m++)
+				cpu_callback_case(test, output, source, temporary,
+						  user, CHAIN_CALLBACK_BASE + m);
 		return;
 	}
 #endif
