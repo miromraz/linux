@@ -122,18 +122,16 @@ static int get_target_freq_with_cpufreq(struct devfreq *devfreq,
 			continue;
 		ret = 0;
 		policy = cpufreq_cpu_get(cpu);
-		if (!policy) {
-			ret = -EINVAL;
-			continue;
-		}
+		if (!policy)
+			return -EINVAL;
 
 		parent_cpu_data = get_parent_cpu_data(p_data, policy);
 		if (!parent_cpu_data) {
 			cpufreq_cpu_put(policy);
-			continue;
+			return -EAGAIN;
 		}
 
-		if (parent_cpu_data->unknown) {
+		if (parent_cpu_data->unknown || READ_ONCE(policy->cur_unknown)) {
 			cpufreq_cpu_put(policy);
 			return -EIO;
 		}
@@ -376,7 +374,9 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 		parent_cpu_data->dev = cpu_dev;
 		parent_cpu_data->opp_table = opp_table;
 		parent_cpu_data->first_cpu = cpumask_first(policy->related_cpus);
-		parent_cpu_data->cur_freq = policy->cur;
+		/* A terminal policy's cur is history, never an initial observation. */
+		parent_cpu_data->unknown = READ_ONCE(policy->cur_unknown);
+		parent_cpu_data->cur_freq = parent_cpu_data->unknown ? 0 : policy->cur;
 		parent_cpu_data->min_freq = policy->cpuinfo.min_freq;
 		parent_cpu_data->max_freq = policy->cpuinfo.max_freq;
 
@@ -660,8 +660,51 @@ void mt6797_test_passive_registration(struct kunit *test, struct device *dev,
 	if (!ret) {
 		KUNIT_EXPECT_EQ(test, count, parents);
 		KUNIT_EXPECT_GT(test, f->calls, 0U);
-		KUNIT_EXPECT_EQ(test, devfreq_passive_event_handler(&f->df,
-								    DEVFREQ_GOV_STOP, NULL), 0);
+		mt6797_test_passive_hide_first(true);
+		mutex_lock(&f->df.lock);
+		count = f->calls;
+		KUNIT_EXPECT_EQ(test, devfreq_update_target(&f->df, 0), -EINVAL);
+		KUNIT_EXPECT_EQ(test, f->calls, count);
+		mt6797_test_passive_hide_first(false);
+		KUNIT_EXPECT_EQ(test, devfreq_update_target(&f->df, 0), 0);
+		cpu = list_first_entry(&f->data.cpu_data_list,
+				      struct devfreq_cpu_data, node);
+		list_del(&cpu->node);
+		KUNIT_EXPECT_EQ(test, devfreq_update_target(&f->df, 0), -EAGAIN);
+		list_add(&cpu->node, &f->data.cpu_data_list);
+		mutex_unlock(&f->df.lock);
+		{
+			struct cpufreq_policy *policy = cpufreq_cpu_get(0);
+			struct cpufreq_terminal terminal = { .policy = policy,
+				.error = -EIO, .protection_needed = true };
+			struct cpufreq_freqs freqs = { .policy = policy,
+				.old = policy->cur, .new = policy->cur };
+
+			count = f->calls;
+			policy->cur_unknown = true;
+			cpufreq_passive_notifier_call(&f->data.nb, CPUFREQ_TERMINAL,
+						      &terminal);
+			KUNIT_EXPECT_EQ(test, f->calls, count);
+			KUNIT_EXPECT_EQ(test, devfreq_passive_event_handler(&f->df,
+						DEVFREQ_GOV_STOP, NULL), 0);
+			KUNIT_EXPECT_EQ(test, devfreq_passive_event_handler(&f->df,
+						DEVFREQ_GOV_START, NULL), -EIO);
+			KUNIT_EXPECT_EQ(test, f->calls, count);
+			KUNIT_EXPECT_TRUE(test, list_empty(&f->data.cpu_data_list));
+			/* Fixture-authorized known policy; no production recovery API. */
+			policy->cur_unknown = false;
+			KUNIT_EXPECT_EQ(test, devfreq_passive_event_handler(&f->df,
+						DEVFREQ_GOV_START, NULL), 0);
+			cpufreq_passive_notifier_call(&f->data.nb, CPUFREQ_TERMINAL,
+						      &terminal);
+			count = f->calls;
+			cpufreq_passive_notifier_call(&f->data.nb, CPUFREQ_POSTCHANGE,
+						      &freqs);
+			KUNIT_EXPECT_EQ(test, f->calls, count + 1);
+			KUNIT_EXPECT_EQ(test, devfreq_passive_event_handler(&f->df,
+						DEVFREQ_GOV_STOP, NULL), 0);
+			cpufreq_cpu_put(policy);
+		}
 	} else {
 		KUNIT_EXPECT_EQ(test, count, 0U);
 		KUNIT_EXPECT_EQ(test, f->calls, 0U);

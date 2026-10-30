@@ -3251,6 +3251,18 @@ static int passive_policy_required(unsigned int cpu)
 	return 1;
 }
 
+/* Isolated fixture only: simulate policy disappearance after START. */
+void mt6797_test_passive_hide_first(bool hide)
+{
+	static struct cpufreq_policy *saved;
+	unsigned int cpu;
+
+	if (hide)
+		saved = per_cpu(cpufreq_cpu_data, 0);
+	for (cpu = 0; cpu < 4; cpu++)
+		per_cpu(cpufreq_cpu_data, cpu) = hide ? NULL : saved;
+}
+
 static void passive_registration_matrix(struct cpufreq_policy *policy)
 {
 	struct kunit *test = kunit_get_current_test();
@@ -3271,21 +3283,27 @@ static void passive_registration_matrix(struct cpufreq_policy *policy)
 	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev, 200000, 1100000), 0);
 	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(peer_dev, 100000, 1000000), 0);
 	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(peer_dev, 200000, 1100000), 0);
-	for (mode = 0; mode < 7; mode++) {
+	for (mode = 0; mode < 9; mode++) {
 		passive_test_mode = mode;
 		cpufreq_driver->policy_required = mode >= 5 ? NULL : passive_policy_required;
 		for_each_possible_cpu(cpu) {
 			struct cpufreq_policy *group = cpu < 4 ? policy : peer;
 
-			per_cpu(cpufreq_cpu_data, cpu) = cpu < 4 || mode == 0 || mode == 6 ?
+			per_cpu(cpufreq_cpu_data, cpu) = cpu < 4 || mode == 0 || mode >= 6 ?
 				group : NULL;
 			cpumask_set_cpu(cpu, group->related_cpus);
 			cpumask_set_cpu(cpu, group->cpus);
 		}
 		expected = mode < 2 || mode == 6 ? 0 :
 			mode == 3 ? -ENODEV : -EPROBE_DEFER;
+		if (mode >= 7) {
+			/* Initial START, then a new START after the preceding STOP. */
+			policy->cur_unknown = true;
+			expected = -EIO;
+		}
 		mt6797_test_passive_registration(test, dev, expected,
 						 mode == 0 || mode == 6 ? 2 : 1);
+		policy->cur_unknown = false;
 		for_each_possible_cpu(cpu)
 			per_cpu(cpufreq_cpu_data, cpu) = NULL;
 		cpumask_clear(policy->cpus);

@@ -26,6 +26,7 @@ int mt6797_test_cpu_reenter(void *data);
 struct device;
 void *mt6797_test_passive_open(struct device *dev, unsigned int cpu);
 void mt6797_test_passive_close(void *data);
+void mt6797_test_passive_hide_first(bool hide);
 void mt6797_test_passive_registration(struct kunit *test, struct device *dev,
 				      int expected, unsigned int parents);
 void mt6797_test_passive_fail(void *data, bool fail);
