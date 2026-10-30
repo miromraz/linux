@@ -211,5 +211,9 @@ preserved Linux system in 51 s with slot A active, both slots successful, `BootN
 consumed and `boot_b`/`misc` unchanged.
 
 The return depends on that maintainer-installed Android module; a stock Android
-install keeps booting slot B, and fastboot `--set-active=a` is then needed. The
-physical menu keypress itself was not tested; it runs the same load command.
+install keeps booting slot B, and fastboot `--set-active=a` is then needed.
+
+The physical menu was then tested: on a normal reboot, selecting "Android (slot B)"
+with Volume Down and Power booted LineageOS on slot B (adb answered, boot
+completed, slot A already active again). `adb reboot` returned to Linux in 42 s
+with slot A active, both slots successful and `boot_b`/`misc` unchanged.
