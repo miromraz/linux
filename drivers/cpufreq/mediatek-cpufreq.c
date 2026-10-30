@@ -302,7 +302,7 @@ static int mtk_cpufreq_owned_target(struct cpufreq_policy *policy,
 	ret = mtk_cpufreq_token_target(info, (unsigned long)freqs.new * 1000);
 	/* The token, claims and callback lock are gone before passive CCI. */
 	if (!info->current_freq) {
-		cpufreq_freq_transition_end_unknown(policy);
+		cpufreq_freq_transition_end_unknown(policy, ret);
 	} else {
 		freqs.new = info->current_freq / 1000;
 		/* end's error argument requests synthetic rollback, not errno
@@ -1019,8 +1019,35 @@ static unsigned int mtk_cpufreq_owned_get(unsigned int cpu)
 }
 
 /* Never use this descriptor for legacy SoCs or the unowned A72 path. */
+static int mtk_cpufreq_policy_required(unsigned int cpu)
+{
+	struct device *dev = get_cpu_device(cpu), *representative;
+	struct device_node *opp, *group;
+	int ret;
+
+	if (!dev || !dev->of_node)
+		return -EPROBE_DEFER;
+	if (cpu >= 8)
+		return 0;
+	representative = get_cpu_device(cpu / 4 * 4);
+	if (!representative || !representative->of_node)
+		return -EPROBE_DEFER;
+	if (!of_property_present(dev->of_node, "operating-points-v2") &&
+	    !of_property_present(representative->of_node, "operating-points-v2"))
+		return 0;
+	/* A partly described or cross-group topology is not an omitted group. */
+	opp = of_parse_phandle(dev->of_node, "operating-points-v2", 0);
+	group = of_parse_phandle(representative->of_node, "operating-points-v2", 0);
+	ret = opp && opp == group ? 1 : -EINVAL;
+	of_node_put(group);
+	of_node_put(opp);
+	return ret;
+}
+
 static struct cpufreq_driver mtk_cpufreq_owned_driver = {
-	.flags = CPUFREQ_ASYNC_NOTIFICATION | CPUFREQ_NEED_UPDATE_LIMITS |
+	.policy_required = mtk_cpufreq_policy_required,
+	.flags = CPUFREQ_TERMINAL_NOTIFICATION |
+		 CPUFREQ_ASYNC_NOTIFICATION | CPUFREQ_NEED_UPDATE_LIMITS |
 		 CPUFREQ_HAVE_GOVERNOR_PER_POLICY |
 		 CPUFREQ_IS_COOLING_DEV,
 	.verify = cpufreq_generic_frequency_table_verify,
@@ -1372,13 +1399,26 @@ struct cpufreq_policy *mt6797_test_cpu_policy(void *data)
 	return info->test_policy;
 }
 
+u64 mt6797_test_cpu_cookie(void *data)
+{
+	struct mtk_cpu_dvfs_info *info = data;
+
+	return info->rail_cookie;
+}
+
+void mt6797_test_cpu_release(void *data)
+{
+	mtk_cpu_dvfs_info_release(data);
+}
+
 void mt6797_test_cpu_close(void *data)
 {
 	struct mtk_cpu_dvfs_info *info = data;
 
 	mtk_cpufreq_exit(info->test_policy);
 	mt6797_test_policy_free(info->test_policy);
-	mtk_cpu_dvfs_info_release(info);
+	if (info->rail_cookie)
+		mtk_cpu_dvfs_info_release(info);
 	kfree(info);
 }
 #endif

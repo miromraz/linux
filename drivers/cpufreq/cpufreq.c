@@ -376,6 +376,10 @@ static void cpufreq_notify_post_transition(struct cpufreq_policy *policy,
 	cpufreq_notify_transition(policy, freqs, CPUFREQ_POSTCHANGE);
 }
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+static unsigned int test_transition_begins;
+#endif
+
 void cpufreq_freq_transition_begin(struct cpufreq_policy *policy,
 		struct cpufreq_freqs *freqs)
 {
@@ -406,6 +410,9 @@ wait:
 
 	spin_unlock(&policy->transition_lock);
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	test_transition_begins++;
+#endif
 	cpufreq_notify_transition(policy, freqs, CPUFREQ_PRECHANGE);
 }
 EXPORT_SYMBOL_GPL(cpufreq_freq_transition_begin);
@@ -433,17 +440,34 @@ EXPORT_SYMBOL_GPL(cpufreq_freq_transition_end);
 
 /*
  * Consume a driver-owned begin whose final hardware rate cannot be established.
- * No POST, reverse transition or scheduler rate can truthfully be supplied.
+ * TERMINAL disposes PRE resources without a numeric POST or reversal.
  * Keep cur as last-confirmed history, stop charging its stats, and require the
  * driver to contain the fault. This is not recovery or a successful transition.
  */
-void cpufreq_freq_transition_end_unknown(struct cpufreq_policy *policy)
+void cpufreq_freq_transition_end_unknown(struct cpufreq_policy *policy, int error)
 {
+	struct cpufreq_terminal terminal = {
+		.policy = policy, .error = error, .protection_needed = true,
+	};
+	struct notifier_block *nb;
+	int idx;
+
+	if (WARN_ON(!(cpufreq_driver->flags & CPUFREQ_TERMINAL_NOTIFICATION)))
+		return;
 	if (WARN_ON(!policy->transition_ongoing))
 		return;
 
 	policy->cur_unknown = true;
 	cpufreq_stats_record_transition(policy, 0);
+	/* Terminal disposal cannot be vetoed, even by a broken listener. */
+	idx = srcu_read_lock(&cpufreq_transition_notifier_list.srcu);
+	nb = srcu_dereference(cpufreq_transition_notifier_list.head,
+			      &cpufreq_transition_notifier_list.srcu);
+	while (nb) {
+		nb->notifier_call(nb, CPUFREQ_TERMINAL, &terminal);
+		nb = srcu_dereference(nb->next, &cpufreq_transition_notifier_list.srcu);
+	}
+	srcu_read_unlock(&cpufreq_transition_notifier_list.srcu, idx);
 	spin_lock(&policy->transition_lock);
 	policy->transition_ongoing = false;
 	policy->transition_task = NULL;
@@ -459,6 +483,9 @@ EXPORT_SYMBOL_GPL(cpufreq_freq_transition_end_unknown);
  */
 static int cpufreq_fast_switch_count;
 static DEFINE_MUTEX(cpufreq_fast_switch_lock);
+/* Protected by fast_switch_lock, including driver publication. */
+static unsigned int cpufreq_legacy_listeners;
+static bool cpufreq_terminal_driver;
 
 static void cpufreq_list_transition_notifiers(void)
 {
@@ -2129,17 +2156,22 @@ int cpufreq_register_notifier(struct notifier_block *nb, unsigned int list)
 		return -EINVAL;
 
 	switch (list) {
+	case CPUFREQ_TERMINAL_NOTIFIER:
 	case CPUFREQ_TRANSITION_NOTIFIER:
 		mutex_lock(&cpufreq_fast_switch_lock);
 
-		if (cpufreq_fast_switch_count > 0) {
+		if (cpufreq_fast_switch_count > 0 ||
+		    (list == CPUFREQ_TRANSITION_NOTIFIER && cpufreq_terminal_driver)) {
 			mutex_unlock(&cpufreq_fast_switch_lock);
 			return -EBUSY;
 		}
 		ret = srcu_notifier_chain_register(
 				&cpufreq_transition_notifier_list, nb);
-		if (!ret)
+		if (!ret) {
 			cpufreq_fast_switch_count--;
+			if (list == CPUFREQ_TRANSITION_NOTIFIER)
+				cpufreq_legacy_listeners++;
+		}
 
 		mutex_unlock(&cpufreq_fast_switch_lock);
 		break;
@@ -2173,13 +2205,17 @@ int cpufreq_unregister_notifier(struct notifier_block *nb, unsigned int list)
 		return -EINVAL;
 
 	switch (list) {
+	case CPUFREQ_TERMINAL_NOTIFIER:
 	case CPUFREQ_TRANSITION_NOTIFIER:
 		mutex_lock(&cpufreq_fast_switch_lock);
 
 		ret = srcu_notifier_chain_unregister(
 				&cpufreq_transition_notifier_list, nb);
-		if (!ret && !WARN_ON(cpufreq_fast_switch_count >= 0))
+		if (!ret && !WARN_ON(cpufreq_fast_switch_count >= 0)) {
 			cpufreq_fast_switch_count++;
+			if (list == CPUFREQ_TRANSITION_NOTIFIER)
+				cpufreq_legacy_listeners--;
+		}
 
 		mutex_unlock(&cpufreq_fast_switch_lock);
 		break;
@@ -2909,6 +2945,20 @@ static int cpuhp_cpufreq_offline(unsigned int cpu)
 	return 0;
 }
 
+/* Absence without an explicit driver declaration remains a deferred supplier. */
+int cpufreq_policy_required(unsigned int cpu)
+{
+	unsigned long flags;
+	int ret = 1;
+
+	read_lock_irqsave(&cpufreq_driver_lock, flags);
+	if (cpufreq_driver && cpufreq_driver->policy_required)
+		ret = cpufreq_driver->policy_required(cpu);
+	read_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(cpufreq_policy_required);
+
 /**
  * cpufreq_register_driver - register a CPU Frequency driver
  * @driver_data: A struct cpufreq_driver containing the values#
@@ -2947,14 +2997,24 @@ int cpufreq_register_driver(struct cpufreq_driver *driver_data)
 	/* Protect against concurrent CPU online/offline. */
 	cpus_read_lock();
 
+	mutex_lock(&cpufreq_fast_switch_lock);
+	if ((driver_data->flags & CPUFREQ_TERMINAL_NOTIFICATION) &&
+	    cpufreq_legacy_listeners) {
+		mutex_unlock(&cpufreq_fast_switch_lock);
+		ret = -EBUSY;
+		goto out;
+	}
 	write_lock_irqsave(&cpufreq_driver_lock, flags);
 	if (cpufreq_driver) {
 		write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+		mutex_unlock(&cpufreq_fast_switch_lock);
 		ret = -EEXIST;
 		goto out;
 	}
 	cpufreq_driver = driver_data;
+	cpufreq_terminal_driver = driver_data->flags & CPUFREQ_TERMINAL_NOTIFICATION;
 	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	mutex_unlock(&cpufreq_fast_switch_lock);
 
 	if (driver_data->setpolicy)
 		driver_data->flags |= CPUFREQ_CONST_LOOPS;
@@ -3005,9 +3065,12 @@ err_boost_unreg:
 		static_branch_disable_cpuslocked(&cpufreq_freq_invariance);
 	remove_boost_sysfs_file();
 err_null_driver:
+	mutex_lock(&cpufreq_fast_switch_lock);
+	cpufreq_terminal_driver = false;
 	write_lock_irqsave(&cpufreq_driver_lock, flags);
 	cpufreq_driver = NULL;
 	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	mutex_unlock(&cpufreq_fast_switch_lock);
 out:
 	cpus_read_unlock();
 	return ret;
@@ -3037,12 +3100,15 @@ void cpufreq_unregister_driver(struct cpufreq_driver *driver)
 	remove_boost_sysfs_file();
 	static_branch_disable_cpuslocked(&cpufreq_freq_invariance);
 	cpuhp_remove_state_nocalls_cpuslocked(hp_online);
+	mutex_lock(&cpufreq_fast_switch_lock);
+	cpufreq_terminal_driver = false;
 
 	write_lock_irqsave(&cpufreq_driver_lock, flags);
 
 	cpufreq_driver = NULL;
 
 	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	mutex_unlock(&cpufreq_fast_switch_lock);
 	cpus_read_unlock();
 }
 EXPORT_SYMBOL_GPL(cpufreq_unregister_driver);
@@ -3120,20 +3186,146 @@ void mt6797_test_policy_free(struct cpufreq_policy *policy)
 	cpufreq_policy_free(policy);
 }
 
+struct legacy_test_listener {
+	struct notifier_block nb;
+	unsigned int pre, post;
+};
+
+static int legacy_test_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct legacy_test_listener *l = container_of(nb, struct legacy_test_listener, nb);
+
+	if (event == CPUFREQ_PRECHANGE)
+		l->pre++;
+	if (event == CPUFREQ_POSTCHANGE)
+		l->post++;
+	return NOTIFY_OK;
+}
+
+void mt6797_test_legacy_completion(struct kunit *test)
+{
+	struct cpufreq_driver driver = {};
+	struct cpufreq_policy *policy = mt6797_test_policy_alloc(0);
+	struct legacy_test_listener l = { .nb.notifier_call = legacy_test_event };
+	struct cpufreq_freqs freqs = { .old = 100, .new = 200 };
+	unsigned long ref = per_cpu(capacity_freq_ref, 0);
+	unsigned long scale = per_cpu(arch_freq_scale, 0);
+
+	KUNIT_ASSERT_NOT_NULL(test, policy);
+	KUNIT_ASSERT_PTR_EQ(test, cpufreq_driver, NULL);
+	cpufreq_driver = &driver;
+	policy->cur = 100;
+	cpumask_set_cpu(0, policy->cpus);
+	cpumask_set_cpu(0, policy->related_cpus);
+	per_cpu(capacity_freq_ref, 0) = 300;
+	KUNIT_ASSERT_EQ(test, cpufreq_register_notifier(&l.nb, CPUFREQ_TRANSITION_NOTIFIER), 0);
+	cpufreq_freq_transition_begin(policy, &freqs);
+	cpufreq_freq_transition_end(policy, &freqs, 0);
+	KUNIT_EXPECT_EQ(test, policy->cur, 200U);
+	freqs.old = 200;
+	freqs.new = 300;
+	cpufreq_freq_transition_begin(policy, &freqs);
+	cpufreq_freq_transition_end(policy, &freqs, -EIO);
+	KUNIT_EXPECT_EQ(test, l.pre, 3U);
+	KUNIT_EXPECT_EQ(test, l.post, 3U);
+	KUNIT_EXPECT_EQ(test, policy->cur, 200U);
+	KUNIT_EXPECT_FALSE(test, policy->cur_unknown);
+	KUNIT_EXPECT_FALSE(test, policy->transition_ongoing);
+	cpufreq_unregister_notifier(&l.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	cpufreq_driver = NULL;
+	per_cpu(capacity_freq_ref, 0) = ref;
+	per_cpu(arch_freq_scale, 0) = scale;
+	mt6797_test_policy_free(policy);
+}
+
+static int passive_test_mode;
+
+static int passive_policy_required(unsigned int cpu)
+{
+	if (passive_test_mode == 3)
+		return 0;
+	if (passive_test_mode == 4)
+		return -EPROBE_DEFER;
+	if (passive_test_mode == 1 && cpu >= 4)
+		return 0;
+	return 1;
+}
+
+static void passive_registration_matrix(struct cpufreq_policy *policy)
+{
+	struct kunit *test = kunit_get_current_test();
+	int (*saved)(unsigned int) = cpufreq_driver->policy_required;
+	struct cpufreq_policy *peer = mt6797_test_policy_alloc(4);
+	struct device *dev = get_cpu_device(0), *peer_dev = get_cpu_device(4);
+	unsigned int cpu;
+	struct notifier_block legacy = { .notifier_call = legacy_test_event };
+	int mode, expected;
+
+	KUNIT_EXPECT_EQ(test, cpufreq_register_notifier(&legacy,
+							CPUFREQ_TRANSITION_NOTIFIER), -EBUSY);
+	KUNIT_ASSERT_NOT_NULL(test, peer);
+	peer->cpu = 4;
+	peer->cur = policy->cur;
+	peer->cpuinfo = policy->cpuinfo;
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev, 100000, 1000000), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev, 200000, 1100000), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(peer_dev, 100000, 1000000), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(peer_dev, 200000, 1100000), 0);
+	for (mode = 0; mode < 7; mode++) {
+		passive_test_mode = mode;
+		cpufreq_driver->policy_required = mode >= 5 ? NULL : passive_policy_required;
+		for_each_possible_cpu(cpu) {
+			struct cpufreq_policy *group = cpu < 4 ? policy : peer;
+
+			per_cpu(cpufreq_cpu_data, cpu) = cpu < 4 || mode == 0 || mode == 6 ?
+				group : NULL;
+			cpumask_set_cpu(cpu, group->related_cpus);
+			cpumask_set_cpu(cpu, group->cpus);
+		}
+		expected = mode < 2 || mode == 6 ? 0 :
+			mode == 3 ? -ENODEV : -EPROBE_DEFER;
+		mt6797_test_passive_registration(test, dev, expected,
+						 mode == 0 || mode == 6 ? 2 : 1);
+		for_each_possible_cpu(cpu)
+			per_cpu(cpufreq_cpu_data, cpu) = NULL;
+		cpumask_clear(policy->cpus);
+		cpumask_set_cpu(policy->cpu, policy->cpus);
+		cpumask_clear(policy->related_cpus);
+		cpumask_set_cpu(policy->cpu, policy->related_cpus);
+	}
+	cpufreq_driver->policy_required = saved;
+	dev_pm_opp_remove(peer_dev, 200000);
+	dev_pm_opp_remove(peer_dev, 100000);
+	dev_pm_opp_remove(dev, 200000);
+	dev_pm_opp_remove(dev, 100000);
+	mt6797_test_policy_free(peer);
+}
+
 /* Isolated fixture: refuse to replace a registered platform driver. */
 int mt6797_test_core_target(struct cpufreq_policy *policy,
 			   struct cpufreq_driver *driver, unsigned int index)
 {
+	static bool registration_tested;
+	unsigned int begins = test_transition_begins;
 	unsigned long flags, saved_ref, saved_scale;
 	int ret;
 
+	mutex_lock(&cpufreq_fast_switch_lock);
+	if ((driver->flags & CPUFREQ_TERMINAL_NOTIFICATION) &&
+	    cpufreq_legacy_listeners) {
+		mutex_unlock(&cpufreq_fast_switch_lock);
+		return -EBUSY;
+	}
 	write_lock_irqsave(&cpufreq_driver_lock, flags);
 	if (cpufreq_driver) {
 		write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+		mutex_unlock(&cpufreq_fast_switch_lock);
 		return -EBUSY;
 	}
 	cpufreq_driver = driver;
+	cpufreq_terminal_driver = driver->flags & CPUFREQ_TERMINAL_NOTIFICATION;
 	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	mutex_unlock(&cpufreq_fast_switch_lock);
 	cpufreq_table_validate_and_sort(policy);
 	policy->min = policy->cpuinfo.min_freq;
 	policy->max = policy->cpuinfo.max_freq;
@@ -3144,13 +3336,20 @@ int mt6797_test_core_target(struct cpufreq_policy *policy,
 				      CPUFREQ_RELATION_L);
 	KUNIT_EXPECT_EQ(kunit_get_current_test(),
 		per_cpu(arch_freq_scale, policy->cpu),
-		policy->cur_unknown ? saved_scale :
+		(policy->cur_unknown || begins == test_transition_begins) ? saved_scale :
 		((unsigned long)policy->cur << SCHED_CAPACITY_SHIFT) / policy->max);
+	if (!registration_tested && !policy->cpu && !ret) {
+		passive_registration_matrix(policy);
+		registration_tested = true;
+	}
 	per_cpu(capacity_freq_ref, policy->cpu) = saved_ref;
 	per_cpu(arch_freq_scale, policy->cpu) = saved_scale;
+	mutex_lock(&cpufreq_fast_switch_lock);
+	cpufreq_terminal_driver = false;
 	write_lock_irqsave(&cpufreq_driver_lock, flags);
 	cpufreq_driver = NULL;
 	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	mutex_unlock(&cpufreq_fast_switch_lock);
 	return ret;
 }
 #endif

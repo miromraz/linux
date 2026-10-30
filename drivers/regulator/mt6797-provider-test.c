@@ -1605,9 +1605,52 @@ static void operational_clock_token(struct kunit *test, struct clk *mux,
 }
 
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+struct accounting_waiter {
+	struct cpufreq_policy *policy;
+	struct completion started, done;
+};
+
+static int accounting_wait(void *data)
+{
+	struct accounting_waiter *w = data;
+	DEFINE_WAIT(wait);
+
+	prepare_to_wait(&w->policy->transition_wait, &wait, TASK_UNINTERRUPTIBLE);
+	complete(&w->started);
+	while (READ_ONCE(w->policy->transition_ongoing)) {
+		schedule();
+		prepare_to_wait(&w->policy->transition_wait, &wait, TASK_UNINTERRUPTIBLE);
+	}
+	finish_wait(&w->policy->transition_wait, &wait);
+	complete(&w->done);
+	return 0;
+}
+
+struct callback_release {
+	void *info;
+	struct completion started, done;
+};
+
+static int callback_release_thread(void *data)
+{
+	struct callback_release *r = data;
+
+	complete(&r->started);
+	down_write(&mt6797_test_cpu_policy(r->info)->rwsem);
+	mt6797_test_cpu_release(r->info);
+	up_write(&mt6797_test_cpu_policy(r->info)->rwsem);
+	complete_all(&r->done);
+	return 0;
+}
+
 struct accounting_observer {
 	struct notifier_block nb;
-	unsigned int pre, post, rate;
+	unsigned int pre, post, rate, terminal;
+	int error;
+	bool resource;
+	struct callback_release *release;
+	struct accounting_waiter waiter;
+	struct task_struct *task;
 	struct kunit *test;
 	void *info;
 };
@@ -1617,9 +1660,41 @@ static int accounting_event(struct notifier_block *nb, unsigned long event, void
 	struct accounting_observer *o = container_of(nb, struct accounting_observer, nb);
 	struct cpufreq_freqs *freqs = data;
 
-	if (event == CPUFREQ_PRECHANGE)
+	if (event == CPUFREQ_PRECHANGE) {
 		o->pre++;
+		KUNIT_EXPECT_FALSE(o->test, o->resource);
+		o->resource = true;
+		if (!o->task) {
+			o->waiter.policy = freqs->policy;
+			init_completion(&o->waiter.started);
+			init_completion(&o->waiter.done);
+			o->task = kthread_run(accounting_wait, &o->waiter, "cpufreq-waiter");
+			KUNIT_EXPECT_FALSE(o->test, IS_ERR(o->task));
+			if (!IS_ERR(o->task))
+				wait_for_completion(&o->waiter.started);
+		}
+		KUNIT_EXPECT_EQ(o->test, mt6797_test_cpu_reenter(o->info), -EBUSY);
+	}
+	if (event == CPUFREQ_TERMINAL) {
+		struct cpufreq_terminal *terminal = data;
+
+		o->terminal++;
+		o->error = terminal->error;
+		KUNIT_EXPECT_TRUE(o->test, o->resource);
+		o->resource = false;
+		KUNIT_EXPECT_TRUE(o->test, terminal->protection_needed);
+		KUNIT_EXPECT_LT(o->test, terminal->error, 0);
+		KUNIT_EXPECT_TRUE(o->test, terminal->policy->cur_unknown);
+		KUNIT_EXPECT_TRUE(o->test, mt6797_test_cpu_unlocked(o->info));
+		KUNIT_EXPECT_EQ(o->test, mt6797_test_cpu_reenter(o->info), -EIO);
+		/* Completion must reach lower-priority listeners regardless. */
+		return NOTIFY_BAD;
+	}
 	if (event == CPUFREQ_POSTCHANGE) {
+		if (o->release)
+			KUNIT_EXPECT_FALSE(o->test, completion_done(&o->release->done));
+		KUNIT_EXPECT_TRUE(o->test, o->resource);
+		o->resource = false;
 		o->post++;
 		o->rate = freqs->new;
 		KUNIT_EXPECT_TRUE(o->test, mt6797_test_cpu_unlocked(o->info));
@@ -1647,6 +1722,30 @@ static int callback_vote_veto(struct notifier_block *nb, unsigned long event, vo
 	return event == REGULATOR_EVENT_PRE_VOLTAGE_CHANGE ? NOTIFY_BAD : NOTIFY_OK;
 }
 
+struct callback_opp_listener {
+	struct notifier_block nb;
+	struct kunit *test;
+	void *info;
+	unsigned int removes, writers;
+};
+
+static int callback_opp_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct callback_opp_listener *l = container_of(nb, struct callback_opp_listener, nb);
+	struct mt6797_txn_outcome outcome;
+
+	if (event == OPP_EVENT_ADJUST_VOLTAGE) {
+		l->writers++;
+		KUNIT_EXPECT_EQ(l->test, mt6797_test_cpu_target(l->info, 200, &outcome), -EAGAIN);
+	}
+	if (event == OPP_EVENT_REMOVE) {
+		l->removes++;
+		KUNIT_EXPECT_FALSE(l->test, mt6797_test_cpu_unlocked(l->info));
+		KUNIT_EXPECT_EQ(l->test, mt6797_test_cpu_reenter(l->info), -EBUSY);
+	}
+	return NOTIFY_OK;
+}
+
 struct callback_injection {
 	struct conversion_fixture *f;
 	struct clk *external;
@@ -1654,6 +1753,13 @@ struct callback_injection {
 	struct completion cancelled;
 	struct task_struct *remover;
 	int failure, writes;
+	struct callback_release release;
+	struct task_struct *releaser;
+	struct device *cpu_dev;
+	struct callback_opp_listener *opp;
+	struct ownership_thread peer;
+	struct completion peer_started;
+	struct task_struct *peer_task;
 };
 
 static void callback_inject(void *data, int phase)
@@ -1663,6 +1769,21 @@ static void callback_inject(void *data, int phase)
 	int failure = injection->failure;
 
 	KUNIT_EXPECT_EQ(f->test, clk_set_rate(injection->external, 400000), -EBUSY);
+	if (failure == 20 && phase == 0) {
+		init_completion(&injection->peer_started);
+		init_completion(&injection->peer.done);
+		injection->peer.start = &injection->peer_started;
+		injection->peer_task = kthread_run(token_release_thread,
+						   &injection->peer, "peer-withdraw");
+		KUNIT_ASSERT_FALSE(f->test, IS_ERR(injection->peer_task));
+		wait_for_completion(&injection->peer_started);
+		KUNIT_EXPECT_FALSE(f->test, completion_done(&injection->peer.done));
+	}
+	if (failure == 19 && phase == 0) {
+		dev_pm_opp_remove(injection->cpu_dev, 200000);
+		KUNIT_EXPECT_EQ(f->test, injection->opp->removes, 0U);
+		KUNIT_EXPECT_EQ(f->test, dev_pm_opp_get_opp_count(injection->cpu_dev), 2);
+	}
 	if ((failure == 7 || failure == 8) && phase == 1) {
 		f->fail_write = f->writes + 1;
 		f->commit_error = failure == 8;
@@ -1670,6 +1791,13 @@ static void callback_inject(void *data, int phase)
 	if ((failure == 9 && phase == 0) || (failure == 10 && phase == 1))
 		mt6797_preflight_test_event();
 	if ((failure == 11 && phase == 0) || (failure == 12 && phase == 1)) {
+		init_completion(&injection->release.started);
+		init_completion(&injection->release.done);
+		injection->releaser = kthread_run(callback_release_thread,
+						  &injection->release, "callback-release");
+		KUNIT_ASSERT_FALSE(f->test, IS_ERR(injection->releaser));
+		wait_for_completion(&injection->release.started);
+		KUNIT_EXPECT_FALSE(f->test, completion_done(&injection->release.done));
 		init_completion(&injection->cancelled);
 		init_completion(&injection->detach.started);
 		init_completion(&injection->detach.done);
@@ -1699,9 +1827,13 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	struct clk_lookup *cpu_lookup, *inter_lookup;
 	struct transition_mux *m = container_of(__clk_get_hw(mux), struct transition_mux, hw);
 	struct lifecycle_clock *p = container_of(__clk_get_hw(pll), struct lifecycle_clock, hw);
-	struct callback_injection injection = {};
+	struct callback_injection *injection;
 	struct reserved_clock_listener listener = {
 		.nb.notifier_call = reserved_clock_event, .test = test,
+	};
+	struct callback_opp_listener opp = {
+		.nb = { .notifier_call = callback_opp_event, .priority = INT_MAX },
+		.test = test,
 	};
 	struct accounting_observer observer = {
 		.nb = { .notifier_call = accounting_event, .priority = -1 },
@@ -1711,8 +1843,11 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	};
 	void *info, *passive;
 	struct cpufreq_policy *policy;
+	u64 old_cookie;
 	int i, ret;
 
+	injection = kunit_kzalloc(test, sizeof(*injection), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, injection);
 	KUNIT_ASSERT_EQ(test, clk_set_rate(inter, 300000), 0);
 	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
 	e = kunit_kcalloc(test, 2, sizeof(*e), GFP_KERNEL);
@@ -1727,13 +1862,16 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	KUNIT_ASSERT_EQ(test, clk_set_rate(pll, 100000), 0);
 	KUNIT_ASSERT_EQ(test, clk_set_parent(mux, pll), 0);
 	for (i = 0; i < 3; i++) {
-		f->live_floor[i] = i == user ? 1040000 : 1080000;
+		int intermediate_uv = failure == 20 && i == (user ^ 1) ? 1110000 : 1080000;
+
+		f->live_floor[i] = i == user ? 1040000 :
+			failure == 20 && i == (user ^ 1) ? 1110000 : 1080000;
 		f->dev[i] = platform_device_register_simple("token-user", i, NULL, 0);
 		KUNIT_ASSERT_FALSE(test, IS_ERR(f->dev[i]));
 		dev[i] = &f->dev[i]->dev;
 		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev[i], 100000, 1040000), 0);
 		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev[i], 200000, 1100000), 0);
-		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev[i], 300000, 1080000), 0);
+		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev[i], 300000, intermediate_uv), 0);
 	}
 	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_start_clocks(dev, clocks), 0);
 	f->started = true;
@@ -1762,6 +1900,7 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	if (IS_ERR(info))
 		goto cleanup;
 	policy = mt6797_test_cpu_policy(info);
+	old_cookie = mt6797_test_cpu_cookie(info);
 	observer.test = test;
 	observer.info = info;
 	later.test = test;
@@ -1791,9 +1930,37 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	if (!failure) {
 		int writes = f->writes;
 
+		mt6797_preflight_test_hold(true);
 		mt6797_preflight_test_event();
 		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 200, &outcome), -EAGAIN);
 		KUNIT_EXPECT_EQ(test, f->writes, writes);
+		mt6797_preflight_test_hold(false);
+		mt6797_preflight_test_flush();
+	}
+	opp.info = info;
+	if (!failure || failure == 19)
+		KUNIT_ASSERT_EQ(test, dev_pm_opp_register_notifier(dev[user], &opp.nb), 0);
+	if (!failure) {
+		int writes = f->writes;
+
+		/* All acquisition failure stages, including each reserved table. */
+		for (i = 1; i <= 11; i++) {
+			mt6797_txn_test_fail_acquisition(i);
+			KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 200, &outcome), -EIO);
+			mt6797_txn_test_fail_acquisition(0);
+			KUNIT_EXPECT_EQ(test, f->writes, writes);
+			KUNIT_EXPECT_TRUE(test, mt6797_test_cpu_unlocked(info));
+		}
+		KUNIT_EXPECT_EQ(test, dev_pm_opp_adjust_voltage(dev[user], 200000,
+								1110000, 1110000, 1110000), 0);
+		KUNIT_EXPECT_EQ(test, opp.writers, 1U);
+		KUNIT_EXPECT_EQ(test, f->writes, writes);
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, dev_pm_opp_adjust_voltage(dev[user], 200000,
+								1100000, 1100000, 1100000), 0);
+		KUNIT_EXPECT_EQ(test, opp.writers, 2U);
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 100, &outcome), 0);
 		mt6797_preflight_test_flush();
 	}
 	p->mux_parent = &m->parent;
@@ -1817,33 +1984,65 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	}
 	listener.dev = dev[user];
 	clk_notifier_register(mux, &listener.nb);
-	injection.external = clk_hw_get_clk(__clk_get_hw(pll), NULL);
-	KUNIT_ASSERT_FALSE(test, IS_ERR(injection.external));
-	injection.f = f;
-	injection.failure = failure;
+	injection->external = clk_hw_get_clk(__clk_get_hw(pll), NULL);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(injection->external));
+	injection->f = f;
+	injection->failure = failure;
+	if (failure == 20) {
+		injection->peer.user = user ^ 1;
+		KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[user ^ 1], user ^ 1,
+							      &injection->peer.cookie), 0);
+		mt6797_preflight_test_flush();
+	}
+	injection->cpu_dev = dev[user];
+	injection->opp = &opp;
+	injection->release.info = info;
+	if (failure == 11 || failure == 12) {
+		observer.release = &injection->release;
+		later.release = &injection->release;
+	}
 	KUNIT_ASSERT_EQ(test, cpufreq_register_notifier(&observer.nb,
-				CPUFREQ_TRANSITION_NOTIFIER), 0);
+				CPUFREQ_TERMINAL_NOTIFIER), 0);
 	KUNIT_ASSERT_EQ(test, cpufreq_register_notifier(&later.nb,
-							CPUFREQ_TRANSITION_NOTIFIER), 0);
-	mt6797_test_cpu_hook(callback_inject, &injection);
+							CPUFREQ_TERMINAL_NOTIFIER), 0);
+	mt6797_test_cpu_hook(callback_inject, injection);
+	mt6797_test_switch_hook(callback_inject, injection);
+	/* Model the framework lifetime exclusion through the complete POST chain. */
+	down_write(&policy->rwsem);
 	ret = mt6797_test_cpu_target(info, failure == 7 || failure == 8 ? 100 : 200,
 				     &outcome);
+	up_write(&policy->rwsem);
 	mt6797_test_cpu_hook(NULL, NULL);
+	mt6797_test_switch_hook(NULL, NULL);
+	if (!IS_ERR_OR_NULL(observer.task)) {
+		KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&observer.waiter.done, HZ), 0UL);
+		kthread_stop(observer.task);
+	}
+	if (!IS_ERR_OR_NULL(later.task)) {
+		KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&later.waiter.done, HZ), 0UL);
+		kthread_stop(later.task);
+	}
 	KUNIT_EXPECT_EQ(test, ret, outcome.error);
 	KUNIT_EXPECT_EQ(test, observer.pre, 1U);
 	KUNIT_EXPECT_EQ(test, later.pre, observer.pre);
 	KUNIT_EXPECT_EQ(test, later.post, observer.post);
 	KUNIT_EXPECT_EQ(test, later.rate, observer.rate);
+	KUNIT_EXPECT_EQ(test, later.terminal, observer.terminal);
+	KUNIT_EXPECT_EQ(test, observer.terminal, failure == 3 || failure == 6 ? 1U : 0U);
+	KUNIT_EXPECT_FALSE(test, observer.resource);
+	KUNIT_EXPECT_FALSE(test, later.resource);
 	KUNIT_EXPECT_EQ(test, observer.post, failure == 3 || failure == 6 ? 0U : 1U);
 	if (observer.post)
 		KUNIT_EXPECT_EQ(test, observer.rate, (unsigned int)(outcome.rate / 1000));
 	if (failure == 11 || failure == 12) {
-		if (!IS_ERR(injection.remover)) {
-			wait_for_completion(&injection.detach.done);
-			kthread_stop(injection.remover);
+		wait_for_completion(&injection->release.done);
+		kthread_stop(injection->releaser);
+		if (!IS_ERR(injection->remover)) {
+			wait_for_completion(&injection->detach.done);
+			kthread_stop(injection->remover);
 			f->rail[1] = NULL;
 		}
-		KUNIT_EXPECT_EQ(test, f->writes, injection.writes);
+		KUNIT_EXPECT_EQ(test, f->writes, injection->writes);
 		mt6797_preflight_test_drain_observer(NULL);
 	}
 	if (failure == 4 || failure == 5 || failure == 7 || failure == 8) {
@@ -1856,6 +2055,11 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	KUNIT_EXPECT_PTR_EQ(test, policy->transition_task, NULL);
 	if (failure == 3 || failure == 6) {
 		KUNIT_EXPECT_TRUE(test, policy->cur_unknown);
+		KUNIT_EXPECT_EQ(test, policy->cur, 100U);
+		KUNIT_EXPECT_EQ(test, observer.error, ret);
+		KUNIT_EXPECT_EQ(test, later.error, ret);
+		KUNIT_EXPECT_EQ(test, mt6797_test_passive_error(passive), ret);
+		KUNIT_EXPECT_EQ(test, mt6797_test_passive_calls(passive), 0U);
 		KUNIT_EXPECT_EQ(test, mt6797_test_stats_rate(policy), 0U);
 		KUNIT_EXPECT_EQ(test, mt6797_test_passive_rate(passive), 0UL);
 	} else {
@@ -1882,6 +2086,21 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 		KUNIT_EXPECT_EQ(test, later.rate, 200U);
 		KUNIT_EXPECT_EQ(test, observer.rate, 200U);
 		KUNIT_EXPECT_FALSE(test, policy->transition_ongoing);
+	} else if (failure == 20) {
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		wait_for_completion(&injection->peer.done);
+		kthread_stop(injection->peer_task);
+		KUNIT_EXPECT_EQ(test, injection->peer.ret, 0);
+		KUNIT_EXPECT_GE(test, f->uv[0], 1110000);
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 100, &outcome), 0);
+	} else if (failure == 19) {
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		KUNIT_EXPECT_EQ(test, opp.removes, 1U);
+		KUNIT_EXPECT_EQ(test, outcome.rate, 200000UL);
+		KUNIT_EXPECT_EQ(test, dev_pm_opp_add(dev[user], 200000, 1100000), 0);
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 100, &outcome), 0);
 	} else if (failure == 16) {
 		KUNIT_EXPECT_EQ(test, ret, 0);
 		KUNIT_EXPECT_EQ(test, outcome.rate, 150000UL);
@@ -1927,7 +2146,7 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	if (failure == 14)
 		clk_notifier_unregister(mux, &veto.nb);
 	KUNIT_EXPECT_FALSE(test, p->unparked);
-	clk_put(injection.external);
+	clk_put(injection->external);
 	clk_notifier_unregister(mux, &listener.nb);
 	p->mux_parent = NULL;
 	p->round_up = false;
@@ -1936,9 +2155,33 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	m->fail_at = 0;
 	m->live_floor = NULL;
 	m->commit_error = false;
-	cpufreq_unregister_notifier(&later.nb, CPUFREQ_TRANSITION_NOTIFIER);
-	cpufreq_unregister_notifier(&observer.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	cpufreq_unregister_notifier(&later.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	cpufreq_unregister_notifier(&observer.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	if (failure == 11 || failure == 12) {
+		struct mt6797_rail_io io = {
+			.read = conversion_read, .write = conversion_write,
+			.data = &e[1], .step_uv = 25000,
+		};
+		struct mt6797_consumer_txn *stale = NULL;
+		u64 cookie;
+
+		f->rail[1] = platform_device_register_simple("token-rail", 1, NULL, 0);
+		KUNIT_ASSERT_FALSE(test, IS_ERR(f->rail[1]));
+		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&f->rail[1]->dev, 1, &io), 0);
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_acquire(dev[user], user, &cookie), -EBUSY);
+		KUNIT_ASSERT_EQ(test, mt6797_consumer_recover(), 0);
+		KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[user], user, &cookie), 0);
+		KUNIT_EXPECT_NE(test, cookie, old_cookie);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_release(user, old_cookie), -ESTALE);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_begin(user, old_cookie, 200000,
+								&stale), -ESTALE);
+		KUNIT_EXPECT_PTR_EQ(test, stale, NULL);
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_release(user, cookie), 0);
+	}
 	mt6797_test_stats_contract(test, policy);
+	if (!failure || failure == 19)
+		dev_pm_opp_unregister_notifier(dev[user], &opp.nb);
 	mt6797_test_passive_close(passive);
 	mt6797_test_cpu_close(info);
 cleanup:
@@ -2027,8 +2270,9 @@ static void transition_clock_contract(struct kunit *test)
 	operational_clock_token(test, output, source, temporary, 1);
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 	for (unsigned int user = 0; user < 2; user++)
-		for (int failure = 0; failure < 19; failure++)
+		for (int failure = 0; failure < 21; failure++)
 			cpu_callback_case(test, output, source, temporary, user, failure);
+	mt6797_test_legacy_completion(test);
 #endif
 }
 

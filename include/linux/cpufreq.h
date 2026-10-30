@@ -353,6 +353,9 @@ struct cpufreq_driver {
 	u16		flags;
 	void		*driver_data;
 
+	/* Optional non-sleeping classification: 0 omitted, 1 required, <0 error. */
+	int		(*policy_required)(unsigned int cpu);
+
 	/* needed by all drivers */
 	int		(*init)(struct cpufreq_policy *policy);
 	int		(*verify)(struct cpufreq_policy_data *policy);
@@ -479,6 +482,8 @@ struct cpufreq_driver {
  * set.
  */
 #define CPUFREQ_NO_AUTO_DYNAMIC_SWITCHING	BIT(6)
+/* Only explicitly terminal-safe transition listeners may register. */
+#define CPUFREQ_TERMINAL_NOTIFICATION	BIT(7)
 
 int cpufreq_register_driver(struct cpufreq_driver *driver_data);
 void cpufreq_unregister_driver(struct cpufreq_driver *driver_data);
@@ -523,26 +528,41 @@ static inline void cpufreq_resume(void) {}
 
 #define CPUFREQ_TRANSITION_NOTIFIER	(0)
 #define CPUFREQ_POLICY_NOTIFIER		(1)
+/* Opt in to PRE/POST/TERMINAL; callbacks must not stop the chain. */
+#define CPUFREQ_TERMINAL_NOTIFIER	(2)
+
+/* No rate is implied. Dispose PRE resources and retain protection. */
+struct cpufreq_terminal {
+	struct cpufreq_policy *policy;
+	int error;
+	bool protection_needed;
+};
 
 /* Transition notifiers */
 #define CPUFREQ_PRECHANGE		(0)
 #define CPUFREQ_POSTCHANGE		(1)
+#define CPUFREQ_TERMINAL		(2)
 
 /* Policy Notifiers  */
 #define CPUFREQ_CREATE_POLICY		(0)
 #define CPUFREQ_REMOVE_POLICY		(1)
 
 #ifdef CONFIG_CPU_FREQ
+int cpufreq_policy_required(unsigned int cpu);
 int cpufreq_register_notifier(struct notifier_block *nb, unsigned int list);
 int cpufreq_unregister_notifier(struct notifier_block *nb, unsigned int list);
 
-void cpufreq_freq_transition_end_unknown(struct cpufreq_policy *policy);
+void cpufreq_freq_transition_end_unknown(struct cpufreq_policy *policy, int error);
 void cpufreq_freq_transition_begin(struct cpufreq_policy *policy,
 		struct cpufreq_freqs *freqs);
 void cpufreq_freq_transition_end(struct cpufreq_policy *policy,
 		struct cpufreq_freqs *freqs, int transition_failed);
 
 #else /* CONFIG_CPU_FREQ */
+static inline int cpufreq_policy_required(unsigned int cpu)
+{
+	return 1;
+}
 static inline int cpufreq_register_notifier(struct notifier_block *nb,
 						unsigned int list)
 {

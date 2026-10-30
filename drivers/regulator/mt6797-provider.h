@@ -62,6 +62,7 @@ int mt6797_preflight_test_convert(struct device **dev, struct clk *clk,
 				  struct mt6797_preflight_result *result);
 int mt6797_preflight_test_init_failure(int fail_after, void (*step)(void));
 void mt6797_preflight_test_event(void);
+void mt6797_preflight_test_hold(bool hold);
 int mt6797_preflight_test_regulator_notifier(unsigned int user,
 					    struct notifier_block *nb, bool add);
 int mt6797_preflight_test_requests(unsigned int user, int *guard, int *vote);

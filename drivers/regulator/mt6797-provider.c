@@ -1076,6 +1076,7 @@ static int txn_claim(struct mt6797_consumer_txn *t, struct clk *clk)
 
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 static unsigned int txn_fail_stage;
+static bool test_hold_preflight;
 
 void mt6797_txn_test_fail_acquisition(unsigned int stage)
 {
@@ -1300,6 +1301,18 @@ static void txn_unscope(struct mt6797_consumer_txn *t)
 	mutex_unlock(&owner_lock);
 }
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "mt6797-combined-test.h"
+static void (*switch_hook)(void *data, int phase);
+static void *switch_data;
+
+void mt6797_test_switch_hook(void (*hook)(void *, int), void *data)
+{
+	switch_hook = hook;
+	switch_data = data;
+}
+#endif
+
 int mt6797_consumer_txn_switch(struct mt6797_consumer_txn *t)
 {
 	struct clk *mux = pf_users[t->user].clk[0];
@@ -1335,6 +1348,10 @@ int mt6797_consumer_txn_switch(struct mt6797_consumer_txn *t)
 	ret = mt6797_consumer_txn_validate(t);
 	if (ret)
 		return ret;
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (switch_hook)
+		switch_hook(switch_data, 2);
+#endif
 	/* Active mux ancestry no longer protects the PLL. Round ONLY here. */
 	rounded = clk_round_rate(t->pll, t->target);
 	if (rounded <= 0 || rounded > t->selected[t->user][2].rate)
@@ -1346,6 +1363,10 @@ int mt6797_consumer_txn_switch(struct mt6797_consumer_txn *t)
 	txn_unscope(t);
 	if (ret || clk_get_rate(t->pll) != rounded)
 		return ret ?: -EIO;
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (switch_hook)
+		switch_hook(switch_data, 3);
+#endif
 	ret = txn_scope(t, rate, rounded);
 	if (ret)
 		return ret;
@@ -1484,6 +1505,13 @@ static void preflight_work(struct work_struct *work)
 
 	mutex_lock(&transaction_lock);
 	mutex_lock(&owner_lock);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+	if (test_hold_preflight) {
+		mutex_unlock(&owner_lock);
+		mutex_unlock(&transaction_lock);
+		return;
+	}
+#endif
 	if (!preflight_active) {
 		mutex_unlock(&owner_lock);
 		mutex_unlock(&transaction_lock);
@@ -2152,6 +2180,18 @@ int mt6797_preflight_test_init_failure(int fail_after, void (*step)(void))
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_init_failure);
+
+void mt6797_preflight_test_hold(bool hold)
+{
+	if (hold)
+		cancel_delayed_work_sync(&preflight_job);
+	mutex_lock(&owner_lock);
+	test_hold_preflight = hold;
+	mutex_unlock(&owner_lock);
+	if (!hold)
+		schedule_delayed_work(&preflight_job, 0);
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_hold);
 
 void mt6797_preflight_test_event(void)
 {

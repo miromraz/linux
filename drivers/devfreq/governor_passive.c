@@ -39,6 +39,7 @@ struct devfreq_cpu_data {
 	struct opp_table *opp_table;
 	unsigned int cur_freq;
 	bool update_pending;
+	bool unknown;
 	int update_error;
 	unsigned int min_freq;
 	unsigned int max_freq;
@@ -114,6 +115,12 @@ static int get_target_freq_with_cpufreq(struct devfreq *devfreq,
 	int ret = 0;
 
 	for_each_online_cpu(cpu) {
+		ret = cpufreq_policy_required(cpu);
+		if (ret < 0)
+			return ret;
+		if (!ret)
+			continue;
+		ret = 0;
 		policy = cpufreq_cpu_get(cpu);
 		if (!policy) {
 			ret = -EINVAL;
@@ -124,6 +131,11 @@ static int get_target_freq_with_cpufreq(struct devfreq *devfreq,
 		if (!parent_cpu_data) {
 			cpufreq_cpu_put(policy);
 			continue;
+		}
+
+		if (parent_cpu_data->unknown) {
+			cpufreq_cpu_put(policy);
+			return -EIO;
 		}
 
 		/* Get target freq via required opps */
@@ -198,10 +210,16 @@ static int devfreq_passive_get_target_freq(struct devfreq *devfreq,
 {
 	struct devfreq_passive_data *p_data =
 				(struct devfreq_passive_data *)devfreq->data;
+	struct devfreq_cpu_data *cpu;
 	int ret;
 
 	if (!p_data)
 		return -EINVAL;
+
+	if (p_data->parent_type == CPUFREQ_PARENT_DEV)
+		list_for_each_entry(cpu, &p_data->cpu_data_list, node)
+			if (cpu->unknown)
+				return -EIO;
 
 	/*
 	 * If the devfreq device with passive governor has the specific method
@@ -237,6 +255,20 @@ static int cpufreq_passive_notifier_call(struct notifier_block *nb,
 	struct cpufreq_freqs *freqs = ptr;
 	int ret;
 
+	if (event == CPUFREQ_TERMINAL) {
+		struct cpufreq_terminal *terminal = ptr;
+
+		parent_cpu_data = get_parent_cpu_data(p_data, terminal->policy);
+		if (parent_cpu_data) {
+			mutex_lock(&devfreq->lock);
+			parent_cpu_data->unknown = true;
+			parent_cpu_data->update_pending = true;
+			parent_cpu_data->update_error = terminal->error;
+			mutex_unlock(&devfreq->lock);
+		}
+		return NOTIFY_DONE;
+	}
+
 	if (event != CPUFREQ_POSTCHANGE || !freqs)
 		return 0;
 
@@ -246,6 +278,7 @@ static int cpufreq_passive_notifier_call(struct notifier_block *nb,
 		return 0;
 
 	parent_cpu_data->cur_freq = freqs->new;
+	parent_cpu_data->unknown = false;
 
 	mutex_lock(&devfreq->lock);
 	ret = devfreq_update_target(devfreq, freqs->new);
@@ -269,7 +302,7 @@ static int cpufreq_passive_unregister_notifier(struct devfreq *devfreq)
 
 	if (p_data->nb.notifier_call) {
 		ret = cpufreq_unregister_notifier(&p_data->nb,
-					CPUFREQ_TRANSITION_NOTIFIER);
+					CPUFREQ_TERMINAL_NOTIFIER);
 		if (ret < 0)
 			return ret;
 	}
@@ -295,7 +328,7 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 		= (struct list_head)LIST_HEAD_INIT(p_data->cpu_data_list);
 
 	p_data->nb.notifier_call = cpufreq_passive_notifier_call;
-	ret = cpufreq_register_notifier(&p_data->nb, CPUFREQ_TRANSITION_NOTIFIER);
+	ret = cpufreq_register_notifier(&p_data->nb, CPUFREQ_TERMINAL_NOTIFIER);
 	if (ret) {
 		dev_err(dev, "failed to register cpufreq notifier\n");
 		p_data->nb.notifier_call = NULL;
@@ -303,6 +336,11 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 	}
 
 	for_each_possible_cpu(cpu) {
+		ret = cpufreq_policy_required(cpu);
+		if (ret < 0)
+			goto err;
+		if (!ret)
+			continue;
 		policy = cpufreq_cpu_get(cpu);
 		if (!policy) {
 			ret = -EPROBE_DEFER;
@@ -346,11 +384,17 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 		cpufreq_cpu_put(policy);
 	}
 
+	if (list_empty(&p_data->cpu_data_list)) {
+		ret = -ENODEV;
+		goto err;
+	}
 	mutex_lock(&devfreq->lock);
 	ret = devfreq_update_target(devfreq, 0L);
 	mutex_unlock(&devfreq->lock);
-	if (ret)
+	if (ret) {
 		dev_err(dev, "failed to update the frequency\n");
+		goto err;
+	}
 
 	return ret;
 
@@ -359,7 +403,8 @@ err_free_cpu_data:
 err_put_policy:
 	cpufreq_cpu_put(policy);
 err:
-
+	cpufreq_passive_unregister_notifier(devfreq);
+	p_data->nb.notifier_call = NULL;
 	return ret;
 }
 
@@ -420,7 +465,7 @@ static int devfreq_passive_register_notifier(struct devfreq *devfreq)
 }
 
 static int devfreq_passive_event_handler(struct devfreq *devfreq,
-				unsigned int event, void *data)
+					 unsigned int event, void *data)
 {
 	struct devfreq_passive_data *p_data
 			= (struct devfreq_passive_data *)devfreq->data;
@@ -481,6 +526,7 @@ MODULE_LICENSE("GPL v2");
 
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 #include "../regulator/mt6797-combined-test.h"
+#include <kunit/test.h>
 
 struct passive_fixture {
 	struct devfreq df;
@@ -545,7 +591,7 @@ void *mt6797_test_passive_open(struct device *dev, unsigned int cpu)
 	f->cpu.cur_freq = 100;
 	list_add(&f->cpu.node, &f->data.cpu_data_list);
 	f->data.nb.notifier_call = cpufreq_passive_notifier_call;
-	ret = cpufreq_register_notifier(&f->data.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	ret = cpufreq_register_notifier(&f->data.nb, CPUFREQ_TERMINAL_NOTIFIER);
 	if (ret) {
 		dev_set_drvdata(dev, f->saved_data);
 		srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
@@ -587,8 +633,40 @@ void mt6797_test_passive_close(void *data)
 {
 	struct passive_fixture *f = data;
 
-	cpufreq_unregister_notifier(&f->data.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	cpufreq_unregister_notifier(&f->data.nb, CPUFREQ_TERMINAL_NOTIFIER);
 	dev_set_drvdata(f->df.dev.parent, f->saved_data);
+	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
+	kfree(f);
+}
+
+/* Real governor START/STOP, including policy lookup, OPP refs and target. */
+void mt6797_test_passive_registration(struct kunit *test, struct device *dev,
+				      int expected, unsigned int parents)
+{
+	struct passive_fixture *f = mt6797_test_passive_open(dev, 0);
+	struct devfreq_cpu_data *cpu;
+	unsigned int count = 0;
+	int ret;
+
+	KUNIT_ASSERT_FALSE(test, IS_ERR(f));
+	cpufreq_unregister_notifier(&f->data.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	list_del(&f->cpu.node);
+	f->data.get_target_freq = NULL;
+	f->data.parent_type = CPUFREQ_PARENT_DEV;
+	ret = devfreq_passive_event_handler(&f->df, DEVFREQ_GOV_START, NULL);
+	KUNIT_EXPECT_EQ(test, ret, expected);
+	list_for_each_entry(cpu, &f->data.cpu_data_list, node)
+		count++;
+	if (!ret) {
+		KUNIT_EXPECT_EQ(test, count, parents);
+		KUNIT_EXPECT_GT(test, f->calls, 0U);
+		KUNIT_EXPECT_EQ(test, devfreq_passive_event_handler(&f->df,
+								    DEVFREQ_GOV_STOP, NULL), 0);
+	} else {
+		KUNIT_EXPECT_EQ(test, count, 0U);
+		KUNIT_EXPECT_EQ(test, f->calls, 0U);
+	}
+	dev_set_drvdata(dev, f->saved_data);
 	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
 	kfree(f);
 }
