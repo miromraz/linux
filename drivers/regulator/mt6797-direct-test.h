@@ -4,6 +4,11 @@
 
 struct direct_cpu {
 	struct device *cpu_dev;
+	struct mutex callback_lock, reg_lock;
+	struct clk *cpu_clk, *inter_clk;
+	unsigned long current_freq;
+	int intermediate_voltage, opp_cpu;
+	bool dvfs_fault;
 	unsigned int rail_user;
 	u64 rail_cookie;
 	cpumask_t cpus;
@@ -30,11 +35,20 @@ static int direct_get_sharing(struct device *dev, struct cpumask *mask)
 	return direct_sharing_error;
 }
 
+static struct clk *direct_clock;
+
+static struct clk *direct_clk_get(struct device *dev, const char *id)
+{
+	return clk_hw_get_clk(__clk_get_hw(direct_clock), NULL);
+}
+
+#define clk_get direct_clk_get
 #define get_cpu_device direct_get_cpu_device
 #define dev_pm_opp_of_get_sharing_cpus direct_get_sharing
 #include "mt6797-direct-callbacks.h"
 #undef dev_pm_opp_of_get_sharing_cpus
 #undef get_cpu_device
+#undef clk_get
 
 static void direct_callbacks(struct kunit *test, struct conversion_fixture *f,
 			     struct device **dev, int mode)
@@ -52,6 +66,7 @@ static void direct_callbacks(struct kunit *test, struct conversion_fixture *f,
 		direct_devices[i] = dev[i];
 		refs[i] = kref_read(&dev[i]->kobj.kref);
 	}
+	direct_clock = f->clk;
 	direct_sharing_error = -EPROBE_DEFER;
 	KUNIT_EXPECT_EQ(test, direct_cpu_init(&cpu, 0), -EPROBE_DEFER);
 	KUNIT_EXPECT_EQ(test, cpu.rail_cookie, 0ULL);

@@ -18,4 +18,10 @@ int mt6797_test_cpu_probe(struct platform_device *pdev, int fail_cpu);
 int mt6797_test_cci_probe(struct platform_device *pdev);
 int mt6797_test_cci_remove(struct platform_device *pdev);
 void mt6797_test_transfer_hook(void (*hook)(void *, unsigned int, bool, int), void *data);
+void mt6797_test_cpu_hook(void (*hook)(void *, int), void *data);
+struct mt6797_txn_outcome;
+void *mt6797_test_cpu_open(struct device *dev, unsigned int user);
+int mt6797_test_cpu_target(void *data, unsigned int khz,
+			   struct mt6797_txn_outcome *outcome);
+void mt6797_test_cpu_close(void *data);
 #endif

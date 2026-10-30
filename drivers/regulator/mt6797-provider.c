@@ -1910,6 +1910,7 @@ int mt6797_preflight_test_start_clocks(struct device **dev, struct clk *clocks[3
 	if (!attached && !preflight_active) {
 		memset(owner.floor, 0, sizeof(owner.floor));
 		owner.fault = false;
+		supplier_revoked = false;
 	}
 	mutex_unlock(&owner_lock);
 	for (i = 0; i < MT6797_RAIL_USERS; i++) {

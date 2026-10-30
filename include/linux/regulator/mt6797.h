@@ -44,6 +44,29 @@ int mt6797_consumer_release(unsigned int user, u64 cookie);
  */
 int mt6797_consumer_recover(void);
 #else
+static inline int mt6797_consumer_txn_begin(unsigned int user, u64 cookie,
+		unsigned long target_hz, struct mt6797_consumer_txn **txn)
+{
+	return -EPROBE_DEFER;
+}
+static inline int mt6797_consumer_txn_prepare(struct mt6797_consumer_txn *txn)
+{
+	return -EPROBE_DEFER;
+}
+static inline int mt6797_consumer_txn_switch(struct mt6797_consumer_txn *txn)
+{
+	return -EPROBE_DEFER;
+}
+static inline int mt6797_consumer_txn_finish(struct mt6797_consumer_txn *txn,
+		struct mt6797_txn_outcome *outcome)
+{
+	return -EPROBE_DEFER;
+}
+static inline void mt6797_consumer_txn_abort(struct mt6797_consumer_txn *txn,
+		int error, struct mt6797_txn_outcome *outcome)
+{
+}
+
 static inline int mt6797_consumer_recover(void)
 {
 	return -EPROBE_DEFER;

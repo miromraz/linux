@@ -24,6 +24,9 @@ def block(source, marker):
 
 print("/* SPDX-License-Identifier: GPL-2.0-only */")
 print("/* Generated from production sources. Do not edit. */")
+print("static int mtk_cpu_dvfs_token_init(struct direct_cpu *info) {")
+print(block(cpu, "static int mtk_cpu_dvfs_token_init(struct mtk_cpu_dvfs_info *info)\n{"))
+print("}")
 print("static int direct_cpu_init(struct direct_cpu *info, int cpu) {")
 print("int ret;")
 print(block(cpu, 'if (cpu < 8 && of_machine_is_compatible("planet,gemini-pda")) {'))

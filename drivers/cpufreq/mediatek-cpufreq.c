@@ -19,6 +19,9 @@
 #include <linux/regulator/consumer.h>
 #include <linux/regulator/mt6797.h>
 #include <linux/units.h>
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "../regulator/mt6797-combined-test.h"
+#endif
 
 struct mtk_cpufreq_platform_data {
 	int min_volt_shift;
@@ -52,6 +55,12 @@ struct mtk_cpufreq_platform_data {
  */
 struct mtk_cpu_dvfs_info {
 	u64 rail_cookie;
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	struct cpufreq_policy *test_policy;
+#endif
+	/* Never taken by OPP/regulator/clock notifiers. */
+	struct mutex callback_lock;
+	struct mt6797_txn_outcome outcome;
 	unsigned int rail_user;
 	struct cpumask cpus;
 	struct device *cpu_dev;
@@ -219,20 +228,78 @@ static bool is_ccifreq_ready(struct mtk_cpu_dvfs_info *info)
 	return true;
 }
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+static void (*cpu_test_hook)(void *data, int phase);
+static void *cpu_test_data;
+
+void mt6797_test_cpu_hook(void (*hook)(void *, int), void *data)
+{
+	cpu_test_hook = hook;
+	cpu_test_data = data;
+}
+#endif
+
+/* Keep lifetime exclusion through the final notification-producing OPP puts.
+ * Recursive callbacks reject instead of waiting on their own reservation.
+ */
+static int mtk_cpufreq_token_target(struct mtk_cpu_dvfs_info *info,
+				    unsigned long rate)
+{
+	struct mt6797_consumer_txn *txn;
+	int ret;
+
+	if (!mutex_trylock(&info->callback_lock))
+		return -EBUSY;
+	if (info->dvfs_fault) {
+		ret = -EIO;
+		goto unlock;
+	}
+	ret = mt6797_consumer_txn_begin(info->rail_user, info->rail_cookie,
+					 rate, &txn);
+	if (ret)
+		goto unlock;
+	ret = mt6797_consumer_txn_prepare(txn);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (!ret && cpu_test_hook)
+		cpu_test_hook(cpu_test_data, 0);
+#endif
+	if (!ret)
+		ret = mt6797_consumer_txn_switch(txn);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (!ret && cpu_test_hook)
+		cpu_test_hook(cpu_test_data, 1);
+#endif
+	if (ret)
+		mt6797_consumer_txn_abort(txn, ret, &info->outcome);
+	else
+		ret = mt6797_consumer_txn_finish(txn, &info->outcome);
+	/* retained_uv is ownership, not a claim about electrical rollback. */
+	info->pre_vproc = info->outcome.retained_uv;
+	info->current_freq = info->outcome.rate;
+	info->dvfs_fault = ret && !info->outcome.retry;
+unlock:
+	mutex_unlock(&info->callback_lock);
+	return ret;
+}
+
 static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 				  unsigned int index)
 {
 	struct cpufreq_frequency_table *freq_table = policy->freq_table;
 	struct clk *cpu_clk = policy->clk;
-	struct clk *armpll = clk_get_parent(cpu_clk);
+	struct clk *armpll;
 	struct mtk_cpu_dvfs_info *info = policy->driver_data;
 	struct device *cpu_dev = info->cpu_dev;
 	struct dev_pm_opp *opp;
 	long freq_hz;
 	int vproc, pre_vproc, inter_vproc, target_vproc, ret;
 
-	inter_vproc = info->intermediate_voltage;
+	if (info->rail_cookie)
+		return mtk_cpufreq_token_target(info,
+			(unsigned long)freq_table[index].frequency * 1000);
 
+	armpll = clk_get_parent(cpu_clk);
+	inter_vproc = info->intermediate_voltage;
 
 	mutex_lock(&info->reg_lock);
 
@@ -478,6 +545,69 @@ static struct regulator *mtk_cpufreq_get_regulator(struct device *dev,
 	return reg;
 }
 
+/* The registry owns the filtered OPP table and durable regulator request.
+ * The driver owns only its lease and enabled clock references.
+ */
+static int mtk_cpu_dvfs_token_init(struct mtk_cpu_dvfs_info *info)
+{
+	struct dev_pm_opp *opp;
+	unsigned long rate;
+	int ret;
+
+	mutex_init(&info->callback_lock);
+	mutex_init(&info->reg_lock);
+	ret = mt6797_consumer_acquire(info->cpu_dev, info->rail_user,
+				      &info->rail_cookie);
+	if (ret)
+		return ret;
+	info->cpu_clk = clk_get(info->cpu_dev, "cpu");
+	if (IS_ERR(info->cpu_clk)) {
+		ret = PTR_ERR(info->cpu_clk);
+		goto release;
+	}
+	info->inter_clk = clk_get(info->cpu_dev, "intermediate");
+	if (IS_ERR(info->inter_clk)) {
+		ret = PTR_ERR(info->inter_clk);
+		goto put_cpu;
+	}
+	ret = clk_prepare_enable(info->cpu_clk);
+	if (ret)
+		goto put_inter;
+	ret = clk_prepare_enable(info->inter_clk);
+	if (ret)
+		goto disable_cpu;
+	rate = clk_get_rate(info->inter_clk);
+	opp = dev_pm_opp_find_freq_ceil(info->cpu_dev, &rate);
+	if (IS_ERR(opp)) {
+		ret = PTR_ERR(opp);
+		goto disable_inter;
+	}
+	info->intermediate_voltage = dev_pm_opp_get_voltage(opp);
+	dev_pm_opp_put(opp);
+	info->current_freq = clk_get_rate(info->cpu_clk);
+	rate = info->current_freq;
+	opp = dev_pm_opp_find_freq_ceil(info->cpu_dev, &rate);
+	if (IS_ERR(opp)) {
+		ret = PTR_ERR(opp);
+		goto disable_inter;
+	}
+	dev_pm_opp_put(opp);
+	/* No legacy voltage notifier: the registry reconciles requirements. */
+	return 0;
+disable_inter:
+	clk_disable_unprepare(info->inter_clk);
+disable_cpu:
+	clk_disable_unprepare(info->cpu_clk);
+put_inter:
+	clk_put(info->inter_clk);
+put_cpu:
+	clk_put(info->cpu_clk);
+release:
+	mt6797_consumer_release(info->rail_user, info->rail_cookie);
+	info->rail_cookie = 0;
+	return ret;
+}
+
 static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 {
 	struct device *cpu_dev;
@@ -489,7 +619,10 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 		int sibling;
 
 		info->cpu_dev = get_cpu_device(cpu / 4 * 4);
+		if (!info->cpu_dev)
+			return -ENODEV;
 		info->rail_user = cpu / 4;
+		info->opp_cpu = cpu / 4 * 4;
 		ret = dev_pm_opp_of_get_sharing_cpus(info->cpu_dev, &info->cpus);
 		if (ret)
 			return ret;
@@ -498,8 +631,7 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 		for_each_cpu(sibling, &info->cpus)
 			if (sibling / 4 != info->rail_user)
 				return -EINVAL;
-		return mt6797_consumer_acquire(info->cpu_dev, info->rail_user,
-					       &info->rail_cookie);
+		return mtk_cpu_dvfs_token_init(info);
 	}
 
 	cpu_dev = get_cpu_device(cpu);
@@ -693,8 +825,15 @@ out_put_cci_dev:
 static void mtk_cpu_dvfs_info_release(struct mtk_cpu_dvfs_info *info)
 {
 	if (info->rail_cookie) {
+		mutex_lock(&info->callback_lock);
 		mt6797_consumer_release(info->rail_user, info->rail_cookie);
 		info->rail_cookie = 0;
+		info->dvfs_fault = true;
+		clk_disable_unprepare(info->inter_clk);
+		clk_disable_unprepare(info->cpu_clk);
+		clk_put(info->inter_clk);
+		clk_put(info->cpu_clk);
+		mutex_unlock(&info->callback_lock);
 		return;
 	}
 	regulator_disable(info->proc_reg);
@@ -714,17 +853,13 @@ static void mtk_cpu_dvfs_info_release(struct mtk_cpu_dvfs_info *info)
 		put_device(info->cci_dev);
 }
 
-static int mtk_cpufreq_init(struct cpufreq_policy *policy)
+static int mtk_cpufreq_policy_init(struct cpufreq_policy *policy,
+				   struct mtk_cpu_dvfs_info *info)
 {
-	struct mtk_cpu_dvfs_info *info;
 	struct cpufreq_frequency_table *freq_table;
 	struct clk *parent;
 	unsigned int cur_khz;
 	int ret, idx, i;
-
-	info = mtk_cpu_dvfs_info_lookup(policy->cpu);
-	if (!info)
-		return -ENODEV;
 
 	ret = dev_pm_opp_init_cpufreq_table(info->cpu_dev, &freq_table);
 	if (ret) {
@@ -755,6 +890,17 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 				policy->cpu);
 			ret = -ENODEV;
 			goto free_table;
+		}
+
+		/* Gemini's token validates the stable PLL and reserved OPPs.
+		 * Never perform the legacy firmware bootstrap on this path.
+		 */
+		if (info->rail_cookie) {
+			if (!info->current_freq) {
+				ret = -EIO;
+				goto free_table;
+			}
+			return 0;
 		}
 
 		/*
@@ -793,6 +939,13 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 free_table:
 	dev_pm_opp_free_cpufreq_table(info->cpu_dev, &policy->freq_table);
 	return ret;
+}
+
+static int mtk_cpufreq_init(struct cpufreq_policy *policy)
+{
+	struct mtk_cpu_dvfs_info *info = mtk_cpu_dvfs_info_lookup(policy->cpu);
+
+	return info ? mtk_cpufreq_policy_init(policy, info) : -ENODEV;
 }
 
 static void mtk_cpufreq_exit(struct cpufreq_policy *policy)
@@ -1065,5 +1218,79 @@ int mt6797_test_cpu_probe(struct platform_device *pdev, int fail_cpu)
 		devres_remove_group(&pdev->dev, group);
 	}
 	return ret;
+}
+#endif
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+/* Synthetic fixtures enter the actual callback without registering CPUFreq. */
+void *mt6797_test_cpu_open(struct device *dev, unsigned int user)
+{
+	struct mtk_cpu_dvfs_info *info;
+	int ret;
+
+	info = kzalloc_obj(*info);
+	if (!info)
+		return ERR_PTR(-ENOMEM);
+	info->cpu_dev = dev;
+	info->rail_user = user;
+	info->soc_data = &mt6797_platform_data;
+	ret = mtk_cpu_dvfs_token_init(info);
+	if (ret) {
+		kfree(info);
+		return ERR_PTR(ret);
+	}
+	info->test_policy = kzalloc_obj(*info->test_policy);
+	if (!info->test_policy) {
+		ret = -ENOMEM;
+		goto release;
+	}
+	if (!zalloc_cpumask_var(&info->test_policy->cpus, GFP_KERNEL)) {
+		ret = -ENOMEM;
+		goto free_policy;
+	}
+	cpumask_set_cpu(user * 4, &info->cpus);
+	info->test_policy->cpu = user * 4;
+	ret = mtk_cpufreq_policy_init(info->test_policy, info);
+	if (ret) {
+		free_cpumask_var(info->test_policy->cpus);
+		goto free_policy;
+	}
+	return info;
+free_policy:
+	kfree(info->test_policy);
+release:
+	mtk_cpu_dvfs_info_release(info);
+	kfree(info);
+	return ERR_PTR(ret);
+}
+
+int mt6797_test_cpu_target(void *data, unsigned int khz,
+			   struct mt6797_txn_outcome *outcome)
+{
+	struct mtk_cpu_dvfs_info *info = data;
+	struct cpufreq_policy *policy = info->test_policy;
+	unsigned int index;
+	int ret = -EINVAL;
+
+	for (index = 0; policy->freq_table[index].frequency != CPUFREQ_TABLE_END; index++) {
+		if (policy->freq_table[index].frequency == khz) {
+			ret = mtk_cpufreq_set_target(policy, index);
+			break;
+		}
+	}
+
+	*outcome = info->outcome;
+	return ret;
+}
+
+void mt6797_test_cpu_close(void *data)
+{
+	struct mtk_cpu_dvfs_info *info = data;
+
+	mtk_cpufreq_exit(info->test_policy);
+	free_cpumask_var(info->test_policy->cpus);
+	kfree(info->test_policy);
+	mtk_cpu_dvfs_info_release(info);
+	kfree(info);
 }
 #endif
