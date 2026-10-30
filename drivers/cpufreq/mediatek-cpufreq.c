@@ -1372,6 +1372,13 @@ int mt6797_test_cpu_target(void *data, unsigned int khz,
 	return ret;
 }
 
+void mt6797_test_cpu_chain(void *data, void (*run)(void *), void *arg)
+{
+	struct mtk_cpu_dvfs_info *info = data;
+
+	mt6797_test_policy_chain(info->test_policy, &mtk_cpufreq_owned_driver, run, arg);
+}
+
 bool mt6797_test_cpu_unlocked(void *data)
 {
 	struct mtk_cpu_dvfs_info *info = data;

@@ -1529,7 +1529,7 @@ static void cci_lifecycle_drain(struct kunit *test, struct platform_device *pdev
 	struct cci_drain_fixture f = { .test = test, .pdev = pdev,
 		.df = mt6797_test_cci_devfreq(pdev) };
 	struct devfreq_passive_data *passive = f.df->data;
-	struct task_struct *post, *remove;
+	struct task_struct *post = NULL, *remove = NULL;
 	struct mt6797_provider_status status;
 
 	get_device(&f.df->dev);
@@ -1543,10 +1543,21 @@ static void cci_lifecycle_drain(struct kunit *test, struct platform_device *pdev
 	mt6797_test_cci_callback_hook(cci_callback_barrier);
 	mt6797_test_srcu_hook(cci_drain_barrier);
 	post = kthread_run(cci_post_thread, &f, "cci-post");
-	KUNIT_ASSERT_FALSE(test, IS_ERR(post));
-	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f.entered, 2 * HZ), 0UL);
+	if (IS_ERR(post)) {
+		KUNIT_FAIL(test, "POST task creation failed");
+		post = NULL;
+		goto release;
+	}
+	if (!wait_for_completion_timeout(&f.entered, 2 * HZ)) {
+		KUNIT_FAIL(test, "POST callback did not enter");
+		goto release;
+	}
 	remove = kthread_run(cci_remove_thread, &f, "cci-remove");
-	KUNIT_ASSERT_FALSE(test, IS_ERR(remove));
+	if (IS_ERR(remove)) {
+		KUNIT_FAIL(test, "remove task creation failed");
+		remove = NULL;
+		goto release;
+	}
 	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f.draining, 2 * HZ), 0UL);
 	/* The callback has released df->lock; only its SRCU reader remains. */
 	if (mutex_trylock(&f.df->lock))
@@ -1562,13 +1573,20 @@ static void cci_lifecycle_drain(struct kunit *test, struct platform_device *pdev
 	KUNIT_EXPECT_FALSE(test, completion_done(&f.removed));
 	mt6797_provider_status(&status);
 	KUNIT_EXPECT_NE(test, status.active & BIT(2), 0UL);
+release:
+	complete_all(&f.release);
 	put_device(&f.df->dev);
-	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f.removed, 2 * HZ), 0UL);
-	kthread_stop(post);
-	kthread_stop(remove);
+	if (remove)
+		KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f.removed, 2 * HZ), 0UL);
+	if (post)
+		kthread_stop(post);
+	if (remove)
+		kthread_stop(remove);
 	mt6797_test_srcu_hook(NULL);
 	mt6797_test_cci_callback_hook(NULL);
 	cci_drain = NULL;
+	if (!remove)
+		mt6797_test_cci_fini(pdev);
 }
 
 static void cci_lifecycle_run(struct kunit *test, void *arg)
@@ -2028,6 +2046,183 @@ static void callback_inject(void *data, int phase)
 	}
 }
 
+struct chain_listener {
+	struct notifier_block nb;
+	unsigned int pre, post, terminal;
+	unsigned long rate;
+};
+
+static int chain_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct chain_listener *l = container_of(nb, struct chain_listener, nb);
+	struct devfreq_freqs *freqs = data;
+
+	if (event == DEVFREQ_PRECHANGE) {
+		l->pre++;
+	} else if (event == DEVFREQ_POSTCHANGE) {
+		l->post++;
+		l->rate = freqs->new;
+	} else if (event == DEVFREQ_TERMINAL) {
+		l->terminal++;
+		l->rate = 0;
+	}
+	return NOTIFY_BAD;
+}
+
+struct initialized_chain {
+	struct kunit *test;
+	struct platform_device *pdev;
+	void *info;
+	struct clk *clock;
+};
+
+static void initialized_chain_run(void *arg)
+{
+	struct initialized_chain *f = arg;
+	struct kunit *test = f->test;
+	struct mt6797_txn_outcome outcome;
+	struct devfreq *df;
+	struct accounting_observer a = {
+		.nb = { .notifier_call = accounting_event, .priority = -1 },
+		.test = test, .info = f->info,
+	}, b = {
+		.nb = { .notifier_call = accounting_event, .priority = -2 },
+		.test = test, .info = f->info,
+	};
+	unsigned int refs = kref_read(&f->pdev->dev.kobj.kref);
+	unsigned int enables = __clk_get_enable_count(f->clock);
+	struct chain_listener listeners[2] = {
+		{ .nb = { .notifier_call = chain_event, .priority = -1 } },
+		{ .nb = { .notifier_call = chain_event, .priority = -2 } },
+	};
+	unsigned int transitions;
+	int guard, vote, i, ret;
+	int registered = 0;
+	bool cpu_a = false, cpu_b = false;
+
+	mt6797_preflight_test_flush();
+	ret = mt6797_test_cci_init(f->pdev, 0);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		return;
+	df = mt6797_test_cci_devfreq(f->pdev);
+	KUNIT_EXPECT_NOT_NULL(test, df);
+	if (!df)
+		goto remove;
+	KUNIT_EXPECT_NOT_NULL(test, df->profile->target_outcome);
+	KUNIT_EXPECT_EQ(test, df->previous_freq, 100000UL);
+	transitions = df->stats.total_trans;
+	for (i = 0; i < 2; i++) {
+		ret = devfreq_register_notifier(df, &listeners[i].nb, DEVFREQ_OUTCOME_NOTIFIER);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		if (ret)
+			goto unregister;
+		registered++;
+	}
+	ret = cpufreq_register_notifier(&a.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto unregister;
+	cpu_a = true;
+	ret = cpufreq_register_notifier(&b.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto unregister;
+	cpu_b = true;
+	for (i = 0; i < 4; i++) {
+		unsigned int khz = i % 2 ? 100 : 200;
+		unsigned long expected = i % 2 ? 100000 : 200000;
+
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, khz, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, outcome.rate, expected);
+		kunit_info(test, "CPU%u request=%u CPU=%lu/%d CCI=%lu/%d retry=%d stats=%u\n",
+			   mt6797_test_cpu_policy(f->info)->cpu, khz, outcome.rate,
+			   outcome.error, df->outcome.rate, df->outcome.error,
+			   df->outcome.retry, df->stats.total_trans);
+		KUNIT_EXPECT_EQ(test, df->outcome.error, 0);
+		KUNIT_EXPECT_EQ(test, df->previous_freq, expected);
+		KUNIT_EXPECT_EQ(test, clk_get_rate(f->clock), expected);
+		KUNIT_EXPECT_EQ(test, df->stats.total_trans, ++transitions);
+		KUNIT_EXPECT_EQ(test, a.post, (unsigned int)i + 1);
+		KUNIT_EXPECT_EQ(test, b.post, a.post);
+		KUNIT_EXPECT_EQ(test, a.rate, khz);
+		KUNIT_EXPECT_EQ(test, b.rate, khz);
+		KUNIT_EXPECT_EQ(test, listeners[0].post, (unsigned int)i + 1);
+		KUNIT_EXPECT_EQ(test, listeners[1].post, listeners[0].post);
+		KUNIT_EXPECT_EQ(test, listeners[0].rate, expected);
+		KUNIT_EXPECT_EQ(test, listeners[1].rate, expected);
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 2);
+		KUNIT_EXPECT_EQ(test, vote, i % 2 ? 1080000 : 1100000);
+	}
+	/* A real CCF veto leaves CCI unchanged and must retry the same CPU POST. */
+	{
+		struct notifier_block veto = { .notifier_call = transition_veto };
+
+		ret = clk_notifier_register(f->clock, &veto);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		if (ret)
+			goto unregister;
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, df->outcome.error, -EBUSY);
+		KUNIT_EXPECT_TRUE(test, df->outcome.retry);
+		KUNIT_EXPECT_EQ(test, df->previous_freq, 100000UL);
+		KUNIT_EXPECT_EQ(test, df->stats.total_trans, transitions);
+		clk_notifier_unregister(f->clock, &veto);
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(f->info, 200, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, df->outcome.error, 0);
+		KUNIT_EXPECT_EQ(test, df->previous_freq, 200000UL);
+		KUNIT_EXPECT_EQ(test, df->stats.total_trans, ++transitions);
+	}
+unregister:
+	while (registered)
+		devfreq_unregister_notifier(df, &listeners[--registered].nb,
+					    DEVFREQ_OUTCOME_NOTIFIER);
+	if (cpu_b)
+		cpufreq_unregister_notifier(&b.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	if (cpu_a)
+		cpufreq_unregister_notifier(&a.nb, CPUFREQ_TERMINAL_NOTIFIER);
+remove:
+	mt6797_test_cci_fini(f->pdev);
+	mt6797_preflight_test_flush();
+	KUNIT_EXPECT_PTR_EQ(test, platform_get_drvdata(f->pdev), NULL);
+	KUNIT_EXPECT_EQ(test, kref_read(&f->pdev->dev.kobj.kref), refs);
+	KUNIT_EXPECT_EQ(test, __clk_get_enable_count(f->clock), enables);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 1);
+	kunit_info(test, "initialized owned CPU%u -> passive -> CCI: four transitions attempted; child drained\n",
+		   mt6797_test_cpu_policy(f->info)->cpu);
+}
+
+/* Independent CCI CCF tree: CPU and child must not share a PLL claim. */
+static void chain_clock(struct kunit *test, struct clk *inter, struct clk **output)
+{
+	struct lifecycle_clock *pll = kunit_kzalloc(test, sizeof(*pll), GFP_KERNEL);
+	struct transition_mux *mux = kunit_kzalloc(test, sizeof(*mux), GFP_KERNEL);
+	const struct clk_hw *parents[2];
+	struct clk_init_data init = { .name = "chain-pll", .ops = &lifecycle_ops };
+
+	KUNIT_ASSERT_NOT_NULL(test, pll);
+	KUNIT_ASSERT_NOT_NULL(test, mux);
+	pll->rate = 100000;
+	pll->hw.init = &init;
+	KUNIT_ASSERT_EQ(test, clk_hw_register(NULL, &pll->hw), 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+				transition_unregister, &pll->hw), 0);
+	parents[0] = &pll->hw;
+	parents[1] = __clk_get_hw(inter);
+	init.name = "chain-mux";
+	init.ops = &transition_mux_ops;
+	init.parent_hws = parents;
+	init.num_parents = 2;
+	mux->hw.init = &init;
+	KUNIT_ASSERT_EQ(test, clk_hw_register(NULL, &mux->hw), 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+				transition_unregister, &mux->hw), 0);
+	*output = mux->hw.clk;
+}
+
 static void cpu_callback_case(struct kunit *test, struct clk *mux,
 		struct clk *pll, struct clk *inter, unsigned int user, int failure)
 {
@@ -2057,6 +2252,7 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 		.nb = { .notifier_call = accounting_event, .priority = -2 },
 	};
 	void *info, *passive;
+	struct clk *child = NULL;
 	struct cpufreq_policy *policy;
 	u64 old_cookie;
 	int i, ret;
@@ -2069,6 +2265,11 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	KUNIT_ASSERT_NOT_NULL(test, f);
 	KUNIT_ASSERT_NOT_NULL(test, e);
 	clocks[user][0] = mux;
+	if (failure == 21) {
+		chain_clock(test, inter, &child);
+		KUNIT_ASSERT_NOT_NULL(test, child);
+		clocks[2][0] = child;
+	}
 	f->test = test;
 	f->uv[0] = 1120000;
 	f->uv[1] = 1200000;
@@ -2116,6 +2317,25 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 		goto cleanup;
 	policy = mt6797_test_cpu_policy(info);
 	old_cookie = mt6797_test_cpu_cookie(info);
+	if (failure == 21) {
+		struct clk_lookup *cci, *temporary;
+		struct initialized_chain chain = {
+			.test = test, .pdev = f->dev[2], .info = info, .clock = child,
+		};
+
+		cci = clkdev_create(child, "cci", "%s", dev_name(dev[2]));
+		temporary = clkdev_create(inter, "intermediate", "%s", dev_name(dev[2]));
+		KUNIT_EXPECT_NOT_NULL(test, cci);
+		KUNIT_EXPECT_NOT_NULL(test, temporary);
+		if (cci && temporary)
+			mt6797_test_cpu_chain(info, initialized_chain_run, &chain);
+		if (temporary)
+			clkdev_drop(temporary);
+		if (cci)
+			clkdev_drop(cci);
+		mt6797_test_cpu_close(info);
+		goto cleanup;
+	}
 	observer.test = test;
 	observer.info = info;
 	later.test = test;
@@ -2405,10 +2625,17 @@ cleanup:
 	clkdev_drop(inter_lookup);
 	clkdev_drop(cpu_lookup);
 	kunit_release_action(test, conversion_cleanup, f);
+	if (child) {
+		struct clk_hw *hw = __clk_get_hw(child);
+		struct clk_hw *parent = clk_hw_get_parent(hw);
+
+		kunit_release_action(test, transition_unregister, hw);
+		kunit_release_action(test, transition_unregister, parent);
+	}
 }
 #endif
 
-static void transition_clock_contract(struct kunit *test)
+static void transition_clock_fixture(struct kunit *test, bool fullchain)
 {
 	struct lifecycle_clock *pll, *inter;
 	struct transition_mux *mux;
@@ -2449,6 +2676,13 @@ static void transition_clock_contract(struct kunit *test)
 	output = mux->hw.clk;
 	source = pll->hw.clk;
 	temporary = inter->hw.clk;
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (fullchain) {
+		for (unsigned int user = 0; user < 2; user++)
+			cpu_callback_case(test, output, source, temporary, user, 21);
+		return;
+	}
+#endif
 	KUNIT_ASSERT_EQ(test, clk_notifier_register(output, &veto), 0);
 	KUNIT_EXPECT_NE(test, mtk_dvfs_switch_clock_tracked(output, source,
 		 temporary, 200, &unchanged), 0);
@@ -2493,6 +2727,18 @@ static void transition_clock_contract(struct kunit *test)
 	mt6797_test_legacy_completion(test);
 #endif
 }
+
+static void transition_clock_contract(struct kunit *test)
+{
+	transition_clock_fixture(test, false);
+}
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+static void initialized_fullchain(struct kunit *test)
+{
+	transition_clock_fixture(test, true);
+}
+#endif
 
 struct requirements_listener {
 	struct notifier_block nb;
@@ -2680,6 +2926,9 @@ static struct kunit_case provider_cases[] = {
 	KUNIT_CASE(requirements_single_remove),
 	KUNIT_CASE(requirements_reservation),
 	KUNIT_CASE(transition_clock_contract),
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	KUNIT_CASE(initialized_fullchain),
+#endif
 	KUNIT_CASE(direct_cpu_cci_lifetime),
 	KUNIT_CASE(direct_cpu_first_vote_error),
 	KUNIT_CASE(direct_cpu_notifier_stale),

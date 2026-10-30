@@ -3381,7 +3381,8 @@ void mt6797_test_cci_policies(struct kunit *test,
 		.name = "cci-life-test",
 		.flags = CPUFREQ_TERMINAL_NOTIFICATION,
 	};
-	struct cpufreq_policy *policies[2];
+	struct cpufreq_policy *policies[2] = {};
+	bool opp_low[2] = {}, opp_high[2] = {};
 	unsigned long saved_ref[2], saved_scale[2];
 	unsigned int cpu;
 	int i;
@@ -3391,16 +3392,29 @@ void mt6797_test_cci_policies(struct kunit *test,
 		struct device *dev = get_cpu_device(i * 4);
 
 		policies[i] = mt6797_test_policy_alloc(i * 4);
-		KUNIT_ASSERT_NOT_NULL(test, policies[i]);
+		if (!policies[i]) {
+			KUNIT_FAIL(test, "policy allocation failed");
+			goto cleanup;
+		}
 		saved_ref[i] = per_cpu(capacity_freq_ref, i * 4);
 		saved_scale[i] = per_cpu(arch_freq_scale, i * 4);
-		per_cpu(capacity_freq_ref, i * 4) = 200;
+
 		policies[i]->cur = 100;
 		policies[i]->cpuinfo.min_freq = 100;
 		policies[i]->cpuinfo.max_freq = 200;
-		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev, 100000, 1040000), 0);
-		KUNIT_ASSERT_EQ(test, dev_pm_opp_add(dev, 200000, 1100000), 0);
+		if (dev_pm_opp_add(dev, 100000, 1040000)) {
+			KUNIT_FAIL(test, "low CPU OPP allocation failed");
+			goto cleanup;
+		}
+		opp_low[i] = true;
+		if (dev_pm_opp_add(dev, 200000, 1100000)) {
+			KUNIT_FAIL(test, "high CPU OPP allocation failed");
+			goto cleanup;
+		}
+		opp_high[i] = true;
 	}
+	for (i = 0; i < 2; i++)
+		per_cpu(capacity_freq_ref, i * 4) = 200;
 	cpufreq_driver = &driver;
 	cpufreq_terminal_driver = true;
 	for_each_possible_cpu(cpu) {
@@ -3418,10 +3432,76 @@ void mt6797_test_cci_policies(struct kunit *test,
 	for (i = 0; i < 2; i++) {
 		per_cpu(capacity_freq_ref, i * 4) = saved_ref[i];
 		per_cpu(arch_freq_scale, i * 4) = saved_scale[i];
-		dev_pm_opp_remove(get_cpu_device(i * 4), 100000);
-		dev_pm_opp_remove(get_cpu_device(i * 4), 200000);
-		mt6797_test_policy_free(policies[i]);
 	}
+cleanup:
+	for (i = 0; i < 2; i++) {
+		if (opp_high[i])
+			dev_pm_opp_remove(get_cpu_device(i * 4), 200000);
+		if (opp_low[i])
+			dev_pm_opp_remove(get_cpu_device(i * 4), 100000);
+		if (policies[i])
+			mt6797_test_policy_free(policies[i]);
+	}
+}
+
+/* Publish the actual owned policy for a bounded initialized-child fixture. */
+static unsigned int chain_cpu;
+
+static int chain_required(unsigned int cpu)
+{
+	return cpu / 4 == chain_cpu / 4;
+}
+
+void mt6797_test_policy_chain(struct cpufreq_policy *policy,
+			       struct cpufreq_driver *driver, void (*run)(void *), void *arg)
+{
+	struct kunit *test = kunit_get_current_test();
+	int (*saved)(unsigned int) = driver->policy_required;
+	struct device *dev = get_cpu_device(policy->cpu);
+	unsigned long ref = per_cpu(capacity_freq_ref, policy->cpu);
+	unsigned long scale = per_cpu(arch_freq_scale, policy->cpu);
+	unsigned int cpu;
+	int ret;
+
+	KUNIT_ASSERT_PTR_EQ(test, cpufreq_driver, NULL);
+	ret = dev_pm_opp_add(dev, 100000, 1040000);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		return;
+	ret = dev_pm_opp_add(dev, 200000, 1100000);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret) {
+		dev_pm_opp_remove(dev, 100000);
+		return;
+	}
+	chain_cpu = policy->cpu;
+	driver->policy_required = chain_required;
+	cpufreq_driver = driver;
+	cpufreq_terminal_driver = true;
+	cpufreq_table_validate_and_sort(policy);
+	policy->min = policy->cpuinfo.min_freq;
+	policy->max = policy->cpuinfo.max_freq;
+	per_cpu(capacity_freq_ref, policy->cpu) = policy->max;
+	for_each_possible_cpu(cpu)
+		if (chain_required(cpu)) {
+			per_cpu(cpufreq_cpu_data, cpu) = policy;
+			cpumask_set_cpu(cpu, policy->cpus);
+			cpumask_set_cpu(cpu, policy->related_cpus);
+		}
+	run(arg);
+	for_each_possible_cpu(cpu)
+		if (chain_required(cpu))
+			per_cpu(cpufreq_cpu_data, cpu) = NULL;
+	cpumask_clear(policy->cpus);
+	cpumask_set_cpu(policy->cpu, policy->cpus);
+	cpumask_copy(policy->related_cpus, policy->cpus);
+	per_cpu(capacity_freq_ref, policy->cpu) = ref;
+	per_cpu(arch_freq_scale, policy->cpu) = scale;
+	cpufreq_terminal_driver = false;
+	cpufreq_driver = NULL;
+	driver->policy_required = saved;
+	dev_pm_opp_remove(dev, 200000);
+	dev_pm_opp_remove(dev, 100000);
 }
 
 /* Isolated fixture: refuse to replace a registered platform driver. */
@@ -3432,6 +3512,10 @@ int mt6797_test_core_target(struct cpufreq_policy *policy,
 	unsigned int begins = test_transition_begins;
 	unsigned long flags, saved_ref, saved_scale;
 	int ret;
+
+	if (cpufreq_driver == driver)
+		return __cpufreq_driver_target(policy, policy->freq_table[index].frequency,
+					      CPUFREQ_RELATION_L);
 
 	mutex_lock(&cpufreq_fast_switch_lock);
 	if ((driver->flags & CPUFREQ_TERMINAL_NOTIFICATION) &&
