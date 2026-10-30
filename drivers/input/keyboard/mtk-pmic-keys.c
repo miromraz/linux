@@ -17,6 +17,8 @@
 #include <linux/mfd/mt6397/core.h>
 #include <linux/mfd/mt6397/registers.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/workqueue.h>
 #include <linux/of_device.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -57,6 +59,7 @@ struct mtk_pmic_regs {
 	u32 pmic_rst_reg;
 	u32 rst_lprst_mask; /* Long-press reset timeout bitmask */
 	bool key_release_irq;
+	bool can_resample; /* Debounce register supplies current level. */
 };
 
 static const struct mtk_pmic_regs mt6397_regs = {
@@ -106,6 +109,8 @@ static const struct mtk_pmic_regs mt6351_regs = {
 	.pmic_rst_reg = MT6351_TOP_RST_MISC,
 	.rst_lprst_mask = MTK_PMIC_MT6331_RST_DU_MASK,
 	.key_release_irq = true,
+	/* TOPSTATUS PWRKEY_DEB/HOMEKEY_DEB are active-low levels. */
+	.can_resample = true,
 };
 
 static const struct mtk_pmic_regs mt6357_regs = {
@@ -156,6 +161,13 @@ struct mtk_pmic_keys_info {
 	int irq;
 	int irq_r; /* optional: release irq if different */
 	bool wakeup:1;
+	bool can_resample;
+	bool pending;
+	bool suspended;
+	bool stopped;
+	unsigned int retry_ms;
+	struct mutex lock; /* Serializes sampling, reporting and retry policy. */
+	struct delayed_work retry_work;
 };
 
 struct mtk_pmic_keys {
@@ -217,12 +229,31 @@ static void mtk_pmic_keys_lp_reset_setup(struct mtk_pmic_keys *keys,
 	regmap_update_bits(keys->regmap, regs->pmic_rst_reg, mask, value);
 }
 
-static irqreturn_t mtk_pmic_keys_irq_handler_thread(int irq, void *data)
+/* Caller holds lock across the bus read AND input publication. */
+static void mtk_pmic_key_sample(struct mtk_pmic_keys_info *info)
 {
-	struct mtk_pmic_keys_info *info = data;
 	u32 key_deb, pressed;
+	int ret;
 
-	regmap_read(info->keys->regmap, info->regs->deb_reg, &key_deb);
+	ret = regmap_read(info->keys->regmap, info->regs->deb_reg, &key_deb);
+	if (ret) {
+		dev_err_ratelimited(info->keys->dev,
+				    "Failed to read key %u state: %d\n",
+				    info->keycode, ret);
+		if (info->can_resample) {
+			info->pending = true;
+			info->retry_ms = info->retry_ms ?
+				min(info->retry_ms * 2, 5000U) : 100;
+			/* Do not let repeated IRQ failures postpone an existing retry. */
+			queue_delayed_work(system_wq, &info->retry_work,
+					   msecs_to_jiffies(info->retry_ms));
+		}
+		return;
+	}
+
+	info->pending = false;
+	info->retry_ms = 0;
+	cancel_delayed_work(&info->retry_work);
 
 	key_deb &= info->regs->deb_mask;
 
@@ -233,7 +264,76 @@ static irqreturn_t mtk_pmic_keys_irq_handler_thread(int irq, void *data)
 
 	dev_dbg(info->keys->dev, "(%s) key =%d using PMIC\n",
 		 pressed ? "pressed" : "released", info->keycode);
+}
 
+static void mtk_pmic_key_retry(struct work_struct *work)
+{
+	struct mtk_pmic_keys_info *info = container_of(to_delayed_work(work),
+					struct mtk_pmic_keys_info, retry_work);
+
+	mutex_lock(&info->lock);
+	if (!info->stopped && !info->suspended && info->pending)
+		mtk_pmic_key_sample(info);
+	mutex_unlock(&info->lock);
+}
+
+static void mtk_pmic_key_init(struct mtk_pmic_keys_info *info)
+{
+	mutex_init(&info->lock);
+	INIT_DELAYED_WORK(&info->retry_work, mtk_pmic_key_retry);
+}
+
+static void mtk_pmic_key_stop(void *data)
+{
+	struct mtk_pmic_keys_info *info = data;
+
+	mutex_lock(&info->lock);
+	info->stopped = true;
+	mutex_unlock(&info->lock);
+	cancel_delayed_work_sync(&info->retry_work);
+}
+
+static void mtk_pmic_keys_stop(void *data)
+{
+	struct mtk_pmic_keys *keys = data;
+	int i;
+
+	for (i = 0; i < MTK_PMIC_MAX_KEY_COUNT; i++)
+		if (keys->keys[i].keys)
+			mtk_pmic_key_stop(&keys->keys[i]);
+}
+
+static void mtk_pmic_key_pause(struct mtk_pmic_keys_info *info)
+{
+	mutex_lock(&info->lock);
+	info->suspended = true;
+	if (info->can_resample)
+		info->pending = true;
+	mutex_unlock(&info->lock);
+	cancel_delayed_work_sync(&info->retry_work);
+}
+
+static void mtk_pmic_key_resume(struct mtk_pmic_keys_info *info)
+{
+	mutex_lock(&info->lock);
+	info->suspended = false;
+	if (!info->stopped && info->can_resample && info->pending)
+		queue_delayed_work(system_wq, &info->retry_work, 0);
+	mutex_unlock(&info->lock);
+}
+
+static irqreturn_t mtk_pmic_keys_irq_handler_thread(int irq, void *data)
+{
+	struct mtk_pmic_keys_info *info = data;
+
+	mutex_lock(&info->lock);
+	if (!info->stopped) {
+		if (info->suspended && info->can_resample)
+			info->pending = true;
+		else
+			mtk_pmic_key_sample(info);
+	}
+	mutex_unlock(&info->lock);
 	return IRQ_HANDLED;
 }
 
@@ -243,6 +343,12 @@ static int mtk_pmic_key_setup(struct mtk_pmic_keys *keys,
 	int ret;
 
 	info->keys = keys;
+	mtk_pmic_key_init(info);
+	/* Covers probe failures before input registration as well. */
+	info->suspended = info->can_resample;
+	ret = devm_add_action_or_reset(keys->dev, mtk_pmic_key_stop, info);
+	if (ret)
+		return ret;
 
 	ret = regmap_update_bits(keys->regmap, info->regs->intsel_reg,
 				 info->regs->intsel_mask,
@@ -283,6 +389,9 @@ static int mtk_pmic_keys_suspend(struct device *dev)
 	int index;
 
 	for (index = 0; index < MTK_PMIC_MAX_KEY_COUNT; index++) {
+		if (!keys->keys[index].keys)
+			continue;
+		mtk_pmic_key_pause(&keys->keys[index]);
 		if (keys->keys[index].wakeup) {
 			enable_irq_wake(keys->keys[index].irq);
 			if (keys->keys[index].irq_r > 0)
@@ -299,6 +408,9 @@ static int mtk_pmic_keys_resume(struct device *dev)
 	int index;
 
 	for (index = 0; index < MTK_PMIC_MAX_KEY_COUNT; index++) {
+		if (!keys->keys[index].keys)
+			continue;
+		mtk_pmic_key_resume(&keys->keys[index]);
 		if (keys->keys[index].wakeup) {
 			disable_irq_wake(keys->keys[index].irq);
 			if (keys->keys[index].irq_r > 0)
@@ -383,6 +495,7 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 
 	for_each_child_of_node_scoped(node, child) {
 		keys->keys[index].regs = &mtk_pmic_regs->keys_regs[index];
+		keys->keys[index].can_resample = mtk_pmic_regs->can_resample;
 
 		keys->keys[index].irq =
 			platform_get_irq_byname(pdev, irqnames[index]);
@@ -423,6 +536,15 @@ static int mtk_pmic_keys_probe(struct platform_device *pdev)
 		return error;
 	}
 
+	/* Stop producers before devres unregisters the input device. */
+	error = devm_add_action_or_reset(keys->dev, mtk_pmic_keys_stop, keys);
+	if (error)
+		return error;
+
+	for (index = 0; index < MTK_PMIC_MAX_KEY_COUNT; index++)
+		if (keys->keys[index].keys)
+			mtk_pmic_key_resume(&keys->keys[index]);
+
 	mtk_pmic_keys_lp_reset_setup(keys, mtk_pmic_regs);
 
 	platform_set_drvdata(pdev, keys);
@@ -444,3 +566,7 @@ module_platform_driver(pmic_keys_pdrv);
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Chen Zhong <chen.zhong@mediatek.com>");
 MODULE_DESCRIPTION("MTK pmic-keys driver v0.1");
+
+#if IS_ENABLED(CONFIG_KEYBOARD_MTK_PMIC_KUNIT_TEST)
+#include "mtk-pmic-keys-test.c"
+#endif

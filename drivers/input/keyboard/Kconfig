@@ -796,6 +796,17 @@ config KEYBOARD_MTK_PMIC
 	  To compile this driver as a module, choose M here: the
 	  module will be called pmic-keys.
 
+config KEYBOARD_MTK_PMIC_KUNIT_TEST
+	bool "KUnit tests for MediaTek PMIC key reads"
+	depends on KUNIT=y && KEYBOARD_MTK_PMIC=y && MFD_MT6397=y
+	select REGMAP
+	select IRQ_SIM
+	help
+	  Exercise the production key handler with failed and successful reads,
+	  including delivery through the MT6351 parent interrupt controller.
+	  Verify that read failures preserve input state and later successful
+	  samples report transitions across the supported register variants.
+
 config KEYBOARD_CYPRESS_SF
 	tristate "Cypress StreetFighter touchkey support"
 	depends on I2C
