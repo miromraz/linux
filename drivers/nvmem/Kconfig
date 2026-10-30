@@ -12,6 +12,16 @@ menuconfig NVMEM
 
 if NVMEM
 
+config NVMEM_KUNIT_TEST
+	tristate "NVMEM lifetime tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Test consumer reference acquisition during provider removal.
+	  Exercise lookups from removal notifiers, deferred lookup errors,
+	  reference balancing and registration after removal. The tests
+	  use synthetic providers and do not require physical hardware.
+
 config NVMEM_SYSFS
 	bool "/sys/bus/nvmem/devices/*/nvmem (sysfs interface)"
 	depends on SYSFS

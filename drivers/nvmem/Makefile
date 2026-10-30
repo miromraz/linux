@@ -9,6 +9,8 @@ obj-$(CONFIG_NVMEM_LAYOUTS)	+= nvmem_layouts.o
 nvmem_layouts-y			:= layouts.o
 obj-y				+= layouts/
 
+obj-$(CONFIG_NVMEM_KUNIT_TEST)	+= core-test.o
+
 # Devices
 obj-$(CONFIG_NVMEM_AN8855_EFUSE)	+= nvmem-an8855-efuse.o
 nvmem-an8855-efuse-y 			:= an8855-efuse.o

@@ -1131,7 +1131,12 @@ static struct nvmem_device *__nvmem_device_get(void *data,
 		return ERR_PTR(-EINVAL);
 	}
 
-	kref_get(&nvmem->refcnt);
+	/* The device reference keeps nvmem alive, but removal may have started. */
+	if (!kref_get_unless_zero(&nvmem->refcnt)) {
+		module_put(nvmem->owner);
+		put_device(&nvmem->dev);
+		return ERR_PTR(-EPROBE_DEFER);
+	}
 
 	return nvmem;
 }
