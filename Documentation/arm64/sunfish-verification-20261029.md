@@ -181,3 +181,35 @@ Sources: [OBS source identity](https://api.opensuse.org/public/source/home:realn
 
 A sanitized recipient image, its first boot and stock-userdata recovery procedure
 remain outstanding. See [installation status](sunfish-installation.md).
+
+## U-Boot installation and Android round trip, 2026-10-30
+
+The handset U-Boot image (SHA256
+`0fa4065cbbde822260a19520e9a31da234f85f7b479fd86c9a2cc73f057dab94`) was written to
+`boot_a` through ABL fastboot, serial `16101JEC206108`. The previous `boot_a`
+(SHA256 `c0881e1a308cf67d59c83e0564921a6890a326eb0bf97e17361b10ca21587c77`) was
+saved first for rollback. `boot_b` and `misc` were not written and kept their hashes.
+`systemctl reboot bootloader` does not reach ABL fastboot on this handset; entering
+fastboot needed Power and Volume Down.
+
+After the flash, `boot_a` holds the new kernel payload and image ID, but its header
+kept the previous image's ramdisk size, OS version and command line. Nothing on the
+phone writes `boot_a`, so the merge happened in the ABL/fastboot flash path. ABL
+boots it and U-Boot ignores those fields. Compare the payload, not the whole
+partition, when checking an installed image.
+
+Linux booted through the installed U-Boot when the menu timed out to its default.
+The Android entry was exercised without a keypress: a one-shot `BootNext` pointing
+at the ESP-root copy of the slot-flip helper was written into U-Boot's
+`ubootefi.var` from Linux, after backing the file up. That copy is identical to
+`EFI/sunfish/slotflip.efi` (SHA256
+`7f790a87d3f1e7e65f1c0106d797e7647c81b360cb4bcbb36fde7efd3bce9017`), which the menu
+entry loads. U-Boot ran the helper, and LineageOS 23.2 (`BP4A.251205.006`) booted
+on slot B; adb answered 75 s after the reboot. A Magisk module installed on that
+Android system had already set slot A active again. `adb reboot` returned to the
+preserved Linux system in 51 s with slot A active, both slots successful, `BootNext`
+consumed and `boot_b`/`misc` unchanged.
+
+The return depends on that maintainer-installed Android module; a stock Android
+install keeps booting slot B, and fastboot `--set-active=a` is then needed. The
+physical menu keypress itself was not tested; it runs the same load command.
