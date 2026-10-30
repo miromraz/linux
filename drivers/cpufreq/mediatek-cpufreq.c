@@ -373,12 +373,18 @@ static int mtk_cpufreq_opp_notifier(struct notifier_block *nb,
 		freq = dev_pm_opp_get_freq(opp);
 
 		mutex_lock(&info->reg_lock);
-		if (info->current_freq == freq) {
+		if (info->dvfs_fault) {
+			ret = -EIO;
+		} else if (info->current_freq == freq) {
 			volt = dev_pm_opp_get_voltage(opp);
 			ret = mtk_cpufreq_set_voltage(info, volt);
-			if (ret)
+			if (ret) {
+				info->dvfs_fault = true;
+				info->pre_vproc = 0;
 				dev_err(info->cpu_dev,
-					"failed to scale voltage: %d\n", ret);
+					"OPP committed; voltage update failed: %d\n",
+					ret);
+			}
 		}
 		mutex_unlock(&info->reg_lock);
 	} else if (event == OPP_EVENT_DISABLE) {
@@ -392,8 +398,7 @@ static int mtk_cpufreq_opp_notifier(struct notifier_block *nb,
 			if (IS_ERR(new_opp)) {
 				dev_err(info->cpu_dev,
 					"all opp items are disabled\n");
-				ret = PTR_ERR(new_opp);
-				return notifier_from_errno(ret);
+				return NOTIFY_OK;
 			}
 
 			dev_pm_opp_put(new_opp);
@@ -406,7 +411,7 @@ static int mtk_cpufreq_opp_notifier(struct notifier_block *nb,
 		}
 	}
 
-	return notifier_from_errno(ret);
+	return NOTIFY_OK;
 }
 
 static struct device *of_get_cci(struct device *cpu_dev)

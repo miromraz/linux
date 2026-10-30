@@ -2843,7 +2843,7 @@ bool clk_has_parent(const struct clk *clk, const struct clk *parent)
 EXPORT_SYMBOL_GPL(clk_has_parent);
 
 static int clk_core_set_parent_nolock(struct clk_core *core,
-				      struct clk_core *parent)
+				      struct clk_core *parent, bool *attempted)
 {
 	int ret = 0;
 	int p_index = 0;
@@ -2890,7 +2890,9 @@ static int clk_core_set_parent_nolock(struct clk_core *core,
 	if (ret & NOTIFY_STOP_MASK)
 		goto runtime_put;
 
-	/* do the re-parent */
+	/* Past all pre-write rejection paths; provider failure is uncertain. */
+	if (attempted)
+		*attempted = true;
 	ret = __clk_set_parent(core, parent, p_index);
 
 	/* propagate rate an accuracy recalculation accordingly */
@@ -2909,9 +2911,44 @@ runtime_put:
 
 int clk_hw_set_parent(struct clk_hw *hw, struct clk_hw *parent)
 {
-	return clk_core_set_parent_nolock(hw->core, parent->core);
+	return clk_core_set_parent_nolock(hw->core, parent->core, NULL);
 }
 EXPORT_SYMBOL_GPL(clk_hw_set_parent);
+
+/**
+ * clk_set_parent_tracked - switch parent and report the programming boundary
+ * @clk: mux clock
+ * @parent: requested parent
+ * @attempted: required output, true once reparenting may have touched hardware
+ *
+ * False distinguishes pre-write rejection from provider failure. True does not
+ * imply a committed write. Cached topology cannot resolve a provider error.
+ * The flag describes this call only, not changes made by other clock users.
+ */
+int clk_set_parent_tracked(struct clk *clk, struct clk *parent, bool *attempted)
+{
+	int ret;
+
+	*attempted = false;
+	if (!clk)
+		return 0;
+
+	clk_prepare_lock();
+
+	if (clk->exclusive_count)
+		clk_core_rate_unprotect(clk->core);
+
+	ret = clk_core_set_parent_nolock(clk->core,
+					 parent ? parent->core : NULL, attempted);
+
+	if (clk->exclusive_count)
+		clk_core_rate_protect(clk->core);
+
+	clk_prepare_unlock();
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(clk_set_parent_tracked);
 
 /**
  * clk_set_parent - switch the parent of a mux clk
@@ -2932,25 +2969,9 @@ EXPORT_SYMBOL_GPL(clk_hw_set_parent);
  */
 int clk_set_parent(struct clk *clk, struct clk *parent)
 {
-	int ret;
+	bool attempted;
 
-	if (!clk)
-		return 0;
-
-	clk_prepare_lock();
-
-	if (clk->exclusive_count)
-		clk_core_rate_unprotect(clk->core);
-
-	ret = clk_core_set_parent_nolock(clk->core,
-					 parent ? parent->core : NULL);
-
-	if (clk->exclusive_count)
-		clk_core_rate_protect(clk->core);
-
-	clk_prepare_unlock();
-
-	return ret;
+	return clk_set_parent_tracked(clk, parent, &attempted);
 }
 EXPORT_SYMBOL_GPL(clk_set_parent);
 
@@ -3632,7 +3653,7 @@ static ssize_t current_parent_write(struct file *file, const char __user *ubuf,
 		return -ENOENT;
 
 	clk_prepare_lock();
-	err = clk_core_set_parent_nolock(core, parent);
+	err = clk_core_set_parent_nolock(core, parent, NULL);
 	clk_prepare_unlock();
 	if (err)
 		return err;
@@ -4578,7 +4599,7 @@ void clk_unregister(struct clk *clk)
 		/* Reparent all children to the orphan list. */
 		hlist_for_each_entry_safe(child, t, &clk->core->children,
 					  child_node)
-			clk_core_set_parent_nolock(child, NULL);
+			clk_core_set_parent_nolock(child, NULL, NULL);
 	}
 
 	clk_core_evict_parent_cache(clk->core);

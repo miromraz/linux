@@ -946,6 +946,7 @@ int clk_set_max_rate(struct clk *clk, unsigned long rate);
  * Returns success (0) or negative errno.
  */
 int clk_set_parent(struct clk *clk, struct clk *parent);
+int clk_set_parent_tracked(struct clk *clk, struct clk *parent, bool *attempted);
 
 /**
  * clk_get_parent - get the parent clock source for this clock
@@ -1141,6 +1142,13 @@ static inline int clk_set_min_rate(struct clk *clk, unsigned long rate)
 
 static inline int clk_set_max_rate(struct clk *clk, unsigned long rate)
 {
+	return 0;
+}
+
+static inline int clk_set_parent_tracked(struct clk *clk, struct clk *parent,
+					 bool *attempted)
+{
+	*attempted = false;
 	return 0;
 }
 

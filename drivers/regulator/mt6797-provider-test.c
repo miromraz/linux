@@ -1226,6 +1226,12 @@ static void transition_unregister(void *data)
 	clk_hw_unregister(data);
 }
 
+static int transition_veto(struct notifier_block *nb, unsigned long event,
+			   void *data)
+{
+	return event == PRE_RATE_CHANGE ? NOTIFY_BAD : NOTIFY_OK;
+}
+
 static void transition_clock_contract(struct kunit *test)
 {
 	struct lifecycle_clock *pll, *inter;
@@ -1233,6 +1239,8 @@ static void transition_clock_contract(struct kunit *test)
 	const struct clk_hw *parents[2];
 	struct clk_init_data init = { .ops = &lifecycle_ops };
 	struct clk *output, *source, *temporary;
+	struct notifier_block veto = { .notifier_call = transition_veto };
+	bool unchanged;
 
 	pll = kunit_kzalloc(test, sizeof(*pll), GFP_KERNEL);
 	inter = kunit_kzalloc(test, sizeof(*inter), GFP_KERNEL);
@@ -1265,12 +1273,23 @@ static void transition_clock_contract(struct kunit *test)
 	output = mux->hw.clk;
 	source = pll->hw.clk;
 	temporary = inter->hw.clk;
+	KUNIT_ASSERT_EQ(test, clk_notifier_register(output, &veto), 0);
+	KUNIT_EXPECT_NE(test, mtk_dvfs_switch_clock_tracked(output, source,
+		 temporary, 200, &unchanged), 0);
+	KUNIT_EXPECT_TRUE(test, unchanged);
+	KUNIT_EXPECT_EQ(test, mux->writes, 0U);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 100UL);
+	KUNIT_EXPECT_EQ(test, clk_notifier_unregister(output, &veto), 0);
+
 	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 200), 0);
 	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 200UL);
 	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 100), 0);
 	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 100UL);
 	mux->fail_at = mux->writes + 1;
-	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 200), -EIO);
+	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock_tracked(output, source,
+		 temporary, 200, &unchanged), -EIO);
+	/* A provider error is uncertain even when the model did not commit. */
+	KUNIT_EXPECT_FALSE(test, unchanged);
 	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 100UL);
 	mux->fail_at = 0;
 	pll->fail = true;

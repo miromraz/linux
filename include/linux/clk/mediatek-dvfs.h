@@ -12,12 +12,15 @@
  * contract, not independent electrical readback. Firmware refusal needs its
  * own provider contract and is deliberately outside this helper.
  */
-static inline int mtk_dvfs_switch_clock(struct clk *mux, struct clk *pll,
+static inline int mtk_dvfs_switch_clock_tracked(struct clk *mux, struct clk *pll,
 				      struct clk *intermediate,
-				      unsigned long target)
+				      unsigned long target, bool *unchanged)
 {
 	long rounded;
 	int ret;
+	bool attempted;
+
+	*unchanged = true;
 
 	if (!pll || !target || clk_is_match(pll, intermediate))
 		return -EINVAL;
@@ -28,13 +31,16 @@ static inline int mtk_dvfs_switch_clock(struct clk *mux, struct clk *pll,
 	if (rounded > target)
 		return -ERANGE;
 
-	ret = clk_set_parent(mux, intermediate);
+	ret = clk_set_parent_tracked(mux, intermediate, &attempted);
+	if (attempted)
+		*unchanged = false;
 	if (ret)
-		return ret;
+		return ret > 0 ? -EBUSY : ret;
 	if (!clk_is_match(clk_get_parent(mux), intermediate) ||
 	    clk_get_rate(mux) != clk_get_rate(intermediate))
 		return -EIO;
 
+	*unchanged = false;
 	ret = clk_set_rate(pll, target);
 	if (ret)
 		return ret;
@@ -49,5 +55,14 @@ static inline int mtk_dvfs_switch_clock(struct clk *mux, struct clk *pll,
 		return -EIO;
 
 	return 0;
+}
+static inline int mtk_dvfs_switch_clock(struct clk *mux, struct clk *pll,
+				      struct clk *intermediate,
+				      unsigned long target)
+{
+	bool unchanged;
+
+	return mtk_dvfs_switch_clock_tracked(mux, pll, intermediate, target,
+					   &unchanged);
 }
 #endif

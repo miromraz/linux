@@ -181,6 +181,7 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 	struct clk *cci_pll;
 	struct dev_pm_opp *opp;
 	unsigned long opp_rate;
+	bool unchanged;
 	int voltage, pre_voltage, inter_voltage, target_voltage, ret;
 
 	if (!drv)
@@ -238,10 +239,14 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 		goto out_fault;
 	}
 
-	ret = mtk_dvfs_switch_clock(drv->cci_clk, cci_pll, drv->inter_clk,
-				   *freq);
-	if (ret)
+	ret = mtk_dvfs_switch_clock_tracked(drv->cci_clk, cci_pll, drv->inter_clk,
+					   *freq, &unchanged);
+	if (ret) {
+		/* Retain our successful preparation request, and the old cache. */
+		if (unchanged)
+			goto out_unlock;
 		goto out_fault;
+	}
 
 	/* Replace the preparation vote with our persistent target floor. */
 	ret = mtk_ccifreq_set_voltage(drv, voltage);
@@ -293,7 +298,13 @@ static int mtk_ccifreq_opp_notifier(struct notifier_block *nb,
 		mutex_unlock(&drv->reg_lock);
 	}
 
-	return notifier_from_errno(ret);
+	/* The OPP table is already committed and its caller ignores this result.
+	 * Keep invalid state blocked locally, but let later listeners observe it.
+	 */
+	if (ret)
+		dev_err(drv->dev, "OPP committed but voltage reconciliation failed: %d\n",
+			ret);
+	return NOTIFY_OK;
 }
 
 static struct devfreq_dev_profile mtk_ccifreq_profile = {
