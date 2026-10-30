@@ -1148,6 +1148,18 @@ config MFD_MT6397
 	  accessing the device; additional drivers must be enabled in order
 	  to use the functionality of the device.
 
+config MFD_MT6397_IRQ_KUNIT_TEST
+	bool "KUnit tests for MT6397 IRQ recovery" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y && MFD_MT6397=y
+	select IRQ_SIM
+	select REGMAP
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise MT6397 IRQ callbacks with a synthetic W1C regmap and
+	  simulated parent IRQ. Tests cover transient and persistent bus
+	  errors, nested interrupt delivery, suspend failure, and concurrent
+	  recovery teardown. No PMIC hardware is accessed.
+
 config MFD_MENF21BMC
 	tristate "MEN 14F021P00 Board Management Controller Support"
 	depends on I2C

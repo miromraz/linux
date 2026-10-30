@@ -9,6 +9,7 @@
 
 #include <linux/mutex.h>
 #include <linux/notifier.h>
+#include <linux/workqueue.h>
 
 enum chip_id {
 	MT6323_CHIP_ID = 0x23,
@@ -67,6 +68,15 @@ struct mt6397_chip {
 	int irq;
 	struct irq_domain *irq_domain;
 	struct mutex irqlock;
+	struct delayed_work irq_retry_work;
+	unsigned int irq_retries;
+	unsigned long irq_retry_at;
+	u8 irq_masks_valid;
+	bool irq_disabled;
+	bool irq_stopping;
+	bool irq_exhausted;
+	bool irq_suspended;
+	bool irq_wake_enabled;
 	u16 wake_mask[4];
 	u16 irq_masks_cur[4];
 	u16 irq_masks_cache[4];
