@@ -422,3 +422,11 @@ MODULE_LICENSE("GPL");
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 #include "mt6797-cpu-sram-test.c"
 #endif
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "mt6797-combined-test.h"
+int mt6797_test_sram(struct platform_device *pdev)
+{
+	return mt6797_cpu_sram_probe(pdev);
+}
+#endif

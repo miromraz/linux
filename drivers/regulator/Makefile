@@ -229,3 +229,15 @@ obj-$(CONFIG_REGULATOR_MT6797_RAIL_COORDINATOR) += mt6797-rail-coordinator.o
 obj-$(CONFIG_REGULATOR_MT6797_RAIL_COORDINATOR_KUNIT_TEST) += mt6797-rail-coordinator-test.o
 obj-$(CONFIG_REGULATOR_MT6797_PROVIDER) += mt6797-provider.o
 obj-$(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST) += mt6797-provider-test.o
+
+# Compile exact protected CPU/CCI bodies without unrelated architecture code.
+quiet_cmd_mt6797_callbacks = GEN     $@
+      cmd_mt6797_callbacks = python3 $(src)/tests/mt6797-extract-callbacks.py $(srctree)/drivers/cpufreq/mediatek-cpufreq.c $(srctree)/drivers/devfreq/mtk-cci-devfreq.c > $@
+
+$(obj)/mt6797-direct-callbacks.h: $(src)/tests/mt6797-extract-callbacks.py $(srctree)/drivers/cpufreq/mediatek-cpufreq.c $(srctree)/drivers/devfreq/mtk-cci-devfreq.c FORCE
+	$(call if_changed,mt6797_callbacks)
+
+$(obj)/mt6797-provider-test.o: $(obj)/mt6797-direct-callbacks.h
+targets += mt6797-direct-callbacks.h
+
+obj-$(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST) += mt6797-combined-test.o

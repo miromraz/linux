@@ -688,8 +688,11 @@ static void preflight_init_unwind(struct kunit *test)
 	}
 }
 
+struct conversion_endpoint;
+
 struct conversion_fixture {
 	struct kunit *test;
+	struct conversion_endpoint *replacement;
 	struct platform_device *dev[3], *rail[2];
 	struct clk *clk;
 	int uv[2], writes, fail_write;
@@ -714,18 +717,16 @@ static int conversion_write(void *data, int uv)
 	struct conversion_endpoint *e = data;
 	struct conversion_fixture *f = e->fixture;
 
-	if (++f->writes == f->fail_write) {
-		if (f->commit_error)
-			f->uv[e->id] = uv;
-		return -EIO;
-	}
-	f->uv[e->id] = uv;
+	bool fail = ++f->writes == f->fail_write;
+
+	if (!fail || f->commit_error)
+		f->uv[e->id] = uv;
 	for (int i = 0; i < 3; i++)
 		KUNIT_EXPECT_GE(f->test, f->uv[0], f->live_floor[i]);
 	KUNIT_EXPECT_GE(f->test, f->uv[0], 1040000);
 	KUNIT_EXPECT_LE(f->test, f->uv[0], f->uv[1]);
 	KUNIT_EXPECT_LE(f->test, f->uv[1] - f->uv[0], 160000);
-	return 0;
+	return fail ? -EIO : 0;
 }
 
 static void conversion_cleanup(void *data)
@@ -787,6 +788,8 @@ static int ownership_invalidate(struct notifier_block *nb, unsigned long event,
 	return NOTIFY_OK;
 }
 
+#include "mt6797-direct-test.h"
+
 static void ownership_run(struct kunit *test, int failure)
 {
 	struct conversion_fixture *f;
@@ -798,9 +801,10 @@ static void ownership_run(struct kunit *test, int failure)
 	u64 cookie[3], shared;
 
 	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
-	e = kunit_kcalloc(test, 2, sizeof(*e), GFP_KERNEL);
+	e = kunit_kcalloc(test, 3, sizeof(*e), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, f);
 	KUNIT_ASSERT_NOT_NULL(test, e);
+	f->replacement = &e[2];
 	f->test = test;
 	f->uv[0] = 1120000;
 	f->uv[1] = 1150000;
@@ -816,19 +820,31 @@ static void ownership_run(struct kunit *test, int failure)
 	}
 	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_start_users(dev, f->clk), 0);
 	f->started = true;
+	for (i = 0; i < 3; i++)
+		direct_devices[i] = dev[i];
+	direct_sharing_error = 0;
 	for (i = 0; i < 2; i++) {
+		int id = failure == 4 ? 1 - i : i;
 		struct mt6797_rail_io io = {
 			.read = conversion_read, .write = conversion_write,
-			.data = &e[i], .step_uv = i ? 25000 : 10000,
+			.data = &e[i], .step_uv = id ? 25000 : 10000,
 		};
 
 		e[i].fixture = f;
-		e[i].id = i;
+		e[i].id = id;
 		f->rail[i] = platform_device_register_simple("conversion-rail", i, NULL, 0);
 		KUNIT_ASSERT_FALSE(test, IS_ERR(f->rail[i]));
-		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&f->rail[i]->dev, i, &io), 0);
+		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&f->rail[i]->dev, id, &io), 0);
 		mt6797_preflight_test_flush();
 		mt6797_provider_status(&status);
+		if (!i && failure >= 4) {
+			struct direct_cpu pending = {};
+
+			KUNIT_EXPECT_EQ(test, direct_cpu_init(&pending, 0), -EPROBE_DEFER);
+			KUNIT_EXPECT_EQ(test, pending.rail_cookie, 0ULL);
+			KUNIT_EXPECT_EQ(test, direct_cci_probe(f->dev[2]), -EPROBE_DEFER);
+			KUNIT_EXPECT_EQ(test, f->writes, 0);
+		}
 		if (!i)
 			KUNIT_EXPECT_EQ(test, mt6797_preflight_test_convert(dev, f->clk,
 				&status.preflight), -EPROBE_DEFER);
@@ -849,6 +865,19 @@ static void ownership_run(struct kunit *test, int failure)
 	for (i = 0; i < 3; i++)
 		KUNIT_EXPECT_EQ(test, status.engine.floor[i], f->live_floor[i]);
 	mt6797_preflight_test_flush();
+	if (failure >= 4) {
+		direct_callbacks(test, f, dev, failure);
+		if (failure == 9) {
+			/* Queue sampling at the replacement cleanup boundary. The action
+			 * must drain it and detach before KUnit frees endpoint storage.
+			 */
+			mt6797_preflight_test_event();
+			kunit_release_action(test, conversion_cleanup, f);
+			mt6797_provider_status(&status);
+			KUNIT_EXPECT_EQ(test, status.attached, 0UL);
+		}
+		return;
+	}
 	for (i = 0; i < 3; i++) {
 		refs[i] = kref_read(&dev[i]->kobj.kref);
 		KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[i], i, &cookie[i]), 0);
@@ -989,6 +1018,36 @@ static void ownership_run(struct kunit *test, int failure)
 	KUNIT_ASSERT_EQ(test, mt6797_consumer_release(2, shared), 0);
 }
 
+static void direct_cpu_cci_lifetime(struct kunit *test)
+{
+	ownership_run(test, 4);
+}
+
+static void direct_cci_probe_error(struct kunit *test)
+{
+	ownership_run(test, 5);
+}
+
+static void direct_cci_remove_retained(struct kunit *test)
+{
+	ownership_run(test, 6);
+}
+
+static void direct_cpu_first_vote_error(struct kunit *test)
+{
+	ownership_run(test, 7);
+}
+
+static void direct_cpu_notifier_stale(struct kunit *test)
+{
+	ownership_run(test, 8);
+}
+
+static void direct_cci_provider_rebind(struct kunit *test)
+{
+	ownership_run(test, 9);
+}
+
 static void production_ownership(struct kunit *test)
 {
 	ownership_run(test, 0);
@@ -1018,7 +1077,7 @@ static void production_conversion(struct kunit *test)
 	int i, writes;
 
 	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
-	e = kunit_kcalloc(test, 2, sizeof(*e), GFP_KERNEL);
+	e = kunit_kcalloc(test, 3, sizeof(*e), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, f);
 	KUNIT_ASSERT_NOT_NULL(test, e);
 	f->test = test;
@@ -1135,6 +1194,12 @@ static void production_conversion(struct kunit *test)
 }
 
 static struct kunit_case provider_cases[] = {
+	KUNIT_CASE(direct_cpu_cci_lifetime),
+	KUNIT_CASE(direct_cpu_first_vote_error),
+	KUNIT_CASE(direct_cpu_notifier_stale),
+	KUNIT_CASE(direct_cci_probe_error),
+	KUNIT_CASE(direct_cci_remove_retained),
+	KUNIT_CASE(direct_cci_provider_rebind),
 	KUNIT_CASE(preflight_init_unwind),
 	KUNIT_CASE(preflight_opp_core),
 	KUNIT_CASE(preflight_lifecycle),

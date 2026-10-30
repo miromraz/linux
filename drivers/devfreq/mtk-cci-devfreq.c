@@ -541,3 +541,61 @@ module_platform_driver(mtk_ccifreq_platdrv);
 MODULE_DESCRIPTION("MediaTek CCI devfreq driver");
 MODULE_AUTHOR("Jia-Wei Chang <jia-wei.chang@mediatek.com>");
 MODULE_LICENSE("GPL v2");
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "../regulator/mt6797-combined-test.h"
+int mt6797_test_cci_probe(struct platform_device *pdev)
+{
+	bool destroyed = false;
+	void *group;
+	int ret;
+
+	group = devres_open_group(&pdev->dev, NULL, GFP_KERNEL);
+	if (!group)
+		return -ENOMEM;
+	ret = devm_add_action(&pdev->dev, mt6797_test_probe_destroyed, &destroyed);
+	if (ret) {
+		devres_release_group(&pdev->dev, group);
+		return ret;
+	}
+	ret = mtk_ccifreq_probe(pdev);
+	if (ret) {
+		platform_set_drvdata(pdev, NULL);
+		devres_release_group(&pdev->dev, group);
+		if (!destroyed)
+			return -EUCLEAN;
+	} else {
+		devm_remove_action(&pdev->dev, mt6797_test_probe_destroyed, &destroyed);
+		devres_remove_group(&pdev->dev, group);
+	}
+	return ret;
+}
+#endif
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+/* Remove is unreachable after the gated probe: install only its owned lease. */
+int mt6797_test_cci_remove(struct platform_device *pdev)
+{
+	struct mtk_ccifreq_drv *drv;
+	void *group;
+	int ret;
+
+	group = devres_open_group(&pdev->dev, NULL, GFP_KERNEL);
+	if (!group)
+		return -ENOMEM;
+	drv = devm_kzalloc(&pdev->dev, sizeof(*drv), GFP_KERNEL);
+	if (!drv) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	ret = mt6797_consumer_acquire(&pdev->dev, 2, &drv->rail_cookie);
+	if (ret)
+		goto out;
+	platform_set_drvdata(pdev, drv);
+	mtk_ccifreq_remove(pdev);
+	platform_set_drvdata(pdev, NULL);
+out:
+	devres_release_group(&pdev->dev, group);
+	return ret;
+}
+#endif

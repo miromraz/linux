@@ -982,3 +982,39 @@ MODULE_LICENSE("GPL");
 #if IS_ENABLED(CONFIG_REGULATOR_DA9211_KUNIT_TEST)
 #include "da9211-regulator-test.c"
 #endif
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "mt6797-combined-test.h"
+
+static void combined_clear_parent(void *data)
+{
+	dev_set_drvdata(data, NULL);
+}
+
+int mt6797_test_buck(struct platform_device *pdev, struct regmap *map,
+		     struct device_node *np)
+{
+	struct da9211 *chip;
+	struct da9211_pdata *pdata;
+	int id = 0;
+
+	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
+	pdata = devm_kzalloc(&pdev->dev, sizeof(*pdata), GFP_KERNEL);
+	if (!chip || !pdata)
+		return -ENOMEM;
+	chip->pdata = pdata;
+	chip->chip_id = DA9213;
+	chip->regmap = map;
+	pdata->reg_node[0] = np;
+	mutex_init(&chip->rail_lock);
+	dev_set_drvdata(pdev->dev.parent, chip);
+	id = devm_add_action_or_reset(&pdev->dev, combined_clear_parent,
+				       pdev->dev.parent);
+	if (id)
+		return id;
+	pdev->dev.platform_data = &id;
+	id = da9211_buck_probe(pdev);
+	pdev->dev.platform_data = NULL;
+	return id;
+}
+#endif

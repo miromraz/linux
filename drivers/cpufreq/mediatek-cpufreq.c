@@ -802,6 +802,10 @@ static struct cpufreq_driver mtk_cpufreq_driver = {
 	.name = "mtk-cpufreq",
 };
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+static int combined_fail_cpu = -1;
+#endif
+
 static int mtk_cpufreq_probe(struct platform_device *pdev)
 {
 	const struct mtk_cpufreq_platform_data *data;
@@ -836,6 +840,12 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 			goto release_dvfs_info_list;
 		}
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+		if (cpu == combined_fail_cpu) {
+			ret = -ENOMEM;
+			goto release_dvfs_info_list;
+		}
+#endif
 		info->soc_data = data;
 		ret = mtk_cpu_dvfs_info_init(info, cpu);
 		if (ret == 1 && data->allow_unmanaged)
@@ -1010,3 +1020,37 @@ module_exit(mtk_cpufreq_driver_exit)
 MODULE_DESCRIPTION("MediaTek CPUFreq driver");
 MODULE_AUTHOR("Pi-Cheng Chen <pi-cheng.chen@linaro.org>");
 MODULE_LICENSE("GPL v2");
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "../regulator/mt6797-combined-test.h"
+int mt6797_test_cpu_probe(struct platform_device *pdev, int fail_cpu)
+{
+	bool destroyed = false;
+	void *group;
+	int ret;
+
+	group = devres_open_group(&pdev->dev, NULL, GFP_KERNEL);
+	if (!group)
+		return -ENOMEM;
+	ret = devm_add_action(&pdev->dev, mt6797_test_probe_destroyed, &destroyed);
+	if (ret) {
+		devres_release_group(&pdev->dev, group);
+		return ret;
+	}
+
+	combined_fail_cpu = fail_cpu;
+	pdev->dev.platform_data = (void *)&mt6797_platform_data;
+	ret = mtk_cpufreq_probe(pdev);
+	combined_fail_cpu = -1;
+	pdev->dev.platform_data = NULL;
+	if (ret) {
+		devres_release_group(&pdev->dev, group);
+		if (!destroyed)
+			return -EUCLEAN;
+	} else {
+		devm_remove_action(&pdev->dev, mt6797_test_probe_destroyed, &destroyed);
+		devres_remove_group(&pdev->dev, group);
+	}
+	return ret;
+}
+#endif

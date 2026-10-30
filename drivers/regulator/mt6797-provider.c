@@ -587,6 +587,21 @@ static int lease_supplies(void)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "mt6797-combined-test.h"
+
+static void (*combined_transfer_hook)(void *, unsigned int, bool, int);
+static void *combined_transfer_data;
+
+void mt6797_test_transfer_hook(void (*hook)(void *, unsigned int, bool, int), void *data)
+{
+	mutex_lock(&transaction_lock);
+	combined_transfer_hook = hook;
+	combined_transfer_data = data;
+	mutex_unlock(&transaction_lock);
+}
+#endif
+
 static int lease_transfer(unsigned int user, int request, bool returning)
 {
 	struct protected_supply *s = &protected[user];
@@ -698,6 +713,10 @@ static int preflight_transaction(struct preflight_user *users,
 		floor[i] = max(r->uv[i][0], r->uv[i][1]);
 	}
 	if (user >= 0 && users == pf_users && !lease_setting) {
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+		if (combined_transfer_hook)
+			combined_transfer_hook(combined_transfer_data, user, returning, 0);
+#endif
 		while (locked)
 			dev_pm_opp_snapshot_unlock(tables[--locked]);
 		while (clocks) {
@@ -707,6 +726,10 @@ static int preflight_transaction(struct preflight_user *users,
 		lease_task = current;
 		lease_snapshot = r;
 		ret = lease_supplies();
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+		if (!ret && combined_transfer_hook)
+			combined_transfer_hook(combined_transfer_data, user, returning, 1);
+#endif
 		if (!ret)
 			ret = lease_transfer(user, returning ? max(floor[user], 1040000) :
 					     request, returning);
@@ -1277,12 +1300,19 @@ int mt6797_preflight_test_handover(struct device **dev, struct clk *clk,
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_handover);
 
+static bool preflight_test_observable(void)
+{
+	return fixture_active ||
+		(IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST) &&
+		 of_machine_is_compatible("test,mt6797-combined"));
+}
+
 int mt6797_preflight_test_regulator_notifier(unsigned int user,
 					    struct notifier_block *nb, bool add)
 {
 	int ret;
 
-	if (user >= MT6797_RAIL_USERS || !fixture_active)
+	if (user >= MT6797_RAIL_USERS || !preflight_test_observable())
 		return -EINVAL;
 	mutex_lock(&transaction_lock);
 	if (!protected[user].guard)
@@ -1302,7 +1332,7 @@ int mt6797_preflight_test_requests(unsigned int user, int *guard, int *vote)
 	struct protected_supply *s;
 	int count;
 
-	if (user >= MT6797_RAIL_USERS || !fixture_active)
+	if (user >= MT6797_RAIL_USERS || !preflight_test_observable())
 		return -EINVAL;
 	mutex_lock(&transaction_lock);
 	s = &protected[user];

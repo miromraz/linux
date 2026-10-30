@@ -1995,3 +1995,15 @@ config REGULATOR_MT6797_PROVIDER_KUNIT_TEST
 	  notification replay using platform devices and synthetic endpoints.
 	  Includes concurrent sample and detach with the actual registry lock.
 	  Does not establish board hardware or firmware ownership correctness.
+
+config REGULATOR_MT6797_COMBINED_KUNIT_TEST
+	bool "MT6797 combined synthetic hardware integration test"
+	depends on KUNIT=y && ARM64 && OF && NVMEM
+	depends on REGULATOR_DA9211=y && REGULATOR_MT6797_CPU_SRAM=y
+	depends on ARM_MEDIATEK_CPUFREQ=y && ARM_MEDIATEK_CCI_DEVFREQ=y
+	depends on REGULATOR_MT6797_PROVIDER_KUNIT_TEST=y
+	help
+	  Runs real OF discovery and both rail adapters on synthetic transports.
+	  Requires the eight-CPU QEMU test device tree; never use on hardware.
+	  Exercises gated CPU/CCI lifetimes and real supplier re-registration.
+	  Synthetic suppliers remain registered until the test image powers off.
