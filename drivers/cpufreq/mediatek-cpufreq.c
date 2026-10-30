@@ -282,6 +282,37 @@ unlock:
 	return ret;
 }
 
+static int mtk_cpufreq_owned_target(struct cpufreq_policy *policy,
+				    unsigned int index)
+{
+	struct mtk_cpu_dvfs_info *info = policy->driver_data;
+	struct cpufreq_freqs freqs = {
+		.old = policy->cur,
+		.new = policy->freq_table[index].frequency,
+	};
+	int ret;
+
+	if (!info->rail_cookie || policy->cur_unknown)
+		return -EIO;
+	/* Reject synchronous notifier reentry before begin can wait on itself. */
+	if (policy->transition_ongoing && policy->transition_task == current)
+		return -EBUSY;
+
+	cpufreq_freq_transition_begin(policy, &freqs);
+	ret = mtk_cpufreq_token_target(info, (unsigned long)freqs.new * 1000);
+	/* The token, claims and callback lock are gone before passive CCI. */
+	if (!info->current_freq) {
+		cpufreq_freq_transition_end_unknown(policy);
+	} else {
+		freqs.new = info->current_freq / 1000;
+		/* end's error argument requests synthetic rollback, not errno
+		 * reporting. This final rate is established even when target failed.
+		 */
+		cpufreq_freq_transition_end(policy, &freqs, 0);
+	}
+	return ret;
+}
+
 static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 				  unsigned int index)
 {
@@ -968,6 +999,38 @@ static struct cpufreq_driver mtk_cpufreq_driver = {
 	.name = "mtk-cpufreq",
 };
 
+/* The target API lets a contained policy reject even a same-rate request. */
+static int mtk_cpufreq_owned_request(struct cpufreq_policy *policy,
+				     unsigned int rate, unsigned int relation)
+{
+	int index = cpufreq_frequency_table_target(policy, rate, policy->min,
+						   policy->max, relation);
+
+	if (index < 0)
+		return index;
+	return mtk_cpufreq_owned_target(policy, index);
+}
+
+static unsigned int mtk_cpufreq_owned_get(unsigned int cpu)
+{
+	struct mtk_cpu_dvfs_info *info = mtk_cpu_dvfs_info_lookup(cpu);
+
+	return info ? READ_ONCE(info->current_freq) / 1000 : 0;
+}
+
+/* Never use this descriptor for legacy SoCs or the unowned A72 path. */
+static struct cpufreq_driver mtk_cpufreq_owned_driver = {
+	.flags = CPUFREQ_ASYNC_NOTIFICATION | CPUFREQ_NEED_UPDATE_LIMITS |
+		 CPUFREQ_HAVE_GOVERNOR_PER_POLICY |
+		 CPUFREQ_IS_COOLING_DEV,
+	.verify = cpufreq_generic_frequency_table_verify,
+	.target = mtk_cpufreq_owned_request,
+	.get = mtk_cpufreq_owned_get,
+	.init = mtk_cpufreq_init,
+	.exit = mtk_cpufreq_exit,
+	.name = "mtk-owned",
+};
+
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 static int combined_fail_cpu = -1;
 #endif
@@ -1027,7 +1090,8 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 		ret = -EAGAIN;
 		goto release_dvfs_info_list;
 	}
-	ret = cpufreq_register_driver(&mtk_cpufreq_driver);
+	ret = cpufreq_register_driver(of_machine_is_compatible("planet,gemini-pda") ?
+			&mtk_cpufreq_owned_driver : &mtk_cpufreq_driver);
 	if (ret) {
 		dev_err_probe(&pdev->dev, ret, "failed to register mtk cpufreq driver\n");
 		goto release_dvfs_info_list;
@@ -1239,25 +1303,23 @@ void *mt6797_test_cpu_open(struct device *dev, unsigned int user)
 		kfree(info);
 		return ERR_PTR(ret);
 	}
-	info->test_policy = kzalloc_obj(*info->test_policy);
+	info->test_policy = mt6797_test_policy_alloc(user * 4);
 	if (!info->test_policy) {
 		ret = -ENOMEM;
 		goto release;
-	}
-	if (!zalloc_cpumask_var(&info->test_policy->cpus, GFP_KERNEL)) {
-		ret = -ENOMEM;
-		goto free_policy;
 	}
 	cpumask_set_cpu(user * 4, &info->cpus);
 	info->test_policy->cpu = user * 4;
 	ret = mtk_cpufreq_policy_init(info->test_policy, info);
 	if (ret) {
-		free_cpumask_var(info->test_policy->cpus);
 		goto free_policy;
 	}
+	cpumask_copy(info->test_policy->related_cpus, &info->cpus);
+	info->test_policy->cur = info->current_freq / 1000;
+	cpufreq_stats_create_table(info->test_policy);
 	return info;
 free_policy:
-	kfree(info->test_policy);
+	mt6797_test_policy_free(info->test_policy);
 release:
 	mtk_cpu_dvfs_info_release(info);
 	kfree(info);
@@ -1274,7 +1336,7 @@ int mt6797_test_cpu_target(void *data, unsigned int khz,
 
 	for (index = 0; policy->freq_table[index].frequency != CPUFREQ_TABLE_END; index++) {
 		if (policy->freq_table[index].frequency == khz) {
-			ret = mtk_cpufreq_set_target(policy, index);
+			ret = mt6797_test_core_target(policy, &mtk_cpufreq_owned_driver, index);
 			break;
 		}
 	}
@@ -1283,13 +1345,39 @@ int mt6797_test_cpu_target(void *data, unsigned int khz,
 	return ret;
 }
 
+bool mt6797_test_cpu_unlocked(void *data)
+{
+	struct mtk_cpu_dvfs_info *info = data;
+
+	if (!mutex_trylock(&info->callback_lock))
+		return false;
+	mutex_unlock(&info->callback_lock);
+	if (!mutex_trylock(&info->reg_lock))
+		return false;
+	mutex_unlock(&info->reg_lock);
+	return true;
+}
+
+int mt6797_test_cpu_reenter(void *data)
+{
+	struct mtk_cpu_dvfs_info *info = data;
+
+	return mtk_cpufreq_owned_target(info->test_policy, 0);
+}
+
+struct cpufreq_policy *mt6797_test_cpu_policy(void *data)
+{
+	struct mtk_cpu_dvfs_info *info = data;
+
+	return info->test_policy;
+}
+
 void mt6797_test_cpu_close(void *data)
 {
 	struct mtk_cpu_dvfs_info *info = data;
 
 	mtk_cpufreq_exit(info->test_policy);
-	free_cpumask_var(info->test_policy->cpus);
-	kfree(info->test_policy);
+	mt6797_test_policy_free(info->test_policy);
 	mtk_cpu_dvfs_info_release(info);
 	kfree(info);
 }

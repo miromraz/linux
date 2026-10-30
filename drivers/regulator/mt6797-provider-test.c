@@ -3,6 +3,7 @@
 #include <kunit/resource.h>
 #include <linux/completion.h>
 #include <linux/clk.h>
+#include <linux/cpufreq.h>
 #include <linux/clk/mediatek-dvfs.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
@@ -360,7 +361,7 @@ struct lifecycle_clock {
 	struct clk_hw hw;
 	unsigned long rate;
 	bool fail, abort, pause;
-	bool round_up, unparked;
+	bool round_up, round_down, unparked;
 	u8 *mux_parent;
 	struct completion entered, resume;
 	unsigned int pre, post, aborted;
@@ -381,6 +382,8 @@ static int lifecycle_determine(struct clk_hw *hw, struct clk_rate_request *req)
 		c->unparked = true;
 	if (c->round_up)
 		req->rate *= 2;
+	if (c->round_down && req->rate == 200000)
+		req->rate = 150000;
 	return 0;
 }
 
@@ -1602,6 +1605,29 @@ static void operational_clock_token(struct kunit *test, struct clk *mux,
 }
 
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+struct accounting_observer {
+	struct notifier_block nb;
+	unsigned int pre, post, rate;
+	struct kunit *test;
+	void *info;
+};
+
+static int accounting_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct accounting_observer *o = container_of(nb, struct accounting_observer, nb);
+	struct cpufreq_freqs *freqs = data;
+
+	if (event == CPUFREQ_PRECHANGE)
+		o->pre++;
+	if (event == CPUFREQ_POSTCHANGE) {
+		o->post++;
+		o->rate = freqs->new;
+		KUNIT_EXPECT_TRUE(o->test, mt6797_test_cpu_unlocked(o->info));
+		KUNIT_EXPECT_EQ(o->test, mt6797_test_cpu_reenter(o->info), -EBUSY);
+	}
+	return NOTIFY_OK;
+}
+
 struct callback_veto {
 	struct notifier_block nb;
 	unsigned int nth, calls;
@@ -1677,7 +1703,11 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	struct reserved_clock_listener listener = {
 		.nb.notifier_call = reserved_clock_event, .test = test,
 	};
-	void *info;
+	struct accounting_observer observer = {
+		.nb = { .notifier_call = accounting_event, .priority = 1 },
+	};
+	void *info, *passive;
+	struct cpufreq_policy *policy;
 	int i, ret;
 
 	KUNIT_ASSERT_EQ(test, clk_set_rate(inter, 300000), 0);
@@ -1728,6 +1758,25 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	KUNIT_EXPECT_FALSE(test, IS_ERR(info));
 	if (IS_ERR(info))
 		goto cleanup;
+	policy = mt6797_test_cpu_policy(info);
+	observer.test = test;
+	observer.info = info;
+	passive = mt6797_test_passive_open(dev[2], user * 4);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(passive));
+	KUNIT_ASSERT_NOT_NULL(test, policy->stats);
+	mt6797_test_passive_fail(passive, failure == 18);
+	if (failure == 17) {
+		struct clk *extra = clk_hw_get_clk(__clk_get_hw(mux), NULL);
+
+		KUNIT_ASSERT_FALSE(test, IS_ERR(extra));
+		KUNIT_EXPECT_EQ(test, clk_rate_exclusive_get(extra), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 200, &outcome), -EBUSY);
+		KUNIT_EXPECT_TRUE(test, outcome.retry);
+		KUNIT_EXPECT_EQ(test, outcome.rate, 100000UL);
+		clk_rate_exclusive_put(extra);
+		clk_put(extra);
+		mt6797_preflight_test_flush();
+	}
 	if (failure == 1 || failure == 14) {
 		veto.nth = failure == 1 ? 1 : 2;
 		clk_notifier_register(mux, &veto.nb);
@@ -1745,6 +1794,7 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	p->mux_parent = &m->parent;
 	p->unparked = false;
 	p->round_up = failure == 13;
+	p->round_down = failure == 16;
 	if (failure == 2)
 		p->fail = true;
 	if (failure == 3 || failure == 6)
@@ -1766,10 +1816,18 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	KUNIT_ASSERT_FALSE(test, IS_ERR(injection.external));
 	injection.f = f;
 	injection.failure = failure;
+	KUNIT_ASSERT_EQ(test, cpufreq_register_notifier(&observer.nb,
+				CPUFREQ_TRANSITION_NOTIFIER), 0);
 	mt6797_test_cpu_hook(callback_inject, &injection);
 	ret = mt6797_test_cpu_target(info, failure == 7 || failure == 8 ? 100 : 200,
 				     &outcome);
 	mt6797_test_cpu_hook(NULL, NULL);
+	cpufreq_unregister_notifier(&observer.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	KUNIT_EXPECT_EQ(test, ret, outcome.error);
+	KUNIT_EXPECT_EQ(test, observer.pre, 1U);
+	KUNIT_EXPECT_EQ(test, observer.post, failure == 3 || failure == 6 ? 0U : 1U);
+	if (observer.post)
+		KUNIT_EXPECT_EQ(test, observer.rate, (unsigned int)(outcome.rate / 1000));
 	if (failure == 11 || failure == 12) {
 		if (!IS_ERR(injection.remover)) {
 			wait_for_completion(&injection.detach.done);
@@ -1779,7 +1837,37 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 		KUNIT_EXPECT_EQ(test, f->writes, injection.writes);
 		mt6797_preflight_test_drain_observer(NULL);
 	}
-	if (!failure) {
+	if (failure == 4 || failure == 5 || failure == 7 || failure == 8) {
+		int guard, vote;
+
+		KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(user, &guard, &vote), 2);
+		KUNIT_EXPECT_EQ(test, vote, outcome.retained_uv);
+	}
+	KUNIT_EXPECT_FALSE(test, policy->transition_ongoing);
+	KUNIT_EXPECT_PTR_EQ(test, policy->transition_task, NULL);
+	if (failure == 3 || failure == 6) {
+		KUNIT_EXPECT_TRUE(test, policy->cur_unknown);
+		KUNIT_EXPECT_EQ(test, mt6797_test_stats_rate(policy), 0U);
+		KUNIT_EXPECT_EQ(test, mt6797_test_passive_rate(passive), 0UL);
+	} else {
+		KUNIT_EXPECT_FALSE(test, policy->cur_unknown);
+		KUNIT_EXPECT_EQ(test, policy->cur, (unsigned int)(outcome.rate / 1000));
+		KUNIT_EXPECT_EQ(test, mt6797_test_stats_rate(policy),
+				failure == 16 ? 0U : policy->cur);
+		if (policy->cur != 100 || failure == 7 || failure == 8)
+			KUNIT_EXPECT_EQ(test, mt6797_test_passive_rate(passive), outcome.rate);
+	}
+	if (failure == 18) {
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		KUNIT_EXPECT_EQ(test, mt6797_test_passive_calls(passive), 1U);
+		mt6797_test_passive_fail(passive, false);
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 200, &outcome), 0);
+		KUNIT_EXPECT_EQ(test, mt6797_test_passive_calls(passive), 2U);
+	} else if (failure == 16) {
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		KUNIT_EXPECT_EQ(test, outcome.rate, 150000UL);
+	} else if (!failure || failure == 17) {
 		KUNIT_EXPECT_EQ(test, ret, 0);
 		KUNIT_EXPECT_EQ(test, outcome.rate, 200000UL);
 		KUNIT_EXPECT_EQ(test, outcome.retained_uv, 1100000);
@@ -1825,10 +1913,12 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	clk_notifier_unregister(mux, &listener.nb);
 	p->mux_parent = NULL;
 	p->round_up = false;
+	p->round_down = false;
 	p->fail = false;
 	m->fail_at = 0;
 	m->live_floor = NULL;
 	m->commit_error = false;
+	mt6797_test_passive_close(passive);
 	mt6797_test_cpu_close(info);
 cleanup:
 	clkdev_drop(inter_lookup);
@@ -1916,7 +2006,7 @@ static void transition_clock_contract(struct kunit *test)
 	operational_clock_token(test, output, source, temporary, 1);
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 	for (unsigned int user = 0; user < 2; user++)
-		for (int failure = 0; failure < 16; failure++)
+		for (int failure = 0; failure < 19; failure++)
 			cpu_callback_case(test, output, source, temporary, user, failure);
 #endif
 }

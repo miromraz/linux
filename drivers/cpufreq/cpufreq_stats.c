@@ -32,7 +32,8 @@ static void cpufreq_stats_update(struct cpufreq_stats *stats,
 {
 	unsigned long long cur_time = local_clock();
 
-	stats->time_in_state[stats->last_index] += cur_time - time;
+	if (stats->last_index < stats->state_num)
+		stats->time_in_state[stats->last_index] += cur_time - time;
 	stats->last_time = cur_time;
 }
 
@@ -277,13 +278,27 @@ void cpufreq_stats_record_transition(struct cpufreq_policy *policy,
 	old_index = stats->last_index;
 	new_index = freq_table_get_index(stats, new_freq);
 
-	/* We can't do stats->time_in_state[-1]= .. */
-	if (unlikely(old_index == -1 || new_index == -1 || old_index == new_index))
+	if (old_index == new_index)
 		return;
 
+	/* Unlisted/unknown time must not be charged to the previous OPP. */
 	cpufreq_stats_update(stats, stats->last_time);
-
 	stats->last_index = new_index;
-	stats->trans_table[old_index * stats->max_state + new_index]++;
-	stats->total_trans++;
+	if (old_index >= 0 && new_index >= 0)
+		stats->trans_table[old_index * stats->max_state + new_index]++;
+	if (new_freq)
+		stats->total_trans++;
 }
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "../regulator/mt6797-combined-test.h"
+
+unsigned int mt6797_test_stats_rate(struct cpufreq_policy *policy)
+{
+	struct cpufreq_stats *stats = policy->stats;
+
+	if (!stats || stats->last_index >= stats->state_num)
+		return 0;
+	return stats->freq_table[stats->last_index];
+}
+#endif

@@ -359,6 +359,7 @@ static void cpufreq_notify_transition(struct cpufreq_policy *policy,
 
 		cpufreq_stats_record_transition(policy, freqs->new);
 		policy->cur = freqs->new;
+		policy->cur_unknown = false;
 	}
 }
 
@@ -429,6 +430,28 @@ void cpufreq_freq_transition_end(struct cpufreq_policy *policy,
 	wake_up(&policy->transition_wait);
 }
 EXPORT_SYMBOL_GPL(cpufreq_freq_transition_end);
+
+/*
+ * Consume a driver-owned begin whose final hardware rate cannot be established.
+ * No POST, reverse transition or scheduler rate can truthfully be supplied.
+ * Keep cur as last-confirmed history, stop charging its stats, and require the
+ * driver to contain the fault. This is not recovery or a successful transition.
+ */
+void cpufreq_freq_transition_end_unknown(struct cpufreq_policy *policy)
+{
+	if (WARN_ON(!policy->transition_ongoing))
+		return;
+
+	policy->cur_unknown = true;
+	cpufreq_stats_record_transition(policy, 0);
+	spin_lock(&policy->transition_lock);
+	policy->transition_ongoing = false;
+	policy->transition_task = NULL;
+	spin_unlock(&policy->transition_lock);
+	wake_up(&policy->transition_wait);
+}
+EXPORT_SYMBOL_GPL(cpufreq_freq_transition_end_unknown);
+
 
 /*
  * Fast frequency switching status count.  Positive means "enabled", negative
@@ -742,6 +765,9 @@ static ssize_t show_scaling_cur_freq(struct cpufreq_policy *policy, char *buf)
 	ssize_t ret;
 	int freq;
 
+	if (policy->cur_unknown)
+		return -EIO;
+
 	freq = IS_ENABLED(CONFIG_CPUFREQ_ARCH_CUR_FREQ)
 		? arch_freq_get_on_cpu(policy->cpu)
 		: 0;
@@ -782,7 +808,11 @@ store_one(scaling_max_freq, max);
 static ssize_t show_cpuinfo_cur_freq(struct cpufreq_policy *policy,
 					char *buf)
 {
-	unsigned int cur_freq = __cpufreq_get(policy);
+	unsigned int cur_freq;
+
+	if (policy->cur_unknown)
+		return -EIO;
+	cur_freq = __cpufreq_get(policy);
 
 	if (cur_freq)
 		return sysfs_emit(buf, "%u\n", cur_freq);
@@ -1859,7 +1889,7 @@ unsigned int cpufreq_quick_get(unsigned int cpu)
 	read_unlock_irqrestore(&cpufreq_driver_lock, flags);
 
 	struct cpufreq_policy *policy __free(put_cpufreq_policy) = cpufreq_cpu_get(cpu);
-	if (policy)
+	if (policy && !policy->cur_unknown)
 		return policy->cur;
 
 	return 0;
@@ -2353,6 +2383,8 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 
 	if (cpufreq_disabled())
 		return -ENODEV;
+	if (policy->cur_unknown)
+		return -EIO;
 
 	target_freq = __resolve_freq(policy, target_freq, policy->min,
 				     policy->max, relation);
@@ -3066,3 +3098,59 @@ bool cpufreq_ready_for_eas(const struct cpumask *cpu_mask)
 module_param(off, int, 0444);
 module_param_string(default_governor, default_governor, CPUFREQ_NAME_LEN, 0444);
 core_initcall(cpufreq_core_init);
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "../regulator/mt6797-combined-test.h"
+#include <linux/arch_topology.h>
+#include <kunit/test.h>
+#include <kunit/test-bug.h>
+
+struct cpufreq_policy *mt6797_test_policy_alloc(unsigned int cpu)
+{
+	struct cpufreq_policy *policy = cpufreq_policy_alloc(cpu);
+
+	if (policy)
+		INIT_LIST_HEAD(&policy->policy_list);
+	return policy;
+}
+
+void mt6797_test_policy_free(struct cpufreq_policy *policy)
+{
+	cpumask_clear(policy->cpus);
+	cpufreq_policy_free(policy);
+}
+
+/* Isolated fixture: refuse to replace a registered platform driver. */
+int mt6797_test_core_target(struct cpufreq_policy *policy,
+			   struct cpufreq_driver *driver, unsigned int index)
+{
+	unsigned long flags, saved_ref, saved_scale;
+	int ret;
+
+	write_lock_irqsave(&cpufreq_driver_lock, flags);
+	if (cpufreq_driver) {
+		write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+		return -EBUSY;
+	}
+	cpufreq_driver = driver;
+	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	cpufreq_table_validate_and_sort(policy);
+	policy->min = policy->cpuinfo.min_freq;
+	policy->max = policy->cpuinfo.max_freq;
+	saved_ref = per_cpu(capacity_freq_ref, policy->cpu);
+	saved_scale = per_cpu(arch_freq_scale, policy->cpu);
+	per_cpu(capacity_freq_ref, policy->cpu) = policy->cpuinfo.max_freq;
+	ret = __cpufreq_driver_target(policy, policy->freq_table[index].frequency,
+				      CPUFREQ_RELATION_L);
+	KUNIT_EXPECT_EQ(kunit_get_current_test(),
+		per_cpu(arch_freq_scale, policy->cpu),
+		policy->cur_unknown ? saved_scale :
+		((unsigned long)policy->cur << SCHED_CAPACITY_SHIFT) / policy->max);
+	per_cpu(capacity_freq_ref, policy->cpu) = saved_ref;
+	per_cpu(arch_freq_scale, policy->cpu) = saved_scale;
+	write_lock_irqsave(&cpufreq_driver_lock, flags);
+	cpufreq_driver = NULL;
+	write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	return ret;
+}
+#endif

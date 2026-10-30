@@ -38,6 +38,7 @@ struct devfreq_cpu_data {
 
 	struct opp_table *opp_table;
 	unsigned int cur_freq;
+	bool update_pending;
 	unsigned int min_freq;
 	unsigned int max_freq;
 };
@@ -142,7 +143,9 @@ static int get_target_freq_with_cpufreq(struct devfreq *devfreq,
 		cpu_max = parent_cpu_data->max_freq;
 		cpu_cur = parent_cpu_data->cur_freq;
 
-		cpu_percent = ((cpu_cur - cpu_min) * 100) / (cpu_max - cpu_min);
+		cpu_cur = clamp(cpu_cur, cpu_min, cpu_max);
+		cpu_percent = cpu_max == cpu_min ? 100 :
+			((cpu_cur - cpu_min) * 100) / (cpu_max - cpu_min);
 		freq = dev_min + mult_frac(dev_max - dev_min, cpu_percent, 100);
 
 		*target_freq = max(freq, *target_freq);
@@ -231,24 +234,24 @@ static int cpufreq_passive_notifier_call(struct notifier_block *nb,
 	struct devfreq *devfreq = (struct devfreq *)p_data->this;
 	struct devfreq_cpu_data *parent_cpu_data;
 	struct cpufreq_freqs *freqs = ptr;
-	unsigned int cur_freq;
 	int ret;
 
 	if (event != CPUFREQ_POSTCHANGE || !freqs)
 		return 0;
 
 	parent_cpu_data = get_parent_cpu_data(p_data, freqs->policy);
-	if (!parent_cpu_data || parent_cpu_data->cur_freq == freqs->new)
+	if (!parent_cpu_data || (parent_cpu_data->cur_freq == freqs->new &&
+				 !parent_cpu_data->update_pending))
 		return 0;
 
-	cur_freq = parent_cpu_data->cur_freq;
 	parent_cpu_data->cur_freq = freqs->new;
 
 	mutex_lock(&devfreq->lock);
 	ret = devfreq_update_target(devfreq, freqs->new);
 	mutex_unlock(&devfreq->lock);
+	parent_cpu_data->update_pending = !!ret;
 	if (ret) {
-		parent_cpu_data->cur_freq = cur_freq;
+		/* CPU observation remains true even when the CCI request fails. */
 		dev_err(&devfreq->dev, "failed to update the frequency.\n");
 		return ret;
 	}
@@ -473,3 +476,111 @@ MODULE_AUTHOR("Chanwoo Choi <cw00.choi@samsung.com>");
 MODULE_AUTHOR("MyungJoo Ham <myungjoo.ham@samsung.com>");
 MODULE_DESCRIPTION("DEVFREQ Passive governor");
 MODULE_LICENSE("GPL v2");
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include "../regulator/mt6797-combined-test.h"
+
+struct passive_fixture {
+	struct devfreq df;
+	struct devfreq_passive_data data;
+	struct devfreq_cpu_data cpu;
+	struct devfreq_dev_profile profile;
+	unsigned long requested;
+	unsigned int calls;
+	bool fail;
+	unsigned long table[4];
+	u64 time[4];
+	unsigned int transitions[16];
+	void *saved_data;
+};
+
+static int passive_fixture_target(struct device *dev, unsigned long *freq, u32 flags)
+{
+	struct passive_fixture *f = dev_get_drvdata(dev);
+
+	f->requested = *freq;
+	f->calls++;
+	return f->fail ? -EIO : 0;
+}
+
+static int passive_fixture_freq(struct devfreq *df, unsigned long *freq)
+{
+	/* CPU kHz to the synthetic CCI's Hz, using the normal passive override. */
+	*freq *= 1000;
+	return 0;
+}
+
+void *mt6797_test_passive_open(struct device *dev, unsigned int cpu)
+{
+	struct passive_fixture *f = kzalloc_obj(*f);
+	int ret;
+
+	if (!f)
+		return ERR_PTR(-ENOMEM);
+	f->saved_data = dev_get_drvdata(dev);
+	dev_set_drvdata(dev, f);
+	f->df.dev.parent = dev;
+	f->df.data = &f->data;
+	f->df.profile = &f->profile;
+	f->df.governor = &devfreq_passive;
+	f->df.freq_table = f->table;
+	f->table[0] = 100000;
+	f->table[1] = 150000;
+	f->table[2] = 200000;
+	f->table[3] = 300000;
+	f->df.max_state = 4;
+	f->df.scaling_min_freq = 100000;
+	f->df.scaling_max_freq = 300000;
+	f->df.stats.time_in_state = f->time;
+	f->df.stats.trans_table = f->transitions;
+	mutex_init(&f->df.lock);
+	srcu_init_notifier_head(&f->df.transition_notifier_list);
+	f->profile.target = passive_fixture_target;
+	f->data.this = &f->df;
+	f->data.get_target_freq = passive_fixture_freq;
+	INIT_LIST_HEAD(&f->data.cpu_data_list);
+	f->cpu.first_cpu = cpu;
+	f->cpu.cur_freq = 100;
+	list_add(&f->cpu.node, &f->data.cpu_data_list);
+	f->data.nb.notifier_call = cpufreq_passive_notifier_call;
+	ret = cpufreq_register_notifier(&f->data.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	if (ret) {
+		dev_set_drvdata(dev, f->saved_data);
+		srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
+		kfree(f);
+		return ERR_PTR(ret);
+	}
+	return f;
+}
+
+void mt6797_test_passive_fail(void *data, bool fail)
+{
+	struct passive_fixture *f = data;
+
+	f->fail = fail;
+}
+
+unsigned int mt6797_test_passive_calls(void *data)
+{
+	struct passive_fixture *f = data;
+
+	return f->calls;
+}
+
+unsigned long mt6797_test_passive_rate(void *data)
+{
+	struct passive_fixture *f = data;
+
+	return f->requested;
+}
+
+void mt6797_test_passive_close(void *data)
+{
+	struct passive_fixture *f = data;
+
+	cpufreq_unregister_notifier(&f->data.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	dev_set_drvdata(f->df.dev.parent, f->saved_data);
+	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
+	kfree(f);
+}
+#endif

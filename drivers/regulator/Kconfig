@@ -2002,6 +2002,8 @@ config REGULATOR_MT6797_COMBINED_KUNIT_TEST
 	depends on REGULATOR_DA9211=y && REGULATOR_MT6797_CPU_SRAM=y
 	depends on ARM_MEDIATEK_CPUFREQ=y && ARM_MEDIATEK_CCI_DEVFREQ=y
 	depends on REGULATOR_MT6797_PROVIDER_KUNIT_TEST=y
+	select CPU_FREQ_STAT
+	select DEVFREQ_GOV_PASSIVE
 	help
 	  Runs real OF discovery and both rail adapters on synthetic transports.
 	  Requires the eight-CPU QEMU test device tree; never use on hardware.

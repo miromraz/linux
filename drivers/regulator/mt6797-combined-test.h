@@ -7,7 +7,22 @@ static inline void mt6797_test_probe_destroyed(void *data)
 	*(bool *)data = true;
 }
 
+struct cpufreq_policy;
+struct cpufreq_driver;
+struct cpufreq_policy *mt6797_test_policy_alloc(unsigned int cpu);
+void mt6797_test_policy_free(struct cpufreq_policy *policy);
+int mt6797_test_core_target(struct cpufreq_policy *policy,
+			   struct cpufreq_driver *driver, unsigned int index);
+unsigned int mt6797_test_stats_rate(struct cpufreq_policy *policy);
+struct cpufreq_policy *mt6797_test_cpu_policy(void *data);
+bool mt6797_test_cpu_unlocked(void *data);
+int mt6797_test_cpu_reenter(void *data);
 struct device;
+void *mt6797_test_passive_open(struct device *dev, unsigned int cpu);
+void mt6797_test_passive_close(void *data);
+void mt6797_test_passive_fail(void *data, bool fail);
+unsigned int mt6797_test_passive_calls(void *data);
+unsigned long mt6797_test_passive_rate(void *data);
 struct device_node;
 struct platform_device;
 struct regmap;
