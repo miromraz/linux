@@ -2772,6 +2772,7 @@ config SND_SOC_MT6351
 
 config SND_SOC_MT6351_ACCDET
 	tristate "MediaTek MT6351 ACCDET driver"
+	select SND_SOC_MT6351
 	depends on MFD_MT6397
 	depends on IIO
 	help

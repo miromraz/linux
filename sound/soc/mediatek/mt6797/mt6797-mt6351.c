@@ -14,7 +14,101 @@
 
 struct mt6797_mt6351_priv {
 	struct snd_soc_jack headset_jack;
+	struct notifier_block jack_notifier;
+	struct snd_soc_card *card;
+	bool speaker_enabled;
+	bool headphone_enabled;
+	bool headphone_present;
 };
+
+/* User intent and jack exclusion are separate: unplug never unmutes. */
+static void mt6797_update_outputs(struct mt6797_mt6351_priv *priv)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(priv->card);
+
+	if (priv->speaker_enabled && !priv->headphone_present)
+		snd_soc_dapm_enable_pin_unlocked(dapm, "Speakers");
+	else
+		snd_soc_dapm_disable_pin_unlocked(dapm, "Speakers");
+	if (priv->headphone_enabled && priv->headphone_present)
+		snd_soc_dapm_enable_pin_unlocked(dapm, "Headphones");
+	else
+		snd_soc_dapm_disable_pin_unlocked(dapm, "Headphones");
+	snd_soc_dapm_sync_unlocked(dapm);
+}
+
+static int mt6797_output_get(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_value *value)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct mt6797_mt6351_priv *priv = snd_soc_card_get_drvdata(card);
+
+	snd_soc_dapm_mutex_lock(snd_soc_card_to_dapm(card));
+	value->value.integer.value[0] = kcontrol->private_value ?
+		priv->headphone_enabled : priv->speaker_enabled;
+	snd_soc_dapm_mutex_unlock(snd_soc_card_to_dapm(card));
+	return 0;
+}
+
+static int mt6797_output_put(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_value *value)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct mt6797_mt6351_priv *priv = snd_soc_card_get_drvdata(card);
+	bool enabled = !!value->value.integer.value[0];
+	bool *state = kcontrol->private_value ?
+		&priv->headphone_enabled : &priv->speaker_enabled;
+	int changed;
+
+	snd_soc_dapm_mutex_lock(snd_soc_card_to_dapm(card));
+	changed = *state != enabled;
+	*state = enabled;
+	mt6797_update_outputs(priv);
+	snd_soc_dapm_mutex_unlock(snd_soc_card_to_dapm(card));
+	return changed;
+}
+
+static int mt6797_jack_notify(struct notifier_block *nb,
+			      unsigned long event, void *data)
+{
+	struct mt6797_mt6351_priv *priv =
+		container_of(nb, struct mt6797_mt6351_priv, jack_notifier);
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(priv->card);
+
+	snd_soc_dapm_mutex_lock(dapm);
+	priv->headphone_present = event & SND_JACK_HEADPHONE;
+	mt6797_update_outputs(priv);
+	snd_soc_dapm_mutex_unlock(dapm);
+	return NOTIFY_OK;
+}
+
+static const struct snd_kcontrol_new mt6797_output_controls[] = {
+	SOC_SINGLE_BOOL_EXT("Speaker Switch", 0,
+			    mt6797_output_get, mt6797_output_put),
+	SOC_SINGLE_BOOL_EXT("Headphone Switch", 1,
+			    mt6797_output_get, mt6797_output_put),
+};
+
+static const struct snd_soc_dapm_widget mt6797_output_widgets[] = {
+	SND_SOC_DAPM_SPK("Speakers", NULL),
+	SND_SOC_DAPM_HP("Headphones", NULL),
+};
+
+static const struct snd_soc_dapm_route mt6797_output_routes[] = {
+	{ "Speakers", NULL, "Speaker Amp 1 OUT" },
+	{ "Speakers", NULL, "Speaker Amp 2 OUT" },
+	{ "Headphones", NULL, "Headphone L" },
+	{ "Headphones", NULL, "Headphone R" },
+};
+
+static int mt6797_outputs_init(struct snd_soc_card *card)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_card_to_dapm(card);
+
+	snd_soc_dapm_disable_pin(dapm, "Speakers");
+	snd_soc_dapm_disable_pin(dapm, "Headphones");
+	return 0;
+}
 
 /*
  * ACCDET is registered as a card aux_dev, so the card core owns its lifetime.
@@ -38,6 +132,11 @@ static int mt6797_mt6351_accdet_init(struct snd_soc_component *component)
 		return ret;
 	}
 
+	if (card->late_probe == mt6797_outputs_init) {
+		priv->jack_notifier.notifier_call = mt6797_jack_notify;
+		snd_soc_jack_notifier_register(&priv->headset_jack,
+					       &priv->jack_notifier);
+	}
 	return snd_soc_component_set_jack(component, &priv->headset_jack, NULL);
 }
 
@@ -228,8 +327,18 @@ static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 	snd_soc_card_set_drvdata(card, priv);
+	priv->card = card;
+	if (of_machine_is_compatible("planet,gemini-pda")) {
+		card->controls = mt6797_output_controls;
+		card->num_controls = ARRAY_SIZE(mt6797_output_controls);
+		card->dapm_widgets = mt6797_output_widgets;
+		card->num_dapm_widgets = ARRAY_SIZE(mt6797_output_widgets);
+		card->dapm_routes = mt6797_output_routes;
+		card->num_dapm_routes = ARRAY_SIZE(mt6797_output_routes);
+		card->late_probe = mt6797_outputs_init;
+	}
 
-	/* Optional board amplifiers, e.g. a loudspeaker amp on LINEOUT L */
+	/* Optional board amplifiers. */
 	num_aux = of_count_phandle_with_args(np, "aux-devs", NULL);
 	if (num_aux == -ENOENT)
 		num_aux = 0;
@@ -243,8 +352,10 @@ static int mt6797_mt6351_dev_probe(struct platform_device *pdev)
 
 	for (i = 0; i < num_aux; i++) {
 		aux[i].dlc.of_node = of_parse_phandle(np, "aux-devs", i);
-		if (!aux[i].dlc.of_node)
-			return -EINVAL;
+		if (!aux[i].dlc.of_node) {
+			ret = -EINVAL;
+			goto put_amp_nodes;
+		}
 	}
 
 	/*
@@ -303,6 +414,10 @@ put_platform_node:
 	of_node_put(platform_node);
 put_accdet_node:
 	of_node_put(accdet_node);
+	i = of_count_phandle_with_args(np, "aux-devs", NULL);
+put_amp_nodes:
+	while (--i >= 0)
+		of_node_put(aux[i].dlc.of_node);
 	return ret;
 }
 

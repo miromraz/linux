@@ -38,6 +38,9 @@
  * drivers/misc/mediatek/include/mt-plat/mt6797/include/mach/upmu_hw.h and
  * drivers/misc/mediatek/accdet/mt6797/reg_accdet.h.
  */
+#include "mt6351-micbias.h"
+
+#define MT6351_TOP_CKPDN_CON2_SET	0x0248
 #define MT6351_TOP_CKPDN_CON2_CLR	0x024a
 #define MT6351_TOP_RST_CON0_SET		0x02aa
 #define MT6351_TOP_RST_CON0_CLR		0x02ac
@@ -97,7 +100,7 @@
 #define ACCDET_MICBIAS_VREF_MASK	(0x07 << 4)
 #define ACCDET_MICBIAS_VREF_SHIFT	4
 #define ACCDET_MICBIAS_LOWPEN		BIT(7)
-#define ACCDET_MICBIAS_MODE6		0x0104
+#define ACCDET_MICBIAS_MODE6		BIT(2) /* low-power bits owned by codec */
 /* MT6351_AUDENC_ANA_CON11: accessory analog detection control */
 #define ACCDET_ANA_PULLLOW		0x0f
 #define ACCDET_EINT_CON_EN		BIT(11)
@@ -157,6 +160,7 @@ struct mt6351_accdet {
 	struct mutex res_lock; /* serialises the shared ACCDET IRQ register */
 	int cali_offset; /* efuse AUXADC offset in mV, subtracted before decode */
 	bool plugged;
+	bool irq_failed;
 	unsigned int jack_type;
 	unsigned int btn_type;
 };
@@ -217,20 +221,23 @@ static void mt6351_accdet_check_button(struct mt6351_accdet *priv,
  * The comparator A/B state (ACCDET_CON14[7:6]) tells headphone from headset
  * and, while a headset is plugged, a button press from a release.
  */
-static void mt6351_accdet_check_jack(struct mt6351_accdet *priv)
+static int mt6351_accdet_check_jack(struct mt6351_accdet *priv)
 {
 	unsigned int val, ab;
-	int v;
+	int v, ret;
 
-	regmap_read(priv->regmap, MT6351_ACCDET_CON14, &val);
+	ret = regmap_read(priv->regmap, MT6351_ACCDET_CON14, &val);
+	if (ret)
+		return ret;
 	ab = (val >> ACCDET_STATE_AB_SHIFT) & ACCDET_STATE_AB_MASK;
 
 	switch (ab) {
 	case 0:
 		if (priv->jack_type == SND_JACK_HEADSET) {
 			v = mt6351_accdet_read_voltage(priv);
-			if (v >= 0)
-				mt6351_accdet_check_button(priv, v);
+			if (v < 0)
+				return v;
+			mt6351_accdet_check_button(priv, v);
 		} else {
 			priv->jack_type = SND_JACK_HEADPHONE;
 		}
@@ -240,10 +247,12 @@ static void mt6351_accdet_check_jack(struct mt6351_accdet *priv)
 			/* button released */
 			priv->btn_type = 0;
 		} else {
-			priv->jack_type = SND_JACK_HEADSET;
 			/* AB=11 debounce lengthened while a headset is in */
-			regmap_write(priv->regmap, MT6351_ACCDET_CON9,
-				     priv->data.deb.debounce3 * 30);
+			ret = regmap_write(priv->regmap, MT6351_ACCDET_CON9,
+					   priv->data.deb.debounce3 * 30);
+			if (ret)
+				return ret;
+			priv->jack_type = SND_JACK_HEADSET;
 		}
 		break;
 	case 2:
@@ -261,76 +270,95 @@ static void mt6351_accdet_check_jack(struct mt6351_accdet *priv)
 		priv->btn_type = 0;
 		break;
 	}
+	return 0;
 }
 
 /* Enable the ACCDET unit to run cable/button detection while plugged in. */
-static void mt6351_accdet_enable(struct mt6351_accdet *priv)
+static int mt6351_accdet_enable(struct mt6351_accdet *priv)
 {
-	regmap_write(priv->regmap, MT6351_TOP_CKPDN_CON2_CLR, ACCDET_CK_PDN);
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
-			   ACCDET_SWCTRL_IDLE_EN, ACCDET_SWCTRL_IDLE_EN);
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
-			   ACCDET_SWCTRL_EN, ACCDET_SWCTRL_EN);
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON1,
-			   ACCDET_EN, ACCDET_EN);
+	int ret;
+
+	ret = regmap_write(priv->regmap, MT6351_TOP_CKPDN_CON2_CLR, ACCDET_CK_PDN);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
+				 ACCDET_SWCTRL_IDLE_EN, ACCDET_SWCTRL_IDLE_EN);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
+				 ACCDET_SWCTRL_EN, ACCDET_SWCTRL_EN);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON1,
+				 ACCDET_EN, ACCDET_EN);
+	if (ret)
+		return ret;
+	return 0;
 }
 
 /* Stop cable/button detection, keep the EINT PWM alive for plug detection. */
-static void mt6351_accdet_disable(struct mt6351_accdet *priv)
+static int mt6351_accdet_disable(struct mt6351_accdet *priv)
 {
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON1, ACCDET_EN, 0);
-	regmap_write(priv->regmap, MT6351_ACCDET_CON2, ACCDET_EINT_PWM_EN);
+	int ret;
+
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON1, ACCDET_EN, 0);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON2, ACCDET_EINT_PWM_EN);
+	if (ret)
+		return ret;
+	return 0;
 }
 
-static void mt6351_accdet_handle_eint(struct mt6351_accdet *priv)
+static int mt6351_accdet_handle_eint(struct mt6351_accdet *priv)
 {
 	unsigned int val;
 	int ret;
 
-	/*
-	 * The EINT is level triggered and only fires on one polarity, so flip
-	 * it to catch the opposite transition next.  Which level means
-	 * "plugged" comes from mediatek,eint-level-pol (0 = active low,
-	 * the board default).
-	 */
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
-			   ACCDET_EINT_IRQ_POL,
-			   (priv->data.eint_pol ? priv->plugged : !priv->plugged) ?
-			   ACCDET_EINT_IRQ_POL : 0);
-
-	/* clear the EINT interrupt, preserving the polarity bit */
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
-			   ACCDET_EINT_IRQ_CLR, ACCDET_EINT_IRQ_CLR);
-	ret = regmap_read_poll_timeout(priv->regmap, MT6351_ACCDET_CON12, val,
-				       !(val & ACCDET_EINT_IRQ_STATUS),
-				       0, 1000);
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
+				 ACCDET_EINT_IRQ_POL,
+				 (priv->data.eint_pol ? priv->plugged : !priv->plugged) ?
+				 ACCDET_EINT_IRQ_POL : 0);
 	if (ret)
-		dev_warn(priv->dev, "EINT clear timed out\n");
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
-			   ACCDET_EINT_IRQ_CLR, 0);
-
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
+				 ACCDET_EINT_IRQ_CLR, ACCDET_EINT_IRQ_CLR);
+	if (ret)
+		return ret;
+	ret = regmap_read_poll_timeout(priv->regmap, MT6351_ACCDET_CON12, val,
+				       !(val & ACCDET_EINT_IRQ_STATUS), 0, 1000);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
+				 ACCDET_EINT_IRQ_CLR, 0);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON15,
+				 ACCDET_EINT_DEB_MASK, priv->plugged ?
+				 ACCDET_EINT_DEB_IN : ACCDET_EINT_DEB_OUT);
+	if (ret)
+		return ret;
 	if (!priv->plugged) {
-		priv->plugged = true;
-		/* short EINT debounce so a plug-out is seen quickly */
-		regmap_update_bits(priv->regmap, MT6351_ACCDET_CON15,
-				   ACCDET_EINT_DEB_MASK, ACCDET_EINT_DEB_OUT);
-		mt6351_accdet_enable(priv);
+		ret = mt6351_accdet_enable(priv);
+		if (ret)
+			return ret;
 	} else {
-		priv->plugged = false;
-		regmap_update_bits(priv->regmap, MT6351_ACCDET_CON15,
-				   ACCDET_EINT_DEB_MASK, ACCDET_EINT_DEB_IN);
-		/*
-		 * Restore the plug-in (AB=11) debounce the vendor re-applies on
-		 * every plug-out; otherwise it stays at the x30 value written
-		 * when a headset was detected and later insertions are slow.
-		 */
-		regmap_write(priv->regmap, MT6351_ACCDET_CON9,
-			     priv->data.deb.debounce3);
-		mt6351_accdet_disable(priv);
+		ret = regmap_write(priv->regmap, MT6351_ACCDET_CON9,
+				   priv->data.deb.debounce3);
+		if (ret)
+			return ret;
+		ret = mt6351_accdet_disable(priv);
+		if (ret)
+			return ret;
+	}
+	/* Publish only a fully acknowledged and configured transition. */
+	priv->plugged = !priv->plugged;
+	if (!priv->plugged) {
 		priv->jack_type = 0;
 		priv->btn_type = 0;
 		mt6351_accdet_jack_report(priv);
 	}
+	return 0;
 }
 
 static irqreturn_t mt6351_accdet_irq(int irq, void *data)
@@ -340,53 +368,93 @@ static irqreturn_t mt6351_accdet_irq(int irq, void *data)
 	int ret;
 
 	mutex_lock(&priv->res_lock);
-	regmap_read(priv->regmap, MT6351_ACCDET_CON12, &sts);
-
-	if ((sts & ACCDET_IRQ_STATUS) && !(sts & ACCDET_EINT_IRQ_STATUS)) {
-		/* clear the accessory interrupt, preserving the polarity bit */
-		regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
-				   ACCDET_IRQ_CLR, ACCDET_IRQ_CLR);
-		ret = regmap_read_poll_timeout(priv->regmap,
-					       MT6351_ACCDET_CON12, val,
-					       !(val & ACCDET_IRQ_STATUS),
-					       0, 1000);
+	if (priv->irq_failed)
+		goto failed;
+	ret = regmap_read(priv->regmap, MT6351_ACCDET_CON12, &sts);
+	if (ret)
+		goto error;
+	if (sts & ACCDET_EINT_IRQ_STATUS) {
+		ret = mt6351_accdet_handle_eint(priv);
 		if (ret)
-			dev_warn(priv->dev, "IRQ clear timed out\n");
-		regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
-				   ACCDET_IRQ_CLR, 0);
-
-		mt6351_accdet_check_jack(priv);
+			goto error;
+	} else if (sts & ACCDET_IRQ_STATUS) {
+		ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
+					 ACCDET_IRQ_CLR, ACCDET_IRQ_CLR);
+		if (ret)
+			goto error;
+		ret = regmap_read_poll_timeout(priv->regmap, MT6351_ACCDET_CON12,
+					       val, !(val & ACCDET_IRQ_STATUS), 0, 1000);
+		if (ret)
+			goto error;
+		ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
+					 ACCDET_IRQ_CLR, 0);
+		if (ret)
+			goto error;
+		ret = mt6351_accdet_check_jack(priv);
+		if (ret)
+			goto error;
 		if (priv->plugged)
 			mt6351_accdet_jack_report(priv);
-	} else if (sts & ACCDET_EINT_IRQ_STATUS) {
-		mt6351_accdet_handle_eint(priv);
 	}
-
 	mutex_unlock(&priv->res_lock);
-
+	return IRQ_HANDLED;
+error:
+	dev_err(priv->dev, "detection failed (%d); rebind required\n", ret);
+	priv->irq_failed = true;
+failed:
+	/*
+	 * No trustworthy polarity after partial writes. Stop each IRQ on its
+	 * first failure instead of guessing transitions or retrying forever.
+	 * A rebind resets the block before enabling detection again.
+	 */
+	disable_irq_nosync(irq);
+	mutex_unlock(&priv->res_lock);
 	return IRQ_HANDLED;
 }
 
-static void mt6351_accdet_init(struct mt6351_accdet *priv)
+static int mt6351_accdet_init(struct mt6351_accdet *priv)
 {
 	struct mt6351_accdet_data *d = &priv->data;
+	int ret;
 
 	/* enable the ACCDET clock and reset the block */
-	regmap_write(priv->regmap, MT6351_TOP_CKPDN_CON2_CLR, ACCDET_CK_PDN);
-	regmap_write(priv->regmap, MT6351_TOP_RST_CON0_SET, ACCDET_RST);
-	regmap_write(priv->regmap, MT6351_TOP_RST_CON0_CLR, ACCDET_RST);
+	ret = regmap_write(priv->regmap, MT6351_TOP_CKPDN_CON2_CLR, ACCDET_CK_PDN);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_TOP_RST_CON0_SET, ACCDET_RST);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_TOP_RST_CON0_CLR, ACCDET_RST);
+	if (ret)
+		return ret;
 
 	/* PWM width/threshold are programmed as (value - 1) */
-	regmap_write(priv->regmap, MT6351_ACCDET_CON3, d->deb.pwm_width - 1);
-	regmap_write(priv->regmap, MT6351_ACCDET_CON4, d->deb.pwm_thresh - 1);
-	regmap_write(priv->regmap, MT6351_ACCDET_CON2, ACCDET_SWCTRL_EN);
-	regmap_write(priv->regmap, MT6351_ACCDET_CON5,
-		     d->deb.fall_delay << 15 | d->deb.rise_delay);
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON3, d->deb.pwm_width - 1);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON4, d->deb.pwm_thresh - 1);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON2, ACCDET_SWCTRL_EN);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON5,
+			   d->deb.fall_delay << 15 | d->deb.rise_delay);
+	if (ret)
+		return ret;
 
-	regmap_write(priv->regmap, MT6351_ACCDET_CON6, d->deb.debounce0);
-	regmap_write(priv->regmap, MT6351_ACCDET_CON7, d->deb.debounce1);
-	regmap_write(priv->regmap, MT6351_ACCDET_CON9, d->deb.debounce3);
-	regmap_write(priv->regmap, MT6351_ACCDET_CON10, ACCDET_DEBOUNCE4_VAL);
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON6, d->deb.debounce0);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON7, d->deb.debounce1);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON9, d->deb.debounce3);
+	if (ret)
+		return ret;
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON10, ACCDET_DEBOUNCE4_VAL);
+	if (ret)
+		return ret;
 
 	/*
 	 * Make sure both interrupt-clear bits are released.  The accessory and
@@ -394,53 +462,76 @@ static void mt6351_accdet_init(struct mt6351_accdet *priv)
 	 * when the threaded handlers are requested, so do not poke INT_CON0
 	 * here.
 	 */
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
-			   ACCDET_IRQ_CLR | ACCDET_EINT_IRQ_CLR, 0);
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
+				 ACCDET_IRQ_CLR | ACCDET_EINT_IRQ_CLR, 0);
+	if (ret)
+		return ret;
 
 	/* analog setup: pull-low, micbias reference, internal EINT connection */
-	regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
-			   ACCDET_ANA_PULLLOW, ACCDET_ANA_PULLLOW);
-	regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON10,
-			   ACCDET_MICBIAS_VREF_MASK | ACCDET_MICBIAS_LOWPEN,
-			   d->mic_vol << ACCDET_MICBIAS_VREF_SHIFT |
-			   ACCDET_MICBIAS_LOWPEN);
-	regmap_write(priv->regmap, MT6351_ACCDET_CON0, ACCDET_CON0_RSV_VAL);
-	regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
-			   ACCDET_EINT_CON_EN, ACCDET_EINT_CON_EN);
+	ret = regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
+				 ACCDET_ANA_PULLLOW, ACCDET_ANA_PULLLOW);
+	if (ret)
+		return ret;
+
+	ret = regmap_write(priv->regmap, MT6351_ACCDET_CON0, ACCDET_CON0_RSV_VAL);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
+				 ACCDET_EINT_CON_EN, ACCDET_EINT_CON_EN);
+	if (ret)
+		return ret;
 
 	if (d->mic_mode == MT6351_ACCDET_MODE_LOW_COST) {
-		regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
-				   ACCDET_ANA_MODE26, ACCDET_ANA_MODE26);
+		ret = regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
+					 ACCDET_ANA_MODE26, ACCDET_ANA_MODE26);
+		if (ret)
+			return ret;
 	} else if (d->mic_mode == MT6351_ACCDET_MODE_LOW_COST_BIAS) {
-		regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
-				   ACCDET_ANA_MODE26, ACCDET_ANA_MODE26);
-		regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON10,
-				   ACCDET_MICBIAS_MODE6, ACCDET_MICBIAS_MODE6);
+		ret = regmap_update_bits(priv->regmap, MT6351_AUDENC_ANA_CON11,
+					 ACCDET_ANA_MODE26, ACCDET_ANA_MODE26);
+		if (ret)
+			return ret;
+		/* Mode-6 bit 2 is arbitrated with the codec DCC supply. */
 	}
 
 	/* start in the unplugged state: only the EINT path runs */
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON15,
-			   ACCDET_EINT_DEB_MASK, ACCDET_EINT_DEB_IN);
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON15,
-			   ACCDET_EINT_PWM_THRESH, ACCDET_EINT_PWM_THRESH);
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
-			   ACCDET_SWCTRL_EN, 0);
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
-			   ACCDET_EINT_PWM_EN, ACCDET_EINT_PWM_EN);
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON1,
-			   ACCDET_EINT_EN, ACCDET_EINT_EN);
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON15,
+				 ACCDET_EINT_DEB_MASK, ACCDET_EINT_DEB_IN);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON15,
+				 ACCDET_EINT_PWM_THRESH, ACCDET_EINT_PWM_THRESH);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
+				 ACCDET_SWCTRL_EN, 0);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
+				 ACCDET_EINT_PWM_EN, ACCDET_EINT_PWM_EN);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON1,
+				 ACCDET_EINT_EN, ACCDET_EINT_EN);
+	if (ret)
+		return ret;
 
 	/* prime the EINT polarity so it fires on the first plug-in */
-	regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
-			   ACCDET_EINT_IRQ_POL,
-			   d->eint_pol ? ACCDET_EINT_IRQ_POL : 0);
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON12,
+				 ACCDET_EINT_IRQ_POL,
+				 d->eint_pol ? ACCDET_EINT_IRQ_POL : 0);
+	if (ret)
+		return ret;
 
 	/*
 	 * Route the accessory sense of the ACCDET comparator to AUXADC
 	 * channel 5 so the voltage read for button decoding reflects it.
 	 */
-	regmap_update_bits(priv->regmap, MT6351_AUXADC_ACCDET_AUTO,
-			   ACCDET_AUXADC_AUTO_SET, ACCDET_AUXADC_AUTO_SET);
+	ret = regmap_update_bits(priv->regmap, MT6351_AUXADC_ACCDET_AUTO,
+				 ACCDET_AUXADC_AUTO_SET, ACCDET_AUXADC_AUTO_SET);
+	if (ret)
+		return ret;
+	return 0;
 }
 
 /*
@@ -569,10 +660,9 @@ static int mt6351_accdet_set_jack(struct snd_soc_component *component,
 
 	mutex_lock(&priv->res_lock);
 	priv->jack = jack;
-	mutex_unlock(&priv->res_lock);
-
 	if (jack)
 		mt6351_accdet_jack_report(priv);
+	mutex_unlock(&priv->res_lock);
 
 	return 0;
 }
@@ -592,6 +682,33 @@ static const struct snd_soc_component_driver mt6351_accdet_soc_driver = {
 	.set_jack = mt6351_accdet_set_jack,
 	.remove = mt6351_accdet_component_remove,
 };
+
+static void mt6351_accdet_quiesce(void *data)
+{
+	struct mt6351_accdet *priv = data;
+	int ret, err;
+
+	/* IRQs and component are released first. Attempt every cleanup step. */
+	ret = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON1,
+				 ACCDET_EINT_EN | ACCDET_EN, 0);
+	err = regmap_update_bits(priv->regmap, MT6351_ACCDET_CON2,
+				 ACCDET_SWCTRL_EN | ACCDET_EINT_PWM_EN, 0);
+	if (!ret)
+		ret = err;
+	err = regmap_write(priv->regmap, MT6351_TOP_CKPDN_CON2_SET, ACCDET_CK_PDN);
+	if (!ret)
+		ret = err;
+	if (ret)
+		dev_err(priv->dev, "detection quiesce incomplete: %d\n", ret);
+}
+
+static void mt6351_accdet_bias_release(void *data)
+{
+	struct mt6351_accdet *priv = data;
+
+	if (mt6351_micbias_accdet(priv->dev, priv->regmap, false, 0, 0))
+		dev_err(priv->dev, "micbias release pending reconciliation\n");
+}
 
 static int mt6351_accdet_probe(struct platform_device *pdev)
 {
@@ -628,21 +745,30 @@ static int mt6351_accdet_probe(struct platform_device *pdev)
 	if (eint_irq < 0)
 		return eint_irq;
 
+	ret = mt6351_micbias_accdet(priv->dev, priv->regmap, true,
+				    priv->data.mic_vol,
+				    priv->data.mic_mode == MT6351_ACCDET_MODE_LOW_COST_BIAS ?
+				    3 : 1);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "failed to acquire micbias policy\n");
+	ret = devm_add_action_or_reset(&pdev->dev, mt6351_accdet_bias_release, priv);
+	if (ret)
+		return ret;
+
 	platform_set_drvdata(pdev, priv);
 
-	ret = devm_snd_soc_register_component(&pdev->dev,
-					      &mt6351_accdet_soc_driver,
-					      NULL, 0);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret,
-				     "failed to register component\n");
 
 	/*
 	 * Reset the block to a known unplugged state and clear any pending
 	 * interrupt before unmasking, so a plug left in across a rebind does
 	 * not desync the software plug state.
 	 */
-	mt6351_accdet_init(priv);
+	ret = devm_add_action_or_reset(&pdev->dev, mt6351_accdet_quiesce, priv);
+	if (ret)
+		return ret;
+	ret = mt6351_accdet_init(priv);
+	if (ret)
+		return ret;
 
 	ret = devm_request_threaded_irq(&pdev->dev, accdet_irq, NULL,
 					mt6351_accdet_irq, IRQF_ONESHOT,
@@ -657,6 +783,13 @@ static int mt6351_accdet_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "failed to request ACCDET EINT\n");
+
+	ret = devm_snd_soc_register_component(&pdev->dev,
+					      &mt6351_accdet_soc_driver,
+					      NULL, 0);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "failed to register component\n");
 
 	return 0;
 }

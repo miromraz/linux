@@ -537,6 +537,7 @@ static const struct mtk_base_irq_data irq_data[MT6797_IRQ_NUM] = {
 		.irq_en_shift = IRQ1_MCU_ON_SFT,
 		.irq_clr_reg = AFE_IRQ_MCU_CLR,
 		.irq_clr_shift = IRQ1_MCU_CLR_SFT,
+		.irq_status_shift = IRQ1_MCU_CLR_SFT,
 	},
 	[MT6797_IRQ_2] = {
 		.id = MT6797_IRQ_2,
@@ -550,6 +551,7 @@ static const struct mtk_base_irq_data irq_data[MT6797_IRQ_NUM] = {
 		.irq_en_shift = IRQ2_MCU_ON_SFT,
 		.irq_clr_reg = AFE_IRQ_MCU_CLR,
 		.irq_clr_shift = IRQ2_MCU_CLR_SFT,
+		.irq_status_shift = IRQ2_MCU_CLR_SFT,
 	},
 	[MT6797_IRQ_3] = {
 		.id = MT6797_IRQ_3,
@@ -563,6 +565,7 @@ static const struct mtk_base_irq_data irq_data[MT6797_IRQ_NUM] = {
 		.irq_en_shift = IRQ3_MCU_ON_SFT,
 		.irq_clr_reg = AFE_IRQ_MCU_CLR,
 		.irq_clr_shift = IRQ3_MCU_CLR_SFT,
+		.irq_status_shift = IRQ3_MCU_CLR_SFT,
 	},
 	[MT6797_IRQ_4] = {
 		.id = MT6797_IRQ_4,
@@ -576,6 +579,7 @@ static const struct mtk_base_irq_data irq_data[MT6797_IRQ_NUM] = {
 		.irq_en_shift = IRQ4_MCU_ON_SFT,
 		.irq_clr_reg = AFE_IRQ_MCU_CLR,
 		.irq_clr_shift = IRQ4_MCU_CLR_SFT,
+		.irq_status_shift = IRQ4_MCU_CLR_SFT,
 	},
 	[MT6797_IRQ_7] = {
 		.id = MT6797_IRQ_7,
@@ -589,6 +593,7 @@ static const struct mtk_base_irq_data irq_data[MT6797_IRQ_NUM] = {
 		.irq_en_shift = IRQ7_MCU_ON_SFT,
 		.irq_clr_reg = AFE_IRQ_MCU_CLR,
 		.irq_clr_shift = IRQ7_MCU_CLR_SFT,
+		.irq_status_shift = IRQ7_MCU_CLR_SFT,
 	},
 };
 
@@ -602,106 +607,195 @@ static const struct regmap_config mt6797_afe_regmap_config = {
 static irqreturn_t mt6797_afe_irq_handler(int irq_id, void *dev)
 {
 	struct mtk_base_afe *afe = dev;
-	struct mtk_base_afe_irq *irq;
-	unsigned int status;
-	unsigned int mcu_en;
-	int ret;
+	irqreturn_t handled = IRQ_NONE;
 	int i;
-	irqreturn_t irq_ret = IRQ_HANDLED;
-
-	/* get irq that is sent to MCU */
-	regmap_read(afe->regmap, AFE_IRQ_MCU_EN, &mcu_en);
-
-	ret = regmap_read(afe->regmap, AFE_IRQ_MCU_STATUS, &status);
-	if (ret || (status & mcu_en) == 0) {
-		dev_err(afe->dev, "%s(), irq status err, ret %d, status 0x%x, mcu_en 0x%x\n",
-			__func__, ret, status, mcu_en);
-
-		/* only clear IRQ which is sent to MCU */
-		status = mcu_en & AFE_IRQ_STATUS_BITS;
-
-		irq_ret = IRQ_NONE;
-		goto err_irq;
-	}
 
 	for (i = 0; i < MT6797_MEMIF_NUM; i++) {
 		struct mtk_base_afe_memif *memif = &afe->memif[i];
+		struct snd_pcm_substream *substream;
+		unsigned int status, enabled, mask;
+		unsigned long flags;
+		int slot;
 
-		if (!memif->substream)
+		/* Pairs with FE startup; shutdown drains before releasing slot. */
+		substream = smp_load_acquire(&memif->substream);
+		if (!substream)
 			continue;
-
-		irq = &afe->irqs[memif->irq_usage];
-
-		if (status & (1 << irq->irq_data->irq_en_shift))
-			snd_pcm_period_elapsed(memif->substream);
+		snd_pcm_stream_lock_irqsave(substream, flags);
+		slot = READ_ONCE(memif->irq_usage);
+		if (slot < 0 || slot >= afe->irqs_size)
+			goto unlock;
+		/* Status, MCU routing and W1C share the clear bit, not ON. */
+		mask = BIT(afe->irqs[slot].irq_data->irq_status_shift);
+		/*
+		 * Read and acknowledge under this stream's trigger lock. Never
+		 * carry another FE's status across stop/start or slot reuse.
+		 */
+		if (regmap_read(afe->regmap, AFE_IRQ_MCU_STATUS, &status) ||
+		    regmap_read(afe->regmap, AFE_IRQ_MCU_EN, &enabled) ||
+		    !(status & mask))
+			goto unlock;
+		if (regmap_write(afe->regmap, AFE_IRQ_MCU_CLR, mask))
+			goto unlock;
+		handled = IRQ_HANDLED;
+		if ((enabled & mask) && snd_pcm_running(substream))
+			snd_pcm_period_elapsed_under_stream_lock(substream);
+unlock:
+		snd_pcm_stream_unlock_irqrestore(substream, flags);
 	}
+	return handled;
+}
 
-err_irq:
-	/* clear irq */
-	regmap_write(afe->regmap,
-		     AFE_IRQ_MCU_CLR,
-		     status & AFE_IRQ_STATUS_BITS);
+static int mt6797_memif_validate(struct mtk_base_afe *afe, int id)
+{
+	const struct mtk_base_memif_data *data = afe->memif[id].data;
 
-	return irq_ret;
+	if (data->enable_reg != AFE_DAC_CON0 ||
+	    data->enable_shift <= AFE_ON_SFT || data->enable_shift >= 32)
+		return -EINVAL;
+	return 0;
+}
+
+static int mt6797_memif_start_check(struct mtk_base_afe *afe, int id)
+{
+	struct mt6797_afe_private *priv = afe->platform_priv;
+
+	if (!priv->clocks_enabled || afe->hardware_dirty || afe->shutting_down)
+		return -EIO;
+	return mt6797_memif_validate(afe, id);
+}
+
+static int mt6797_memif_stop(struct mtk_base_afe *afe, int id)
+{
+	struct mt6797_afe_private *priv = afe->platform_priv;
+	const struct mtk_base_memif_data *data = afe->memif[id].data;
+	unsigned int value, mask;
+	int attempt, ret;
+
+	ret = mt6797_memif_validate(afe, id);
+	if (ret)
+		return ret;
+	if (!priv->clocks_enabled)
+		return -EIO;
+	mask = BIT(data->enable_shift);
+	/*
+	 * Powered uncached MMIO: readback completes the disable access.
+	 * This is not an independent outstanding-bus-transaction counter.
+	 */
+	for (attempt = 0; attempt < 2; attempt++) {
+		ret = regmap_update_bits(afe->regmap, data->enable_reg, mask, 0);
+		if (ret)
+			continue;
+		ret = regmap_read(afe->regmap, data->enable_reg, &value);
+		if (!ret && !(value & mask))
+			return 0;
+		ret = ret ?: -EIO;
+	}
+	dev_err(afe->dev, "memif %d disable unconfirmed: %d (device fault)\n",
+		id, ret);
+	return ret;
 }
 
 static int mt6797_afe_runtime_suspend(struct device *dev)
 {
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
-	unsigned int afe_on_retm;
-	int retry = 0;
+	struct mt6797_afe_private *priv = afe->platform_priv;
+	unsigned int value;
+	int ret, restore, i;
 
-	/* disable AFE */
-	regmap_update_bits(afe->regmap, AFE_DAC_CON0, AFE_ON_MASK_SFT, 0x0);
-	do {
-		regmap_read(afe->regmap, AFE_DAC_CON0, &afe_on_retm);
-		if ((afe_on_retm & AFE_ON_RETM_MASK_SFT) == 0)
-			break;
+	if (!priv->clocks_enabled)
+		return 0;
 
-		udelay(10);
-	} while (++retry < 100000);
+	/* A failed FE stop must not silently lose its clock ownership. */
+	for (i = 0; i < afe->memif_size; i++)
+		if (afe->memif[i].trigger_active || afe->memif[i].trigger_dirty)
+			return -EBUSY;
 
-	if (retry)
-		dev_warn(afe->dev, "%s(), retry %d\n", __func__, retry);
+	ret = regmap_update_bits(afe->regmap, AFE_DAC_CON0, AFE_ON_MASK_SFT, 0);
+	if (ret)
+		goto restore;
+	ret = regmap_read_poll_timeout(afe->regmap, AFE_DAC_CON0, value,
+				       !(value & AFE_ON_RETM_MASK_SFT), 10, 10000);
+	if (ret)
+		goto restore;
+	/* W1C must be a write, not a read/modify/write. */
+	ret = regmap_write(afe->regmap, AFE_IRQ_MCU_CLR, AFE_IRQ_STATUS_BITS);
+	if (ret)
+		goto restore;
+	afe->hardware_dirty = false;
+	ret = mt6797_afe_disable_clock(afe);
+	if (!ret)
+		priv->clocks_enabled = false;
+	return ret;
 
-	/* make sure all irq status are cleared */
-	regmap_update_bits(afe->regmap, AFE_IRQ_MCU_CLR, 0xffff, 0xffff);
-
-	return mt6797_afe_disable_clock(afe);
+restore:
+	/* PM leaves us active on failure. Keep clocks and attempt restoration. */
+	restore = regmap_update_bits(afe->regmap, AFE_DAC_CON0,
+				     AFE_ON_MASK_SFT, AFE_ON_MASK_SFT);
+	afe->hardware_dirty = !!restore;
+	if (restore)
+		dev_err(dev, "AFE suspend restoration failed: %d\n", restore);
+	return ret;
 }
 
 static int mt6797_afe_runtime_resume(struct device *dev)
 {
 	struct mtk_base_afe *afe = dev_get_drvdata(dev);
-	int ret;
+	struct mt6797_afe_private *priv = afe->platform_priv;
+	int ret, cleanup;
 
-	ret = mt6797_afe_enable_clock(afe);
-	if (ret)
-		return ret;
+	if (!priv->clocks_enabled) {
+		ret = mt6797_afe_enable_clock(afe);
+		if (ret)
+			return ret;
+		priv->clocks_enabled = true;
+	}
 
 	/* irq signal to mcu only */
-	regmap_write(afe->regmap, AFE_IRQ_MCU_EN, AFE_IRQ_MCU_EN_MASK_SFT);
+	ret = regmap_write(afe->regmap, AFE_IRQ_MCU_EN, AFE_IRQ_MCU_EN_MASK_SFT);
+	if (ret)
+		goto err_disable_clock;
 
 	/* force all memif use normal mode */
-	regmap_update_bits(afe->regmap, AFE_MEMIF_HDALIGN,
-			   0x7ff << 16, 0x7ff << 16);
+	ret = regmap_update_bits(afe->regmap, AFE_MEMIF_HDALIGN,
+				 0x7ff << 16, 0x7ff << 16);
+	if (ret)
+		goto err_disable_clock;
 	/* force cpu use normal mode when access sram data */
-	regmap_update_bits(afe->regmap, AFE_MEMIF_MSB,
-			   CPU_COMPACT_MODE_MASK_SFT, 0);
+	ret = regmap_update_bits(afe->regmap, AFE_MEMIF_MSB,
+				 CPU_COMPACT_MODE_MASK_SFT, 0);
+	if (ret)
+		goto err_disable_clock;
 	/* force cpu use 8_24 format when writing 32bit data */
-	regmap_update_bits(afe->regmap, AFE_MEMIF_MSB,
-			   CPU_HD_ALIGN_MASK_SFT, 0);
+	ret = regmap_update_bits(afe->regmap, AFE_MEMIF_MSB,
+				 CPU_HD_ALIGN_MASK_SFT, 0);
+	if (ret)
+		goto err_disable_clock;
 
 	/* set all output port to 24bit */
-	regmap_update_bits(afe->regmap, AFE_CONN_24BIT,
-			   0x3fffffff, 0x3fffffff);
+	ret = regmap_update_bits(afe->regmap, AFE_CONN_24BIT,
+				 0x3fffffff, 0x3fffffff);
+	if (ret)
+		goto err_disable_clock;
 
 	/* enable AFE */
-	regmap_update_bits(afe->regmap, AFE_DAC_CON0,
-			   AFE_ON_MASK_SFT,
-			   0x1 << AFE_ON_SFT);
+	ret = regmap_update_bits(afe->regmap, AFE_DAC_CON0,
+				 AFE_ON_MASK_SFT,
+				 0x1 << AFE_ON_SFT);
+	if (ret)
+		goto err_disable_clock;
 
+	afe->hardware_dirty = false;
 	return 0;
+
+err_disable_clock:
+	afe->hardware_dirty = true;
+	cleanup = mt6797_afe_runtime_suspend(dev);
+	if (cleanup) {
+		afe->hardware_dirty = true;
+		dev_err(dev, "AFE resume cleanup failed: %d\n", cleanup);
+	}
+	return ret;
 }
 
 static int mt6797_dai_memif_register(struct mtk_base_afe *afe)
@@ -731,6 +825,83 @@ static const dai_register_cb dai_register_cbs[] = {
 	mt6797_dai_hostless_register,
 	mt6797_dai_memif_register,
 };
+
+static void mt6797_afe_sync_irq(struct mtk_base_afe *afe)
+{
+	struct mt6797_afe_private *priv = afe->platform_priv;
+
+	synchronize_irq(priv->irq);
+}
+
+static void mt6797_afe_power_down(void *data)
+{
+	struct device *dev = data;
+	int ret;
+
+	if (pm_runtime_enabled(dev)) {
+		ret = pm_runtime_put_sync_suspend(dev);
+		pm_runtime_disable(dev);
+	} else {
+		ret = mt6797_afe_runtime_suspend(dev);
+	}
+	if (ret < 0)
+		dev_err(dev, "AFE power-down incomplete: %d\n", ret);
+}
+
+static void mt6797_afe_pcm_shutdown(struct platform_device *pdev)
+{
+	struct mtk_base_afe *afe = platform_get_drvdata(pdev);
+	struct mt6797_afe_private *priv = afe->platform_priv;
+	unsigned long flags;
+	unsigned int value;
+	int i, ret = 0, err;
+
+	/*
+	 * Never borrow substream pointers here: close may run concurrently.
+	 * Triggers take stream lock then memif_lock; this path takes only
+	 * memif_lock, and drains handlers after dropping it.
+	 */
+	spin_lock_irqsave(&afe->memif_lock, flags);
+	afe->shutting_down = true;
+	if (!priv->clocks_enabled) {
+		spin_unlock_irqrestore(&afe->memif_lock, flags);
+		return;
+	}
+	for (i = 0; i < afe->memif_size; i++) {
+		err = mt6797_memif_stop(afe, i);
+		if (!err)
+			afe->memif[i].trigger_active = false;
+		afe->memif[i].trigger_dirty = !!err;
+		ret = ret ?: err;
+	}
+	for (i = 0; i < afe->irqs_size; i++) {
+		const struct mtk_base_irq_data *data = afe->irqs[i].irq_data;
+
+		err = regmap_update_bits(afe->regmap, data->irq_en_reg,
+					 BIT(data->irq_en_shift), 0);
+		ret = ret ?: err;
+	}
+	err = regmap_write(afe->regmap, AFE_IRQ_MCU_EN, 0);
+	ret = ret ?: err;
+	err = regmap_write(afe->regmap, AFE_IRQ_MCU_CLR, AFE_IRQ_STATUS_BITS);
+	ret = ret ?: err;
+	/* Do not release slots whose generator cleanup is unconfirmed. */
+	if (ret)
+		for (i = 0; i < afe->memif_size; i++)
+			afe->memif[i].trigger_dirty = true;
+	spin_unlock_irqrestore(&afe->memif_lock, flags);
+	mt6797_afe_sync_irq(afe);
+	if (!ret) {
+		ret = regmap_update_bits(afe->regmap, AFE_DAC_CON0, AFE_ON_MASK_SFT, 0);
+		if (!ret)
+			ret = regmap_read_poll_timeout(afe->regmap, AFE_DAC_CON0, value,
+						       !(value & AFE_ON_RETM_MASK_SFT),
+						       10, 10000);
+	}
+	/* Keep the lifetime PM hold; devres is not run by device_shutdown. */
+	if (ret)
+		dev_err(afe->dev, "AFE shutdown incomplete: %d\n", ret);
+}
 
 static int mt6797_afe_pcm_dev_probe(struct platform_device *pdev)
 {
@@ -782,6 +953,9 @@ static int mt6797_afe_pcm_dev_probe(struct platform_device *pdev)
 	}
 
 	mutex_init(&afe->irq_alloc_lock);
+	spin_lock_init(&afe->memif_lock);
+	afe->memif_stop = mt6797_memif_stop;
+	afe->memif_start_check = mt6797_memif_start_check;
 
 	/* irq initialize */
 	afe->irqs_size = MT6797_IRQ_NUM;
@@ -798,12 +972,6 @@ static int mt6797_afe_pcm_dev_probe(struct platform_device *pdev)
 	if (irq_id < 0)
 		return irq_id;
 
-	ret = devm_request_irq(dev, irq_id, mt6797_afe_irq_handler,
-			       IRQF_TRIGGER_NONE, "asys-isr", (void *)afe);
-	if (ret) {
-		dev_err(dev, "could not request_irq for asys-isr\n");
-		return ret;
-	}
 
 	/* init sub_dais */
 	INIT_LIST_HEAD(&afe->sub_dais);
@@ -835,41 +1003,47 @@ static int mt6797_afe_pcm_dev_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, afe);
 
 	pm_runtime_enable(dev);
-	if (!pm_runtime_enabled(dev))
-		goto err_pm_disable;
-	pm_runtime_get_sync(&pdev->dev);
+	if (!pm_runtime_enabled(dev)) {
+		ret = mt6797_afe_runtime_resume(dev);
+		if (ret)
+			return ret;
+	} else {
+		ret = pm_runtime_resume_and_get(dev);
+		if (ret) {
+			pm_runtime_disable(dev);
+			return ret;
+		}
+	}
+
+	/* Registered before IRQ/components: devres releases those first. */
+	ret = devm_add_action_or_reset(dev, mt6797_afe_power_down, dev);
+	if (ret)
+		return ret;
+	afe_priv->irq = irq_id;
+	afe->synchronize_irq = mt6797_afe_sync_irq;
+	ret = devm_request_irq(dev, irq_id, mt6797_afe_irq_handler,
+			       IRQF_TRIGGER_NONE, "asys-isr", afe);
+	if (ret)
+		return ret;
 
 	/* register component */
 	ret = devm_snd_soc_register_component(dev, &mtk_afe_pcm_platform,
 					      NULL, 0);
 	if (ret) {
 		dev_warn(dev, "err_platform\n");
-		goto err_pm_disable;
+		return ret;
 	}
 
 	ret = devm_snd_soc_register_component(afe->dev,
-				     &mt6797_afe_pcm_dai_component,
-				     afe->dai_drivers,
-				     afe->num_dai_drivers);
+					      &mt6797_afe_pcm_dai_component,
+					      afe->dai_drivers,
+					      afe->num_dai_drivers);
 	if (ret) {
 		dev_warn(dev, "err_dai_component\n");
-		goto err_pm_disable;
+		return ret;
 	}
 
 	return 0;
-
-err_pm_disable:
-	pm_runtime_disable(dev);
-
-	return ret;
-}
-
-static void mt6797_afe_pcm_dev_remove(struct platform_device *pdev)
-{
-	pm_runtime_disable(&pdev->dev);
-	if (!pm_runtime_status_suspended(&pdev->dev))
-		mt6797_afe_runtime_suspend(&pdev->dev);
-	pm_runtime_put_sync(&pdev->dev);
 }
 
 static const struct of_device_id mt6797_afe_pcm_dt_match[] = {
@@ -890,7 +1064,7 @@ static struct platform_driver mt6797_afe_pcm_driver = {
 		   .pm = pm_ptr(&mt6797_afe_pm_ops),
 	},
 	.probe = mt6797_afe_pcm_dev_probe,
-	.remove = mt6797_afe_pcm_dev_remove,
+	.shutdown = mt6797_afe_pcm_shutdown,
 };
 
 module_platform_driver(mt6797_afe_pcm_driver);

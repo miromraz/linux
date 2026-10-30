@@ -45,6 +45,8 @@ struct clk;
 
 struct mt6797_afe_private {
 	struct clk **clk;
+	int irq;
+	bool clocks_enabled;
 };
 
 unsigned int mt6797_general_rate_transform(struct device *dev,

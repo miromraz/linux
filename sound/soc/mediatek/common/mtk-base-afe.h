@@ -10,6 +10,7 @@
 #define _MTK_BASE_AFE_H_
 
 #include <linux/soc/mediatek/mtk_sip_svc.h>
+#include <linux/spinlock.h>
 
 #define MTK_STREAM_NUM (SNDRV_PCM_STREAM_LAST + 1)
 #define MTK_SIP_AUDIO_CONTROL MTK_SIP_SMC_CMD(0x517)
@@ -111,11 +112,19 @@ struct mtk_base_afe {
 	int (*runtime_suspend)(struct device *dev);
 	int (*runtime_resume)(struct device *dev);
 	bool suspended;
+	bool hardware_dirty;
 
 	struct mtk_base_afe_memif *memif;
 	int memif_size;
 	struct mtk_base_afe_irq *irqs;
 	int irqs_size;
+	/* Optional IRQ drain before a FE releases its substream/IRQ slot. */
+	void (*synchronize_irq)(struct mtk_base_afe *afe);
+	/* Opt-in atomic stop/readback and shutdown serialization. */
+	int (*memif_stop)(struct mtk_base_afe *afe, int id);
+	int (*memif_start_check)(struct mtk_base_afe *afe, int id);
+	spinlock_t memif_lock; /* Serializes trigger/finalizer with shutdown. */
+	bool shutting_down;
 	int memif_32bit_supported;
 	bool preallocate_buffers;
 
@@ -145,6 +154,11 @@ struct mtk_base_afe_memif {
 	const struct mtk_base_memif_data *data;
 	int irq_usage;
 	int const_irq;
+	/* Retained until a complete stop transaction succeeds. */
+	bool trigger_active;
+	bool trigger_dirty;
+	bool config_dirty;
+	bool dram_resource;
 	unsigned char *dma_area;
 	dma_addr_t dma_addr;
 	size_t dma_bytes;

@@ -45,13 +45,13 @@ int mtk_afe_fe_startup(struct snd_pcm_substream *substream,
 	const struct snd_pcm_hardware *mtk_afe_hardware = afe->mtk_afe_hardware;
 	int ret;
 
-	memif->substream = substream;
+	if (memif->trigger_dirty || afe->hardware_dirty)
+		return -EIO;
 
-	snd_pcm_hw_constraint_step(substream->runtime, 0,
-				   SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 16);
-	/* enable agent */
-	mtk_regmap_update_bits(afe->regmap, memif->data->agent_disable_reg,
-			       1, 0, memif->data->agent_disable_shift);
+	ret = snd_pcm_hw_constraint_step(substream->runtime, 0,
+					 SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 16);
+	if (ret < 0)
+		return ret;
 
 	snd_soc_set_runtime_hwparams(substream, mtk_afe_hardware);
 
@@ -76,7 +76,7 @@ int mtk_afe_fe_startup(struct snd_pcm_substream *substream,
 	ret = snd_pcm_hw_constraint_integer(runtime,
 					    SNDRV_PCM_HW_PARAM_PERIODS);
 	if (ret < 0)
-		dev_err(afe->dev, "snd_pcm_hw_constraint_integer failed\n");
+		return ret;
 
 	/* dynamic allocate irq to memif */
 	if (memif->irq_usage < 0) {
@@ -88,10 +88,22 @@ int mtk_afe_fe_startup(struct snd_pcm_substream *substream,
 		} else {
 			dev_err(afe->dev, "%s() error: no more asys irq\n",
 				__func__);
-			ret = -EBUSY;
+			return -EBUSY;
 		}
 	}
-	return ret;
+	/* Publish only after the IRQ slot and constraints are valid. */
+	ret = mtk_regmap_update_bits(afe->regmap, memif->data->agent_disable_reg,
+				     1, 0, memif->data->agent_disable_shift);
+	if (ret) {
+		if (!memif->const_irq) {
+			mtk_dynamic_irq_release(afe, memif->irq_usage);
+			memif->irq_usage = -1;
+		}
+		return ret;
+	}
+	/* Pairs with the MT6797 ISR acquire before reading irq_usage. */
+	smp_store_release(&memif->substream, substream);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(mtk_afe_fe_startup);
 
@@ -104,14 +116,28 @@ void mtk_afe_fe_shutdown(struct snd_pcm_substream *substream,
 	int irq_id;
 
 	irq_id = memif->irq_usage;
+	if (memif->trigger_active || memif->trigger_dirty) {
+		int ret = mtk_afe_fe_trigger(substream, SNDRV_PCM_TRIGGER_STOP, dai);
+
+		if (ret)
+			dev_err(afe->dev, "FE stop failed during close: %d\n", ret);
+	}
 
 	mtk_regmap_update_bits(afe->regmap, memif->data->agent_disable_reg,
 			       1, 1, memif->data->agent_disable_shift);
 
-	if (!memif->const_irq) {
+	/* Only opted-in ISRs implement the matching publication contract. */
+	if (afe->synchronize_irq) {
+		WRITE_ONCE(memif->substream, NULL);
+		afe->synchronize_irq(afe);
+	}
+
+	/* Quarantine an uncertain generator instead of reassigning its slot. */
+	if (!memif->const_irq && !memif->trigger_dirty) {
 		mtk_dynamic_irq_release(afe, irq_id);
 		memif->irq_usage = -1;
-		memif->substream = NULL;
+		if (!afe->synchronize_irq)
+			memif->substream = NULL;
 	}
 }
 EXPORT_SYMBOL_GPL(mtk_afe_fe_shutdown);
@@ -129,8 +155,16 @@ int mtk_afe_fe_hw_params(struct snd_pcm_substream *substream,
 	unsigned int rate = params_rate(params);
 	snd_pcm_format_t format = params_format(params);
 
-	if (afe->request_dram_resource)
-		afe->request_dram_resource(afe->dev);
+	if (memif->trigger_active || memif->trigger_dirty || afe->hardware_dirty)
+		return -EIO;
+
+	memif->config_dirty = true;
+	if (afe->request_dram_resource && !memif->dram_resource) {
+		ret = afe->request_dram_resource(afe->dev);
+		if (ret)
+			return ret;
+		memif->dram_resource = true;
+	}
 
 	dev_dbg(afe->dev, "%s(), %s, ch %d, rate %d, fmt %d, dma_addr %pad, dma_area %p, dma_bytes 0x%zx\n",
 		__func__, memif->data->name,
@@ -150,7 +184,7 @@ int mtk_afe_fe_hw_params(struct snd_pcm_substream *substream,
 	if (ret) {
 		dev_err(afe->dev, "%s(), error, id %d, set addr, ret %d\n",
 			__func__, id, ret);
-		return ret;
+		goto err_release;
 	}
 
 	/* set channel */
@@ -158,7 +192,7 @@ int mtk_afe_fe_hw_params(struct snd_pcm_substream *substream,
 	if (ret) {
 		dev_err(afe->dev, "%s(), error, id %d, set channel %d, ret %d\n",
 			__func__, id, channels, ret);
-		return ret;
+		goto err_release;
 	}
 
 	/* set rate */
@@ -166,7 +200,7 @@ int mtk_afe_fe_hw_params(struct snd_pcm_substream *substream,
 	if (ret) {
 		dev_err(afe->dev, "%s(), error, id %d, set rate %d, ret %d\n",
 			__func__, id, rate, ret);
-		return ret;
+		goto err_release;
 	}
 
 	/* set format */
@@ -174,89 +208,153 @@ int mtk_afe_fe_hw_params(struct snd_pcm_substream *substream,
 	if (ret) {
 		dev_err(afe->dev, "%s(), error, id %d, set format %d, ret %d\n",
 			__func__, id, format, ret);
-		return ret;
+		goto err_release;
 	}
 
+	memif->config_dirty = false;
 	return 0;
+
+err_release:
+	if (memif->dram_resource && afe->release_dram_resource) {
+		afe->release_dram_resource(afe->dev);
+		memif->dram_resource = false;
+	}
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mtk_afe_fe_hw_params);
+
+/* Caller serializes against trigger; IRQ draining must happen after unlock. */
+static int mtk_afe_fe_stop(struct mtk_base_afe *afe, int id)
+{
+	struct mtk_base_afe_memif *memif = &afe->memif[id];
+	const struct mtk_base_irq_data *irq_data;
+	int ret, err;
+
+	memif->trigger_dirty = true;
+	ret = afe->memif_stop ? afe->memif_stop(afe, id) :
+		mtk_memif_set_disable(afe, id);
+	if (!ret)
+		memif->trigger_active = false;
+	/* An invalid IRQ slot must never bypass DMA disable. */
+	if (memif->irq_usage < 0 || memif->irq_usage >= afe->irqs_size)
+		return ret ?: -EINVAL;
+	irq_data = afe->irqs[memif->irq_usage].irq_data;
+	err = mtk_regmap_update_bits(afe->regmap, irq_data->irq_en_reg,
+				     1, 0, irq_data->irq_en_shift);
+	ret = ret ?: err;
+	err = mtk_regmap_write(afe->regmap, irq_data->irq_clr_reg,
+			       BIT(irq_data->irq_clr_shift));
+	ret = ret ?: err;
+	memif->trigger_dirty = !!ret;
+	return ret;
+}
 
 int mtk_afe_fe_hw_free(struct snd_pcm_substream *substream,
 		       struct snd_soc_dai *dai)
 {
 	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct mtk_base_afe_memif *memif = &afe->memif[snd_soc_rtd_to_cpu(rtd, 0)->id];
+	unsigned long flags;
+	int ret = 0;
 
-	if (afe->release_dram_resource)
+	/* ALSA frees managed pages regardless of our return value. */
+	if (afe->memif_stop) {
+		spin_lock_irqsave(&afe->memif_lock, flags);
+		ret = mtk_afe_fe_stop(afe, snd_soc_rtd_to_cpu(rtd, 0)->id);
+		spin_unlock_irqrestore(&afe->memif_lock, flags);
+		if (afe->synchronize_irq)
+			afe->synchronize_irq(afe);
+	}
+	memif->config_dirty = true;
+	if (memif->dram_resource && afe->release_dram_resource) {
 		afe->release_dram_resource(afe->dev);
+		memif->dram_resource = false;
+	}
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mtk_afe_fe_hw_free);
 
-int mtk_afe_fe_trigger(struct snd_pcm_substream *substream, int cmd,
-		       struct snd_soc_dai *dai)
+static int mtk_afe_fe_trigger_locked(struct snd_pcm_substream *substream, int cmd,
+				     struct snd_soc_dai *dai)
 {
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_pcm_runtime * const runtime = substream->runtime;
 	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
 	int id = snd_soc_rtd_to_cpu(rtd, 0)->id;
 	struct mtk_base_afe_memif *memif = &afe->memif[id];
-	struct mtk_base_afe_irq *irqs = &afe->irqs[memif->irq_usage];
-	const struct mtk_base_irq_data *irq_data = irqs->irq_data;
+	const struct mtk_base_irq_data *irq_data;
 	unsigned int counter = runtime->period_size;
-	int fs;
-	int ret;
+	int fs, ret;
 
-	dev_dbg(afe->dev, "%s %s cmd=%d\n", __func__, memif->data->name, cmd);
+	if (cmd == SNDRV_PCM_TRIGGER_STOP || cmd == SNDRV_PCM_TRIGGER_SUSPEND)
+		return mtk_afe_fe_stop(afe, id);
+	if (memif->irq_usage < 0 || memif->irq_usage >= afe->irqs_size)
+		return -EINVAL;
+	irq_data = afe->irqs[memif->irq_usage].irq_data;
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
-		ret = mtk_memif_set_enable(afe, id);
-		if (ret) {
-			dev_err(afe->dev, "%s(), error, id %d, memif enable, ret %d\n",
-				__func__, id, ret);
-			return ret;
+		if (memif->config_dirty || memif->trigger_dirty || afe->hardware_dirty)
+			return -EIO;
+		if (afe->memif_start_check) {
+			ret = afe->memif_start_check(afe, id);
+			if (ret)
+				return ret;
 		}
-
-		/* set irq counter */
-		mtk_regmap_update_bits(afe->regmap, irq_data->irq_cnt_reg,
-				       irq_data->irq_cnt_maskbit, counter,
-				       irq_data->irq_cnt_shift);
-
-		/* set irq fs */
+		/* Validate before enabling DMA or modifying IRQ registers. */
 		fs = afe->irq_fs(substream, runtime->rate);
-
 		if (fs < 0)
 			return -EINVAL;
-
-		mtk_regmap_update_bits(afe->regmap, irq_data->irq_fs_reg,
-				       irq_data->irq_fs_maskbit, fs,
-				       irq_data->irq_fs_shift);
-
-		/* enable interrupt */
-		mtk_regmap_update_bits(afe->regmap, irq_data->irq_en_reg,
-				       1, 1, irq_data->irq_en_shift);
-
+		memif->trigger_dirty = true;
+		ret = mtk_regmap_update_bits(afe->regmap, irq_data->irq_cnt_reg,
+					     irq_data->irq_cnt_maskbit, counter,
+					     irq_data->irq_cnt_shift);
+		if (ret)
+			goto stop;
+		ret = mtk_regmap_update_bits(afe->regmap, irq_data->irq_fs_reg,
+					     irq_data->irq_fs_maskbit, fs,
+					     irq_data->irq_fs_shift);
+		if (ret)
+			goto stop;
+		ret = mtk_regmap_write(afe->regmap, irq_data->irq_clr_reg,
+				       BIT(irq_data->irq_clr_shift));
+		if (ret)
+			goto stop;
+		ret = mtk_regmap_update_bits(afe->regmap, irq_data->irq_en_reg,
+					     1, 1, irq_data->irq_en_shift);
+		if (ret)
+			goto stop;
+		ret = mtk_memif_set_enable(afe, id);
+		if (ret)
+			goto stop;
+		memif->trigger_active = true;
+		memif->trigger_dirty = false;
 		return 0;
-	case SNDRV_PCM_TRIGGER_STOP:
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-		ret = mtk_memif_set_disable(afe, id);
-		if (ret) {
-			dev_err(afe->dev, "%s(), error, id %d, memif enable, ret %d\n",
-				__func__, id, ret);
-		}
-
-		/* disable interrupt */
-		mtk_regmap_update_bits(afe->regmap, irq_data->irq_en_reg,
-				       1, 0, irq_data->irq_en_shift);
-		/* and clear pending IRQ */
-		mtk_regmap_write(afe->regmap, irq_data->irq_clr_reg,
-				 1 << irq_data->irq_clr_shift);
-		return ret;
 	default:
 		return -EINVAL;
 	}
+stop:
+	/* Preserve the START error, independently recording stop confirmation. */
+	mtk_afe_fe_stop(afe, id);
+	return ret;
+}
+
+int mtk_afe_fe_trigger(struct snd_pcm_substream *substream, int cmd,
+		       struct snd_soc_dai *dai)
+{
+	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
+	unsigned long flags;
+	int ret;
+
+	if (!afe->memif_stop)
+		return mtk_afe_fe_trigger_locked(substream, cmd, dai);
+	spin_lock_irqsave(&afe->memif_lock, flags);
+	ret = mtk_afe_fe_trigger_locked(substream, cmd, dai);
+	spin_unlock_irqrestore(&afe->memif_lock, flags);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mtk_afe_fe_trigger);
 
@@ -271,7 +369,7 @@ int mtk_afe_fe_prepare(struct snd_pcm_substream *substream,
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		if (afe->get_memif_pbuf_size) {
 			pbuf_size = afe->get_memif_pbuf_size(substream);
-			mtk_memif_set_pbuf_size(afe, id, pbuf_size);
+			return mtk_memif_set_pbuf_size(afe, id, pbuf_size);
 		}
 	}
 	return 0;
@@ -404,50 +502,57 @@ int mtk_memif_set_addr(struct mtk_base_afe *afe, int id,
 		       size_t dma_bytes)
 {
 	struct mtk_base_afe_memif *memif = &afe->memif[id];
-	int msb_at_bit33 = upper_32_bits(dma_addr) ? 1 : 0;
-	unsigned int phys_buf_addr = lower_32_bits(dma_addr);
-	unsigned int phys_buf_addr_upper_32 = upper_32_bits(dma_addr);
+	dma_addr_t end = dma_addr + dma_bytes - 1;
+	int ret;
 
+	/* Reject truncation, wrap and unsupported crossings before any write. */
+	if (!dma_bytes || end < dma_addr)
+		return -EINVAL;
+	if (!memif->data->reg_ofs_base_msb) {
+		if (upper_32_bits(end) > (memif->data->msb_reg ? 1 : 0))
+			return -ERANGE;
+		if (!memif->data->msb_end_reg &&
+		    upper_32_bits(dma_addr) != upper_32_bits(end))
+			return -ERANGE;
+	}
+
+	ret = mtk_regmap_write(afe->regmap, memif->data->reg_ofs_base,
+			       lower_32_bits(dma_addr));
+	if (ret)
+		return ret;
+	ret = mtk_regmap_write(afe->regmap,
+			       memif->data->reg_ofs_end ?:
+			       memif->data->reg_ofs_base + AFE_BASE_END_OFFSET,
+			       lower_32_bits(end));
+	if (ret)
+		return ret;
+	if (memif->data->reg_ofs_base_msb) {
+		ret = mtk_regmap_write(afe->regmap, memif->data->reg_ofs_base_msb,
+				       upper_32_bits(dma_addr));
+		if (ret)
+			return ret;
+		ret = mtk_regmap_write(afe->regmap, memif->data->reg_ofs_end_msb,
+				       upper_32_bits(end));
+		if (ret)
+			return ret;
+	}
+	if (memif->data->msb_reg) {
+		ret = mtk_regmap_update_bits(afe->regmap, memif->data->msb_reg,
+					     1, upper_32_bits(dma_addr),
+					     memif->data->msb_shift);
+		if (ret)
+			return ret;
+	}
+	if (memif->data->msb_end_reg) {
+		ret = mtk_regmap_update_bits(afe->regmap, memif->data->msb_end_reg,
+					     1, upper_32_bits(end),
+					     memif->data->msb_end_shift);
+		if (ret)
+			return ret;
+	}
 	memif->dma_area = dma_area;
 	memif->dma_addr = dma_addr;
 	memif->dma_bytes = dma_bytes;
-
-	/* start */
-	mtk_regmap_write(afe->regmap, memif->data->reg_ofs_base,
-			 phys_buf_addr);
-	/* end */
-	if (memif->data->reg_ofs_end)
-		mtk_regmap_write(afe->regmap,
-				 memif->data->reg_ofs_end,
-				 phys_buf_addr + dma_bytes - 1);
-	else
-		mtk_regmap_write(afe->regmap,
-				 memif->data->reg_ofs_base +
-				 AFE_BASE_END_OFFSET,
-				 phys_buf_addr + dma_bytes - 1);
-
-	/* set start, end, upper 32 bits */
-	if (memif->data->reg_ofs_base_msb) {
-		mtk_regmap_write(afe->regmap, memif->data->reg_ofs_base_msb,
-				 phys_buf_addr_upper_32);
-		mtk_regmap_write(afe->regmap,
-				 memif->data->reg_ofs_end_msb,
-				 phys_buf_addr_upper_32);
-	}
-
-	/*
-	 * set MSB to 33-bit, for memif address
-	 * only for memif base address, if msb_end_reg exists
-	 */
-	if (memif->data->msb_reg)
-		mtk_regmap_update_bits(afe->regmap, memif->data->msb_reg,
-				       1, msb_at_bit33, memif->data->msb_shift);
-
-	/* set MSB to 33-bit, for memif end address */
-	if (memif->data->msb_end_reg)
-		mtk_regmap_update_bits(afe->regmap, memif->data->msb_end_reg,
-				       1, msb_at_bit33,
-				       memif->data->msb_end_shift);
 
 	return 0;
 }
@@ -458,6 +563,7 @@ int mtk_memif_set_channel(struct mtk_base_afe *afe,
 {
 	struct mtk_base_afe_memif *memif = &afe->memif[id];
 	unsigned int mono;
+	int ret;
 
 	if (memif->data->mono_shift < 0)
 		return 0;
@@ -465,9 +571,11 @@ int mtk_memif_set_channel(struct mtk_base_afe *afe,
 	if (memif->data->quad_ch_mask) {
 		unsigned int quad_ch = (channel == 4) ? 1 : 0;
 
-		mtk_regmap_update_bits(afe->regmap, memif->data->quad_ch_reg,
-				       memif->data->quad_ch_mask,
-				       quad_ch, memif->data->quad_ch_shift);
+		ret = mtk_regmap_update_bits(afe->regmap, memif->data->quad_ch_reg,
+					     memif->data->quad_ch_mask,
+					     quad_ch, memif->data->quad_ch_shift);
+		if (ret)
+			return ret;
 	}
 
 	if (memif->data->mono_invert)
@@ -476,11 +584,14 @@ int mtk_memif_set_channel(struct mtk_base_afe *afe,
 		mono = (channel == 1) ? 1 : 0;
 
 	/* for specific configuration of memif mono mode */
-	if (memif->data->int_odd_flag_reg)
-		mtk_regmap_update_bits(afe->regmap,
-				       memif->data->int_odd_flag_reg,
-				       1, mono,
-				       memif->data->int_odd_flag_shift);
+	if (memif->data->int_odd_flag_reg) {
+		ret = mtk_regmap_update_bits(afe->regmap,
+					     memif->data->int_odd_flag_reg,
+					     1, mono,
+					     memif->data->int_odd_flag_shift);
+		if (ret)
+			return ret;
+	}
 
 	return mtk_regmap_update_bits(afe->regmap, memif->data->mono_reg,
 				      1, mono, memif->data->mono_shift);
@@ -493,7 +604,7 @@ static int mtk_memif_set_rate_fs(struct mtk_base_afe *afe,
 	struct mtk_base_afe_memif *memif = &afe->memif[id];
 
 	if (memif->data->fs_shift >= 0)
-		mtk_regmap_update_bits(afe->regmap, memif->data->fs_reg,
+		return mtk_regmap_update_bits(afe->regmap, memif->data->fs_reg,
 				       memif->data->fs_maskbit,
 				       fs, memif->data->fs_shift);
 
@@ -531,6 +642,7 @@ int mtk_memif_set_format(struct mtk_base_afe *afe,
 	struct mtk_base_afe_memif *memif = &afe->memif[id];
 	int hd_audio = 0;
 	int hd_align = 0;
+	int ret;
 
 	/* set hd mode */
 	switch (format) {
@@ -555,16 +667,16 @@ int mtk_memif_set_format(struct mtk_base_afe *afe,
 	default:
 		dev_err(afe->dev, "%s() error: unsupported format %d\n",
 			__func__, format);
-		break;
+		return -EINVAL;
 	}
 
-	mtk_regmap_update_bits(afe->regmap, memif->data->hd_reg,
-			       0x3, hd_audio, memif->data->hd_shift);
+	ret = mtk_regmap_update_bits(afe->regmap, memif->data->hd_reg,
+				     0x3, hd_audio, memif->data->hd_shift);
 
-	mtk_regmap_update_bits(afe->regmap, memif->data->hd_align_reg,
+	if (ret)
+		return ret;
+	return mtk_regmap_update_bits(afe->regmap, memif->data->hd_align_reg,
 			       0x1, hd_align, memif->data->hd_align_mshift);
-
-	return 0;
 }
 EXPORT_SYMBOL_GPL(mtk_memif_set_format);
 
@@ -572,18 +684,20 @@ int mtk_memif_set_pbuf_size(struct mtk_base_afe *afe,
 			    int id, int pbuf_size)
 {
 	const struct mtk_base_memif_data *memif_data = afe->memif[id].data;
+	int ret;
 
 	if (memif_data->pbuf_mask == 0 || memif_data->minlen_mask == 0)
 		return 0;
 
-	mtk_regmap_update_bits(afe->regmap, memif_data->pbuf_reg,
-			       memif_data->pbuf_mask,
-			       pbuf_size, memif_data->pbuf_shift);
+	ret = mtk_regmap_update_bits(afe->regmap, memif_data->pbuf_reg,
+				     memif_data->pbuf_mask,
+				     pbuf_size, memif_data->pbuf_shift);
 
-	mtk_regmap_update_bits(afe->regmap, memif_data->minlen_reg,
+	if (ret)
+		return ret;
+	return mtk_regmap_update_bits(afe->regmap, memif_data->minlen_reg,
 			       memif_data->minlen_mask,
 			       pbuf_size, memif_data->minlen_shift);
-	return 0;
 }
 EXPORT_SYMBOL_GPL(mtk_memif_set_pbuf_size);
 

@@ -21,6 +21,8 @@
 #include "mt6351.h"
 
 /* MT6351_TOP_CLKSQ */
+#include "mt6351-micbias.h"
+
 #define RG_CLKSQ_EN_AUD_BIT (0)
 
 /* MT6351_TOP_CKPDN_CON0 */
@@ -196,7 +198,114 @@ struct mt6351_priv {
 	int ana_gain[AUDIO_ANALOG_VOLUME_TYPE_MAX];
 
 	int hp_en_counter;
+	struct list_head bias_node;
+	bool capture_bias;
+	bool capture_dcc;
+	bool bias_dirty;
+	bool accdet_bias;
+	unsigned int accdet_vref;
+	unsigned int accdet_low_power;
 };
+
+/* Both clients share VREF and low-power bits, not just the regmap bus. */
+static DEFINE_MUTEX(mt6351_bias_lock);
+static LIST_HEAD(mt6351_bias_clients);
+
+static int mt6351_bias_update(struct mt6351_priv *priv, bool capture,
+			      bool accdet, unsigned int vref, unsigned int low_power)
+{
+	unsigned int value = 0;
+	int ret;
+
+	if (capture)
+		value = 7 << RG_AUDMICBIAS1VREF;
+	else if (accdet)
+		value = (vref << RG_AUDMICBIAS1VREF) |
+			(low_power << RG_AUDMICBIAS1LOWPEN);
+
+	if (priv->capture_dcc || (accdet && low_power == 3))
+		value |= BIT(RG_AUDMICBIAS1DCSW1NEN);
+
+	/* DAPM continues transitions even on event error: record intent first. */
+	priv->capture_bias = capture;
+	priv->accdet_bias = accdet;
+	priv->accdet_vref = vref;
+	priv->accdet_low_power = low_power;
+	ret = regmap_write_bits(priv->regmap, MT6351_AUDENC_ANA_CON10,
+				(7 << RG_AUDMICBIAS1VREF) |
+				(3 << RG_AUDMICBIAS1LOWPEN) |
+				BIT(RG_AUDMICBIAS1DCSW1NEN), value);
+	/* An error means unknown hardware, never a successful rollback. */
+	priv->bias_dirty = !!ret;
+	return ret;
+}
+
+int mt6351_micbias_accdet(struct device *consumer, struct regmap *regmap,
+			  bool enable, unsigned int vref,
+			  unsigned int low_power)
+{
+	struct device *supplier = NULL;
+	struct mt6351_priv *priv;
+	int ret = -EPROBE_DEFER;
+
+	if (vref > 7 || low_power > 3)
+		return -EINVAL;
+	/* Pin the device, never carry devres-backed priv across this unlock. */
+	mutex_lock(&mt6351_bias_lock);
+	list_for_each_entry(priv, &mt6351_bias_clients, bias_node) {
+		if (priv->regmap == regmap) {
+			supplier = get_device(priv->dev);
+			break;
+		}
+	}
+	mutex_unlock(&mt6351_bias_lock);
+	if (!supplier)
+		return ret;
+
+	if (enable) {
+		/* Consumer probe holds its lock; never wait on a supplier lock. */
+		if (!device_trylock(supplier))
+			goto put;
+		/* Also reject unbind while core has dropped the supplier lock. */
+		if (!device_is_bound(supplier) ||
+		    supplier->links.status != DL_DEV_DRIVER_BOUND)
+			goto unlock;
+		if (!device_link_add(consumer, supplier, DL_FLAG_AUTOREMOVE_CONSUMER)) {
+			ret = -ENOMEM;
+			goto unlock;
+		}
+	}
+	/* Release is ordered by the existing link, including supplier unbind. */
+	mutex_lock(&mt6351_bias_lock);
+	list_for_each_entry(priv, &mt6351_bias_clients, bias_node) {
+		if (priv->dev != supplier || priv->regmap != regmap)
+			continue;
+		ret = mt6351_bias_update(priv, priv->capture_bias, enable, vref,
+					 low_power);
+		if (ret && enable) {
+			/* Failed probe has no owner; reconcile once, retaining dirty. */
+			mt6351_bias_update(priv, priv->capture_bias, false, 0, 0);
+		}
+		break;
+	}
+	mutex_unlock(&mt6351_bias_lock);
+unlock:
+	if (enable)
+		device_unlock(supplier);
+put:
+	put_device(supplier);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6351_micbias_accdet);
+
+static void mt6351_bias_remove(void *data)
+{
+	struct mt6351_priv *priv = data;
+
+	mutex_lock(&mt6351_bias_lock);
+	list_del(&priv->bias_node);
+	mutex_unlock(&mt6351_bias_lock);
+}
 
 static void set_hp_gain_zero(struct snd_soc_component *cmpnt)
 {
@@ -1009,31 +1118,33 @@ static int mt_mic_bias_0_event(struct snd_soc_dapm_widget *w,
 }
 
 static int mt_mic_bias_1_event(struct snd_soc_dapm_widget *w,
-			       struct snd_kcontrol *kcontrol,
-			       int event)
+			       struct snd_kcontrol *kcontrol, int event)
 {
 	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6351_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	int ret;
 
-	switch (event) {
-	case SND_SOC_DAPM_PRE_PMU:
-		/* MIC Bias 1 LowPower: 0_Normal */
-		regmap_update_bits(cmpnt->regmap, MT6351_AUDENC_ANA_CON10,
-				   0x3 << RG_AUDMICBIAS1LOWPEN, 0x0);
-		/* MISBIAS1 = 2P7V */
-		regmap_update_bits(cmpnt->regmap, MT6351_AUDENC_ANA_CON10,
-				   0x7 << RG_AUDMICBIAS1VREF,
-				   0x7 << RG_AUDMICBIAS1VREF);
-		break;
-	case SND_SOC_DAPM_POST_PMD:
-		/* MISBIAS1 = 1P7V */
-		regmap_update_bits(cmpnt->regmap, MT6351_AUDENC_ANA_CON10,
-				   0x7 << RG_AUDMICBIAS1VREF,
-				   0x0 << RG_AUDMICBIAS1VREF);
-		break;
-	default:
-		break;
-	}
-	return 0;
+	mutex_lock(&mt6351_bias_lock);
+	ret = mt6351_bias_update(priv, event == SND_SOC_DAPM_PRE_PMU,
+				 priv->accdet_bias, priv->accdet_vref,
+				 priv->accdet_low_power);
+	mutex_unlock(&mt6351_bias_lock);
+	return ret;
+}
+
+static int mt_mic_bias_1_dcc_event(struct snd_soc_dapm_widget *w,
+				   struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6351_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	int ret;
+
+	mutex_lock(&mt6351_bias_lock);
+	priv->capture_dcc = event == SND_SOC_DAPM_PRE_PMU;
+	ret = mt6351_bias_update(priv, priv->capture_bias, priv->accdet_bias,
+				 priv->accdet_vref, priv->accdet_low_power);
+	mutex_unlock(&mt6351_bias_lock);
+	return ret;
 }
 
 static int mt_mic_bias_2_event(struct snd_soc_dapm_widget *w,
@@ -1270,9 +1381,9 @@ static const struct snd_soc_dapm_widget mt6351_dapm_widgets[] = {
 			      mt_mic_bias_1_event,
 			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 	SND_SOC_DAPM_SUPPLY_S("Mic Bias 1 DCC pull high", SUPPLY_SUBSEQ_MICBIAS,
-			      MT6351_AUDENC_ANA_CON10,
-			      RG_AUDMICBIAS1DCSW1NEN, 0,
-			      NULL, 0),
+			      SND_SOC_NOPM, 0, 0,
+			      mt_mic_bias_1_dcc_event,
+			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
 	/* UL input */
 	SND_SOC_DAPM_INPUT("AIN0"),
@@ -1453,6 +1564,7 @@ static int mt6351_codec_driver_probe(struct platform_device *pdev)
 {
 	struct mt6397_chip *mt6397 = dev_get_drvdata(pdev->dev.parent);
 	struct mt6351_priv *priv;
+	int ret;
 
 	priv = devm_kzalloc(&pdev->dev,
 			    sizeof(struct mt6351_priv),
@@ -1465,6 +1577,12 @@ static int mt6351_codec_driver_probe(struct platform_device *pdev)
 	priv->dev = &pdev->dev;
 
 	priv->regmap = mt6397->regmap;
+	mutex_lock(&mt6351_bias_lock);
+	list_add(&priv->bias_node, &mt6351_bias_clients);
+	mutex_unlock(&mt6351_bias_lock);
+	ret = devm_add_action_or_reset(&pdev->dev, mt6351_bias_remove, priv);
+	if (ret)
+		return ret;
 
 	dev_dbg(priv->dev, "%s(), dev name %s\n",
 		__func__, dev_name(&pdev->dev));
