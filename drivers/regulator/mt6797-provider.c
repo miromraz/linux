@@ -25,6 +25,7 @@ static bool preflight_active;
 static void preflight_notify(struct work_struct *work);
 static DECLARE_WORK(notify_job, preflight_notify);
 static bool stopping;
+static unsigned int sources;
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 static bool fixture_active;
 #endif
@@ -530,7 +531,6 @@ static void detach(void *data)
 	attached &= ~BIT(a->id);
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
-	schedule_work(&notify_job);
 }
 
 /* An immutable endpoint cannot accidentally expose the engine's converter. */
@@ -568,8 +568,6 @@ int mt6797_provider_attach(struct device *dev, enum mt6797_rail_id id,
 		return ret;
 	}
 	ret = devm_add_action_or_reset(dev, detach, a);
-	if (!ret)
-		schedule_work(&notify_job);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mt6797_provider_attach);
@@ -636,8 +634,10 @@ int mt6797_provider_subscribe(struct notifier_block *nb)
 	/* Register before replay: concurrent events can duplicate, never be lost.
 	 * Callbacks may snapshot; they must not register/unregister subscribers.
 	 */
-	if (!ret)
+	mutex_lock(&owner_lock);
+	if (!ret && !stopping)
 		schedule_work(&notify_job);
+	mutex_unlock(&owner_lock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(mt6797_provider_subscribe);
@@ -727,49 +727,115 @@ void mt6797_preflight_test_stop(void)
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_stop);
 #endif
 
-static int __init mt6797_provider_init(void)
+/* Close scheduling before draining sources. Unregister waits for callbacks,
+ * but only cancel_work_sync waits for work those callbacks already queued.
+ * Failed module init must use exactly the same boundary as ordinary exit.
+ */
+static void preflight_shutdown(void)
 {
-	int ret;
-
-	if (!of_machine_is_compatible("planet,gemini-pda"))
-		return 0;
-	ret = bus_register_notifier(&platform_bus_type, &supplier_nb);
-	if (ret)
-		return ret;
-	ret = bus_register_notifier(&cpu_subsys, &cpu_nb);
-	if (ret) {
-		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
-		return ret;
-	}
-	ret = nvmem_register_notifier(&nvmem_nb);
-	if (ret) {
-		bus_unregister_notifier(&cpu_subsys, &cpu_nb);
-		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
-		return ret;
-	}
-	mutex_lock(&owner_lock);
-	preflight_active = true;
-	preflight_invalidate();
-	mutex_unlock(&owner_lock);
-	return 0;
-}
-module_init(mt6797_provider_init);
-
-static void __exit mt6797_provider_exit(void)
-{
-	if (of_machine_is_compatible("planet,gemini-pda")) {
-		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
-		bus_unregister_notifier(&cpu_subsys, &cpu_nb);
-		nvmem_unregister_notifier(&nvmem_nb);
-	}
 	mutex_lock(&owner_lock);
 	preflight_active = false;
 	stopping = true;
 	preflight_invalidate();
 	mutex_unlock(&owner_lock);
+	if (sources & BIT(2))
+		nvmem_unregister_notifier(&nvmem_nb);
+	if (sources & BIT(1))
+		bus_unregister_notifier(&cpu_subsys, &cpu_nb);
+	if (sources & BIT(0))
+		bus_unregister_notifier(&platform_bus_type, &supplier_nb);
+	sources = 0;
 	cancel_work_sync(&preflight_job);
 	preflight_release();
 	cancel_work_sync(&notify_job);
+}
+
+static int preflight_init_sources(int fail_after, void (*step)(void))
+{
+	int ret;
+
+	mutex_lock(&owner_lock);
+	stopping = false;
+	mutex_unlock(&owner_lock);
+	ret = bus_register_notifier(&platform_bus_type, &supplier_nb);
+	if (ret)
+		goto fail;
+	sources |= BIT(0);
+	if (step)
+		step();
+	if (fail_after == 1) {
+		ret = -EFAULT;
+		goto fail;
+	}
+	ret = bus_register_notifier(&cpu_subsys, &cpu_nb);
+	if (ret)
+		goto fail;
+	sources |= BIT(1);
+	if (step)
+		step();
+	if (fail_after == 2) {
+		ret = -EFAULT;
+		goto fail;
+	}
+	ret = nvmem_register_notifier(&nvmem_nb);
+	if (ret)
+		goto fail;
+	sources |= BIT(2);
+	if (step)
+		step();
+	if (fail_after == 3) {
+		ret = -EFAULT;
+		goto fail;
+	}
+	mutex_lock(&owner_lock);
+	preflight_active = true;
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+	if (fail_after == 4) {
+		ret = -EFAULT;
+		goto fail;
+	}
+	return 0;
+fail:
+	preflight_shutdown();
+	return ret;
+}
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+int mt6797_preflight_test_init_failure(int fail_after, void (*step)(void))
+{
+	int ret;
+
+	if (of_machine_is_compatible("planet,gemini-pda") ||
+	    fail_after < 1 || fail_after > 4)
+		return -EINVAL;
+	ret = preflight_init_sources(fail_after, step);
+	/* Non-Gemini fixtures may continue using the inactive registry. */
+	mutex_lock(&owner_lock);
+	stopping = false;
+	mutex_unlock(&owner_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_init_failure);
+
+void mt6797_preflight_test_event(void)
+{
+	preflight_nvmem_event(NULL, 0, NULL);
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_event);
+#endif
+
+static int __init mt6797_provider_init(void)
+{
+	if (!of_machine_is_compatible("planet,gemini-pda"))
+		return 0;
+	return preflight_init_sources(0, NULL);
+}
+module_init(mt6797_provider_init);
+
+static void __exit mt6797_provider_exit(void)
+{
+	preflight_shutdown();
 	of_node_put(rails[0]);
 	of_node_put(rails[1]);
 }

@@ -37,6 +37,8 @@ int mt6797_provider_sample(u64 generation, int uv[MT6797_RAILS]);
 void mt6797_provider_status(struct mt6797_provider_status *status);
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 struct clk;
+int mt6797_preflight_test_init_failure(int fail_after, void (*step)(void));
+void mt6797_preflight_test_event(void);
 int mt6797_preflight_test_start(struct device *dev, struct clk *clk);
 void mt6797_preflight_test_stop(void);
 void mt6797_preflight_test_flush(void);

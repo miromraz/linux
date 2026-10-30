@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <kunit/test.h>
+#include <kunit/resource.h>
 #include <linux/completion.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
@@ -7,6 +8,26 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include "mt6797-provider.h"
+
+static void unregister_device(void *data)
+{
+	platform_device_unregister(data);
+}
+
+static void remove_opps(void *data)
+{
+	dev_pm_opp_remove_all_dynamic(data);
+}
+
+static void clear_config(void *data)
+{
+	dev_pm_opp_clear_config((long)data);
+}
+
+static void unsubscribe(void *data)
+{
+	mt6797_provider_unsubscribe(data);
+}
 
 /* Actual OPP core and production selector, no replacement OPP functions.
  * Dynamic OPPs do not exercise OF supported-hw parsing or CPU-node mapping.
@@ -21,6 +42,7 @@ static void preflight_opp_core(struct kunit *test)
 
 	pdev = platform_device_register_simple("preflight-opp-test", -1, NULL, 0);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(pdev));
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, unregister_device, pdev), 0);
 	for (bin = 0; bin < 16; bin++) {
 		KUNIT_EXPECT_EQ(test, mt6797_preflight_hw(bin, &hw), 0);
 		KUNIT_EXPECT_EQ(test, hw, (unsigned int)BIT(bin));
@@ -31,8 +53,11 @@ static void preflight_opp_core(struct kunit *test)
 	config.supported_hw_count = 1;
 	token = dev_pm_opp_set_config(&pdev->dev, &config);
 	KUNIT_ASSERT_GT(test, token, 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, clear_config,
+						(void *)(long)token), 0);
 	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 100,
 						     &freq, &uv), -ERANGE);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, remove_opps, &pdev->dev), 0);
 	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&pdev->dev, 100, 800000), 0);
 	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&pdev->dev, 200, 900000), 0);
 	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 0,
@@ -52,13 +77,13 @@ static void preflight_opp_core(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, mt6797_preflight_ceiling(&pdev->dev, 100,
 						     &freq, &uv), 0);
 	KUNIT_EXPECT_EQ(test, uv, 800000UL);
-	dev_pm_opp_remove_all_dynamic(&pdev->dev);
-	dev_pm_opp_clear_config(token);
+	kunit_release_action(test, remove_opps, &pdev->dev);
+	kunit_release_action(test, clear_config, (void *)(long)token);
 	/* Reinstallation after clearing must work on the same device. */
 	token = dev_pm_opp_set_config(&pdev->dev, &config);
 	KUNIT_ASSERT_GT(test, token, 0);
 	dev_pm_opp_clear_config(token);
-	platform_device_unregister(pdev);
+	kunit_release_action(test, unregister_device, pdev);
 }
 
 struct provider_fixture {
@@ -91,27 +116,38 @@ static int event_count(struct notifier_block *nb, unsigned long event, void *dat
 
 static void provider_orders(struct kunit *test)
 {
-	struct { struct notifier_block nb; int count; } listener = {
-		.nb.notifier_call = event_count,
-	};
-	struct provider_fixture f[2] = { { .uv = 1100000 }, { .uv = 1150000 } };
+	struct { struct notifier_block nb; int count; } *listener;
+	struct provider_fixture *f;
 	struct mt6797_rail_io io[2] = {
-		{ .read = fixture_read, .data = &f[0], .step_uv = 10000 },
-		{ .read = fixture_read, .data = &f[1], .step_uv = 25000 },
+		{ .read = fixture_read, .step_uv = 10000 },
+		{ .read = fixture_read, .step_uv = 25000 },
 	};
 	struct mt6797_provider_status status;
 	struct platform_device *dev[2];
 	int order, id, uv[2], before;
 	u64 generation, preflight_generation;
 
-	KUNIT_ASSERT_EQ(test, mt6797_provider_subscribe(&listener.nb), 0);
+	listener = kunit_kzalloc(test, sizeof(*listener), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, listener);
+	f = kunit_kcalloc(test, 2, sizeof(*f), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	listener->nb.notifier_call = event_count;
+	f[0].uv = 1100000;
+	f[1].uv = 1150000;
+	io[0].data = &f[0];
+	io[1].data = &f[1];
+	KUNIT_ASSERT_EQ(test, mt6797_provider_subscribe(&listener->nb), 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, unsubscribe,
+						&listener->nb), 0);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_GT(test, listener.count, 0);
+	KUNIT_EXPECT_GT(test, listener->count, 0);
 	for (order = 0; order < 2; order++) {
 		for (id = 0; id < 2; id++) {
 			dev[id] = platform_device_register_simple("rail-fixture",
 								 id, NULL, 0);
 			KUNIT_ASSERT_FALSE(test, IS_ERR(dev[id]));
+			KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+					unregister_device, dev[id]), 0);
 		}
 		KUNIT_EXPECT_EQ(test, mt6797_provider_attach(&dev[order]->dev,
 						order, &io[order]), 0);
@@ -136,20 +172,22 @@ static void provider_orders(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, uv[0], f[0].uv);
 		KUNIT_EXPECT_EQ(test, uv[1], f[1].uv);
 		mt6797_preflight_test_flush();
-		before = listener.count;
-		platform_device_unregister(dev[!order]);
+		before = listener->count;
+		kunit_release_action(test, unregister_device, dev[!order]);
 		mt6797_provider_status(&status);
 		KUNIT_EXPECT_EQ(test, status.attached, BIT(order));
 		mt6797_preflight_test_flush();
-		KUNIT_EXPECT_GT(test, listener.count, before);
+		KUNIT_EXPECT_GT(test, listener->count, before);
 		dev[!order] = platform_device_register_simple("rail-fixture", !order, NULL, 0);
 		KUNIT_ASSERT_FALSE(test, IS_ERR(dev[!order]));
+		KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+					unregister_device, dev[!order]), 0);
 		KUNIT_EXPECT_EQ(test, mt6797_provider_attach(&dev[!order]->dev,
 						!order, &io[!order]), 0);
-		platform_device_unregister(dev[!order]);
-		platform_device_unregister(dev[order]);
+		kunit_release_action(test, unregister_device, dev[!order]);
+		kunit_release_action(test, unregister_device, dev[order]);
 	}
-	KUNIT_EXPECT_EQ(test, mt6797_provider_unsubscribe(&listener.nb), 0);
+	kunit_release_action(test, unsubscribe, &listener->nb);
 }
 
 static void provider_invalid(struct kunit *test)
@@ -179,7 +217,7 @@ static int sample_thread(void *data)
 	int uv[2];
 
 	task->result = mt6797_provider_sample(task->generation, uv);
-	complete(&task->done);
+	complete_all(&task->done);
 	return 0;
 }
 
@@ -195,7 +233,7 @@ static int detach_thread(void *data)
 
 	complete(&task->started);
 	platform_device_unregister(task->dev);
-	complete(&task->done);
+	complete_all(&task->done);
 	return 0;
 }
 
@@ -203,12 +241,12 @@ static void provider_inflight(struct kunit *test)
 {
 	struct provider_fixture f[2] = { { .uv = 1100000 }, { .uv = 1150000 } };
 	struct mt6797_rail_io io = { .read = fixture_read };
-	struct platform_device *dev[2];
+	struct platform_device *dev[2] = {};
 	struct mt6797_provider_status status;
 	struct sample_task sample;
 	struct detach_task detach;
-	struct task_struct *reader, *remover;
-	int i;
+	struct task_struct *reader = NULL, *remover = NULL;
+	int i, ret;
 
 	init_completion(&sample.done);
 	init_completion(&detach.started);
@@ -216,21 +254,32 @@ static void provider_inflight(struct kunit *test)
 	for (i = 0; i < 2; i++) {
 		init_completion(&f[i].entered);
 		init_completion(&f[i].resume);
+	}
+	for (i = 0; i < 2; i++) {
 		dev[i] = platform_device_register_simple("rail-fixture", i, NULL, 0);
-		KUNIT_ASSERT_FALSE(test, IS_ERR(dev[i]));
+		KUNIT_EXPECT_FALSE(test, IS_ERR(dev[i]));
+		if (IS_ERR(dev[i]))
+			goto out;
 		io.data = &f[i];
 		io.step_uv = i ? 25000 : 10000;
-		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&dev[i]->dev, i, &io), 0);
+		ret = mt6797_provider_attach(&dev[i]->dev, i, &io);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		if (ret)
+			goto out;
 	}
 	mt6797_provider_status(&status);
 	sample.generation = status.engine.generation;
 	f[0].pause = true;
 	reader = kthread_run(sample_thread, &sample, "rail-read");
-	KUNIT_ASSERT_FALSE(test, IS_ERR(reader));
+	KUNIT_EXPECT_FALSE(test, IS_ERR(reader));
+	if (IS_ERR(reader))
+		goto out;
 	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f[0].entered, HZ), 0UL);
 	detach.dev = dev[0];
 	remover = kthread_run(detach_thread, &detach, "rail-detach");
-	KUNIT_ASSERT_FALSE(test, IS_ERR(remover));
+	KUNIT_EXPECT_FALSE(test, IS_ERR(remover));
+	if (IS_ERR(remover))
+		goto out;
 	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&detach.started, HZ), 0UL);
 	KUNIT_EXPECT_FALSE(test, completion_done(&detach.done));
 	complete(&f[0].resume);
@@ -240,7 +289,18 @@ static void provider_inflight(struct kunit *test)
 	mt6797_provider_status(&status);
 	KUNIT_EXPECT_EQ(test, status.attached, BIT(MT6797_SRAM));
 	KUNIT_EXPECT_GT(test, status.engine.generation, sample.generation);
-	platform_device_unregister(dev[1]);
+out:
+	complete_all(&f[0].resume);
+	if (!IS_ERR_OR_NULL(reader))
+		wait_for_completion(&sample.done);
+	if (!IS_ERR_OR_NULL(remover)) {
+		wait_for_completion(&detach.done);
+		dev[0] = NULL;
+	}
+	for (i = 0; i < 2; i++)
+		if (!IS_ERR_OR_NULL(dev[i]))
+			platform_device_unregister(dev[i]);
+	mt6797_preflight_test_flush();
 }
 
 struct lifecycle_clock {
@@ -328,7 +388,9 @@ static int lifecycle_rate_thread(void *data)
 	struct lifecycle_rate_task *task = data;
 
 	task->ret = clk_set_rate(task->clk, 175);
-	complete(&task->done);
+	complete_all(&task->done);
+	while (!kthread_should_stop())
+		schedule_timeout_interruptible(HZ);
 	return 0;
 }
 
@@ -336,128 +398,280 @@ static int lifecycle_rate_thread(void *data)
  * production worker/registry and queued publication. Discovery is injected;
  * this is not an OF/NVMEM or regulator-adapter integration fixture.
  */
-static void preflight_lifecycle(struct kunit *test)
-{
-	struct clk_init_data init = { .name = "preflight-clock", .ops = &lifecycle_ops };
-	struct lifecycle_clock c = { .hw.init = &init, .rate = 100 };
-	struct lifecycle_listener l = { .nb.notifier_call = lifecycle_public };
-	struct provider_fixture f[2] = { { .uv = 1100000 }, { .uv = 1150000 } };
-	struct mt6797_rail_io io = { .read = fixture_read };
+struct lifecycle_fixture {
+	struct lifecycle_clock c;
+	struct lifecycle_listener l;
+	struct provider_fixture f[2];
 	struct platform_device *dev, *rail[2];
-	struct mt6797_provider_status status;
 	struct clk *clk;
 	struct lifecycle_rate_task task;
 	struct task_struct *thread;
+	bool hw_registered, clock_notify, subscribed, started;
+};
+
+static void lifecycle_cleanup(void *data)
+{
+	struct lifecycle_fixture *x = data;
+	int i;
+
+	/* Release the provider before joining a possibly blocked CCF caller. */
+	complete_all(&x->c.resume);
+	if (!IS_ERR_OR_NULL(x->thread))
+		kthread_stop(x->thread);
+	if (x->started)
+		mt6797_preflight_test_stop();
+	if (x->subscribed)
+		mt6797_provider_unsubscribe(&x->l.nb);
+	for (i = 0; i < 2; i++)
+		if (!IS_ERR_OR_NULL(x->rail[i]))
+			platform_device_unregister(x->rail[i]);
+	if (x->clock_notify)
+		clk_notifier_unregister(x->clk, &x->c.nb);
+	if (!IS_ERR_OR_NULL(x->clk))
+		clk_put(x->clk);
+	if (x->hw_registered)
+		clk_hw_unregister(&x->c.hw);
+	if (!IS_ERR_OR_NULL(x->dev)) {
+		dev_pm_opp_remove_all_dynamic(&x->dev->dev);
+		platform_device_unregister(x->dev);
+	}
+	mt6797_preflight_test_flush();
+}
+
+static void run_preflight_lifecycle(struct kunit *test, int stop_at)
+{
+	struct clk_init_data init = { .name = "preflight-clock", .ops = &lifecycle_ops };
+	struct lifecycle_fixture *x;
+	struct mt6797_rail_io io = { .read = fixture_read };
+	struct mt6797_provider_status status;
 	u64 generation;
 	int i;
 
-	dev = platform_device_register_simple("preflight-lifecycle", -1, NULL, 0);
-	KUNIT_ASSERT_FALSE(test, IS_ERR(dev));
-	KUNIT_ASSERT_EQ(test, clk_hw_register(NULL, &c.hw), 0);
-	clk = clk_hw_get_clk(&c.hw, NULL);
-	KUNIT_ASSERT_FALSE(test, IS_ERR(clk));
-	c.nb.notifier_call = lifecycle_event;
-	KUNIT_ASSERT_EQ(test, clk_notifier_register(clk, &c.nb), 0);
-	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&dev->dev, 100, 800000), 0);
-	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&dev->dev, 200, 900000), 0);
-	KUNIT_ASSERT_EQ(test, mt6797_provider_subscribe(&l.nb), 0);
-	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_start(&dev->dev, clk), 0);
+	x = kunit_kzalloc(test, sizeof(*x), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, x);
+	init_completion(&x->c.entered);
+	init_completion(&x->c.resume);
+	init_completion(&x->task.done);
+	x->c.hw.init = &init;
+	x->c.rate = 100;
+	x->l.nb.notifier_call = lifecycle_public;
+	x->f[0].uv = 1100000;
+	x->f[1].uv = 1150000;
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+				lifecycle_cleanup, x), 0);
+	x->dev = platform_device_register_simple("preflight-lifecycle", -1, NULL, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(x->dev));
+	KUNIT_ASSERT_EQ(test, clk_hw_register(NULL, &x->c.hw), 0);
+	x->hw_registered = true;
+	x->clk = clk_hw_get_clk(&x->c.hw, NULL);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(x->clk));
+	x->c.nb.notifier_call = lifecycle_event;
+	KUNIT_ASSERT_EQ(test, clk_notifier_register(x->clk, &x->c.nb), 0);
+	x->clock_notify = true;
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&x->dev->dev, 100, 800000), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&x->dev->dev, 200, 900000), 0);
+	KUNIT_ASSERT_EQ(test, mt6797_provider_subscribe(&x->l.nb), 0);
+	x->subscribed = true;
+	if (stop_at == 1) {
+		kunit_release_action(test, lifecycle_cleanup, x);
+		return;
+	}
+	KUNIT_ASSERT_EQ(test, mt6797_preflight_test_start(&x->dev->dev, x->clk), 0);
+	x->started = true;
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, l.last.preflight.error, -EPROBE_DEFER);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.error, -EPROBE_DEFER);
 	for (i = 0; i < 2; i++) {
-		rail[i] = platform_device_register_simple("lifecycle-rail", i, NULL, 0);
-		KUNIT_ASSERT_FALSE(test, IS_ERR(rail[i]));
-		io.data = &f[i];
+		x->rail[i] = platform_device_register_simple("lifecycle-rail", i, NULL, 0);
+		KUNIT_ASSERT_FALSE(test, IS_ERR(x->rail[i]));
+		io.data = &x->f[i];
 		io.step_uv = i ? 25000 : 10000;
-		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&rail[i]->dev, i, &io), 0);
+		KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&x->rail[i]->dev, i, &io), 0);
 	}
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, l.last.preflight.error, 0);
-	generation = l.last.preflight.generation;
-	c.fail = true;
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.error, 0);
+	generation = x->l.last.preflight.generation;
+	x->c.fail = true;
 	/* CCF ignores set_rate's return and sends no terminal notification. */
-	clk_set_rate(clk, 150);
+	clk_set_rate(x->clk, 150);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, c.pre, 1U);
-	KUNIT_EXPECT_EQ(test, c.post, 0U);
-	KUNIT_EXPECT_EQ(test, c.aborted, 0U);
-	KUNIT_EXPECT_GT(test, l.last.preflight.generation, generation);
-	KUNIT_EXPECT_EQ(test, l.last.preflight.error, 0);
-	KUNIT_EXPECT_EQ(test, l.last.preflight.rate[0][0], 100UL);
-	c.fail = false;
-	KUNIT_EXPECT_EQ(test, clk_set_rate(clk, 150), 0);
+	KUNIT_EXPECT_EQ(test, x->c.pre, 1U);
+	KUNIT_EXPECT_EQ(test, x->c.post, 0U);
+	KUNIT_EXPECT_EQ(test, x->c.aborted, 0U);
+	KUNIT_EXPECT_GT(test, x->l.last.preflight.generation, generation);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.error, 0);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.rate[0][0], 100UL);
+	x->c.fail = false;
+	KUNIT_EXPECT_EQ(test, clk_set_rate(x->clk, 150), 0);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, c.post, 1U);
-	KUNIT_EXPECT_EQ(test, l.last.preflight.uv[0][0], 900000UL);
-	c.abort = true;
-	KUNIT_EXPECT_LT(test, clk_set_rate(clk, 175), 0);
+	KUNIT_EXPECT_EQ(test, x->c.post, 1U);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.uv[0][0], 900000UL);
+	x->c.abort = true;
+	KUNIT_EXPECT_LT(test, clk_set_rate(x->clk, 175), 0);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, c.aborted, 1U);
-	KUNIT_EXPECT_EQ(test, l.last.preflight.error, 0);
-	c.abort = false;
-	KUNIT_ASSERT_EQ(test, dev_pm_opp_disable(&dev->dev, 200), 0);
+	KUNIT_EXPECT_EQ(test, x->c.aborted, 1U);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.error, 0);
+	x->c.abort = false;
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_disable(&x->dev->dev, 200), 0);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_LT(test, l.last.preflight.error, 0);
-	generation = l.last.preflight.generation;
-	mt6797_preflight_test_hint(&dev->dev);
+	KUNIT_EXPECT_LT(test, x->l.last.preflight.error, 0);
+	generation = x->l.last.preflight.generation;
+	mt6797_preflight_test_hint(&x->dev->dev);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, l.last.preflight.generation, generation);
-	KUNIT_ASSERT_EQ(test, dev_pm_opp_enable(&dev->dev, 200), 0);
-	KUNIT_ASSERT_EQ(test, dev_pm_opp_adjust_voltage(&dev->dev, 200,
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.generation, generation);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_enable(&x->dev->dev, 200), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_adjust_voltage(&x->dev->dev, 200,
 						     950000, 950000, 950000), 0);
-	mt6797_preflight_test_hint(&dev->dev);
+	mt6797_preflight_test_hint(&x->dev->dev);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, l.last.preflight.uv[0][0], 950000UL);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.uv[0][0], 950000UL);
 	/* PRE runs under CCF's lock while an independent OPP mutation arrives.
 	 * The worker must wait and publish the newest generation after both.
 	 */
-	init_completion(&c.entered);
-	init_completion(&c.resume);
-	init_completion(&task.done);
-	task.clk = clk;
-	c.pause = true;
-	thread = kthread_run(lifecycle_rate_thread, &task, "preflight-rate");
-	KUNIT_ASSERT_FALSE(test, IS_ERR(thread));
-	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&c.entered, HZ), 0UL);
-	KUNIT_EXPECT_EQ(test, dev_pm_opp_adjust_voltage(&dev->dev, 200,
+	init_completion(&x->c.entered);
+	init_completion(&x->c.resume);
+	init_completion(&x->task.done);
+	x->task.clk = x->clk;
+	x->c.pause = true;
+	x->thread = kthread_run(lifecycle_rate_thread, &x->task, "preflight-rate");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(x->thread));
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&x->c.entered, HZ), 0UL);
+	if (stop_at == 2) {
+		kunit_release_action(test, lifecycle_cleanup, x);
+		mt6797_provider_status(&status);
+		KUNIT_EXPECT_EQ(test, status.attached, 0UL);
+		KUNIT_EXPECT_TRUE(test, completion_done(&x->task.done));
+		return;
+	}
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_adjust_voltage(&x->dev->dev, 200,
 						     975000, 975000, 975000), 0);
-	complete(&c.resume);
-	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&task.done, HZ), 0UL);
-	KUNIT_EXPECT_EQ(test, task.ret, 0);
+	complete(&x->c.resume);
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&x->task.done, HZ), 0UL);
+	KUNIT_EXPECT_EQ(test, x->task.ret, 0);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, l.last.preflight.error, 0);
-	KUNIT_EXPECT_EQ(test, l.last.preflight.rate[0][0], 175UL);
-	KUNIT_EXPECT_EQ(test, l.last.preflight.uv[0][0], 975000UL);
-	c.pause = false;
-	platform_device_unregister(rail[0]);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.error, 0);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.rate[0][0], 175UL);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.uv[0][0], 975000UL);
+	x->c.pause = false;
+	platform_device_unregister(x->rail[0]);
+	x->rail[0] = NULL;
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, l.last.preflight.error, -EPROBE_DEFER);
-	rail[0] = platform_device_register_simple("lifecycle-rail", 0, NULL, 0);
-	KUNIT_ASSERT_FALSE(test, IS_ERR(rail[0]));
-	io.data = &f[0];
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.error, -EPROBE_DEFER);
+	x->rail[0] = platform_device_register_simple("lifecycle-rail", 0, NULL, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(x->rail[0]));
+	io.data = &x->f[0];
 	io.step_uv = 10000;
-	KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&rail[0]->dev, 0, &io), 0);
+	KUNIT_ASSERT_EQ(test, mt6797_provider_attach(&x->rail[0]->dev, 0, &io), 0);
 	mt6797_preflight_test_flush();
-	KUNIT_EXPECT_EQ(test, l.last.preflight.error, 0);
+	KUNIT_EXPECT_EQ(test, x->l.last.preflight.error, 0);
 	mt6797_provider_status(&status);
-	KUNIT_EXPECT_EQ(test, status.preflight.generation, l.last.preflight.generation);
-	KUNIT_EXPECT_EQ(test, status.engine.generation, l.last.preflight.provider_generation);
+	KUNIT_EXPECT_EQ(test, status.preflight.generation, x->l.last.preflight.generation);
+	KUNIT_EXPECT_EQ(test, status.engine.generation, x->l.last.preflight.provider_generation);
 	KUNIT_EXPECT_FALSE(test, status.engine.ready);
 	KUNIT_EXPECT_EQ(test, status.readiness, -EAGAIN);
-	mt6797_preflight_test_stop();
-	mt6797_provider_unsubscribe(&l.nb);
-	platform_device_unregister(rail[0]);
-	platform_device_unregister(rail[1]);
-	clk_notifier_unregister(clk, &c.nb);
-	clk_put(clk);
-	clk_hw_unregister(&c.hw);
-	dev_pm_opp_remove_all_dynamic(&dev->dev);
-	platform_device_unregister(dev);
+	kunit_release_action(test, lifecycle_cleanup, x);
+}
+
+static void preflight_lifecycle(struct kunit *test)
+{
+	run_preflight_lifecycle(test, 0);
+}
+
+static void preflight_setup_cleanup(struct kunit *test)
+{
+	run_preflight_lifecycle(test, 1);
+}
+
+static void preflight_blocked_cleanup(struct kunit *test)
+{
+	run_preflight_lifecycle(test, 2);
+}
+
+struct init_failure_fixture {
+	struct notifier_block nb;
+	struct completion entered, resume, done;
+	struct task_struct *thread;
+	int fail_after, ret;
+	unsigned int calls;
+	bool subscribed;
+};
+
+static int init_failure_notify(struct notifier_block *nb, unsigned long event,
+			       void *data)
+{
+	struct init_failure_fixture *f = container_of(nb,
+					struct init_failure_fixture, nb);
+
+	f->calls++;
+	complete(&f->entered);
+	wait_for_completion(&f->resume);
+	return NOTIFY_OK;
+}
+
+static int init_failure_thread(void *data)
+{
+	struct init_failure_fixture *f = data;
+
+	f->ret = mt6797_preflight_test_init_failure(f->fail_after,
+						mt6797_preflight_test_event);
+	complete(&f->done);
+	while (!kthread_should_stop())
+		schedule_timeout_interruptible(HZ);
+	return 0;
+}
+
+static void init_failure_cleanup(void *data)
+{
+	struct init_failure_fixture *f = data;
+
+	complete_all(&f->resume);
+	if (!IS_ERR_OR_NULL(f->thread))
+		kthread_stop(f->thread);
+	if (f->subscribed)
+		mt6797_provider_unsubscribe(&f->nb);
+	mt6797_preflight_test_flush();
+}
+
+static void preflight_init_unwind(struct kunit *test)
+{
+	struct init_failure_fixture *f;
+	unsigned int calls;
+	int step;
+
+	for (step = 1; step <= 4; step++) {
+		f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, f);
+		init_completion(&f->entered);
+		init_completion(&f->resume);
+		init_completion(&f->done);
+		f->nb.notifier_call = init_failure_notify;
+		f->fail_after = step;
+		KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+					init_failure_cleanup, f), 0);
+		KUNIT_ASSERT_EQ(test, mt6797_provider_subscribe(&f->nb), 0);
+		f->subscribed = true;
+		KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&f->entered, HZ), 0UL);
+		f->thread = kthread_run(init_failure_thread, f, "preflight-init");
+		KUNIT_ASSERT_FALSE(test, IS_ERR(f->thread));
+		/* Unwind cannot finish while queued delivery still owns storage. */
+		KUNIT_EXPECT_EQ(test, wait_for_completion_timeout(&f->done, HZ / 10), 0UL);
+		complete_all(&f->resume);
+		KUNIT_ASSERT_NE(test, wait_for_completion_timeout(&f->done, HZ), 0UL);
+		KUNIT_EXPECT_EQ(test, f->ret,
+			step >= 3 && !IS_ENABLED(CONFIG_NVMEM) ?
+			-EOPNOTSUPP : -EFAULT);
+		calls = f->calls;
+		mt6797_preflight_test_flush();
+		KUNIT_EXPECT_EQ(test, f->calls, calls);
+		kunit_release_action(test, init_failure_cleanup, f);
+	}
 }
 
 static struct kunit_case provider_cases[] = {
+	KUNIT_CASE(preflight_init_unwind),
 	KUNIT_CASE(preflight_opp_core),
 	KUNIT_CASE(preflight_lifecycle),
+	KUNIT_CASE(preflight_setup_cleanup),
+	KUNIT_CASE(preflight_blocked_cleanup),
 	KUNIT_CASE(provider_orders),
 	KUNIT_CASE(provider_invalid),
 	KUNIT_CASE(provider_inflight),
