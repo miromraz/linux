@@ -15,6 +15,7 @@ struct direct_cpu {
 };
 
 struct mtk_ccifreq_drv {
+	struct mutex callback_lock;
 	struct device *dev;
 	u64 rail_cookie;
 };
@@ -129,6 +130,7 @@ static void direct_callbacks(struct kunit *test, struct conversion_fixture *f,
 	cci = devm_kzalloc(dev[2], sizeof(*cci), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, cci);
 	cci->dev = dev[2];
+	mutex_init(&cci->callback_lock);
 	KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[2], 2, &cci->rail_cookie), 0);
 	old_cookie = cci->rail_cookie;
 	platform_set_drvdata(f->dev[2], cci);

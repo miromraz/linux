@@ -24,7 +24,7 @@ struct mt6797_txn_outcome {
 #if IS_REACHABLE(CONFIG_REGULATOR_MT6797_PROVIDER)
 /* Same-task process-context API. End consumes the token, outside driver locks
  * because final OPP puts can notify. Clocks/providers must remain registered.
- * CPU0/CPU4 registry users only; admission is separately gated.
+ * CPU0/CPU4/CCI registry users only; admission is separately gated.
  */
 int mt6797_consumer_txn_begin(unsigned int user, u64 cookie,
 		unsigned long target_hz, struct mt6797_consumer_txn **txn);

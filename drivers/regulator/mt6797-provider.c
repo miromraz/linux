@@ -414,7 +414,7 @@ static int preflight_acquire(void)
 				return ret;
 			u->clk_notify[j] = true;
 		}
-		if (i < 2 && !u->pll) {
+		if (!u->pll) {
 			struct clk *parent = clk_get_parent(u->clk[0]);
 
 			if (parent) {
@@ -1109,7 +1109,7 @@ int mt6797_consumer_txn_begin(unsigned int user, u64 cookie,
 	bool found = false;
 	int i, j, ret, uv[MT6797_RAILS];
 
-	if (!txn || user > 1 || !cookie || !target_hz)
+	if (!txn || user >= MT6797_RAIL_USERS || !cookie || !target_hz)
 		return -EINVAL;
 	*txn = NULL;
 	if (!mutex_trylock(&transaction_lock))
@@ -1317,7 +1317,9 @@ int mt6797_consumer_txn_switch(struct mt6797_consumer_txn *t)
 {
 	struct clk *mux = pf_users[t->user].clk[0];
 	struct clk *intermediate = pf_users[t->user].clk[1];
-	unsigned long rate = clk_get_rate(intermediate);
+	unsigned long rate = clk_get_rate(intermediate), selected_rate;
+	struct dev_pm_opp *opp;
+	unsigned long selected_uv;
 	bool attempted = false;
 	long rounded;
 	int ret;
@@ -1355,6 +1357,18 @@ int mt6797_consumer_txn_switch(struct mt6797_consumer_txn *t)
 	/* Active mux ancestry no longer protects the PLL. Round ONLY here. */
 	rounded = clk_round_rate(t->pll, t->target);
 	if (rounded <= 0 || rounded > t->selected[t->user][2].rate)
+		return -ERANGE;
+	/* A lower rate need not have a lower voltage in a non-monotonic table.
+	 * The reservation excludes writers; reject a removed/uncovered OPP or
+	 * a voltage above the final owned vote before programming the PLL.
+	 */
+	selected_rate = rounded;
+	opp = dev_pm_opp_find_freq_ceil(pf_users[t->user].dev, &selected_rate);
+	if (IS_ERR(opp))
+		return PTR_ERR(opp);
+	selected_uv = dev_pm_opp_get_voltage(opp);
+	dev_pm_opp_put(opp);
+	if (selected_uv > t->selected[t->user][2].uv)
 		return -ERANGE;
 	ret = txn_scope(t, clk_get_rate(t->pll), rounded);
 	if (ret)
@@ -1958,7 +1972,7 @@ int mt6797_preflight_test_start_clocks(struct device **dev, struct clk *clocks[3
 				goto fail;
 			u->clk_notify[j] = true;
 		}
-		if (i < 2 && !u->pll) {
+		if (!u->pll) {
 			struct clk *parent = clk_get_parent(u->clk[0]);
 
 			if (parent) {

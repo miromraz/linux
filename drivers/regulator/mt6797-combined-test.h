@@ -33,6 +33,9 @@ void mt6797_test_passive_fail(void *data, bool fail);
 int mt6797_test_passive_error(void *data);
 unsigned int mt6797_test_passive_calls(void *data);
 unsigned long mt6797_test_passive_rate(void *data);
+struct clk;
+void mt6797_test_cci_targets(struct kunit *test, struct device *dev,
+			   u64 cookie, struct clk *mux);
 struct device_node;
 struct platform_device;
 struct regmap;

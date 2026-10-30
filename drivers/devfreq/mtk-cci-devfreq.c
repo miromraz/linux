@@ -25,6 +25,8 @@ struct mtk_ccifreq_platform_data {
 
 struct mtk_ccifreq_drv {
 	u64 rail_cookie;
+	struct mutex callback_lock;
+	struct mt6797_txn_outcome outcome;
 	struct device *dev;
 	struct devfreq *devfreq;
 	struct regulator *proc_reg;
@@ -174,6 +176,47 @@ static int mtk_ccifreq_set_voltage(struct mtk_ccifreq_drv *drv, int new_voltage)
 	return 0;
 }
 
+/*
+ * The registry owns all regulator requests and live OPP reservations. Never
+ * hold reg_lock across begin/disposal: deferred OPP puts can notify here.
+ * Admission remains closed until devfreq can consume partial/unknown outcomes.
+ */
+static int mtk_ccifreq_owned_target(struct mtk_ccifreq_drv *drv,
+				  unsigned long *freq)
+{
+	struct mt6797_consumer_txn *txn;
+	int ret;
+
+	if (!mutex_trylock(&drv->callback_lock))
+		return -EBUSY;
+	if (drv->dvfs_fault) {
+		ret = -EIO;
+		goto unlock;
+	}
+	ret = mt6797_consumer_txn_begin(2, drv->rail_cookie, *freq, &txn);
+	if (ret) {
+		drv->outcome.path = MT6797_TXN_OLD;
+		drv->outcome.rate = drv->pre_freq;
+		drv->outcome.retry = true;
+		goto unlock;
+	}
+	ret = mt6797_consumer_txn_prepare(txn);
+	if (!ret)
+		ret = mt6797_consumer_txn_switch(txn);
+	if (ret)
+		mt6797_consumer_txn_abort(txn, ret, &drv->outcome);
+	else
+		ret = mt6797_consumer_txn_finish(txn, &drv->outcome);
+	drv->pre_freq = drv->outcome.rate;
+	drv->dvfs_fault = ret && !drv->outcome.retry;
+unlock:
+	drv->outcome.error = ret;
+	/* Zero denotes unknown; errors never claim the requested rate occurred. */
+	*freq = drv->pre_freq;
+	mutex_unlock(&drv->callback_lock);
+	return ret;
+}
+
 static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 			      u32 flags)
 {
@@ -186,6 +229,8 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 
 	if (!drv)
 		return -EINVAL;
+	if (drv->rail_cookie)
+		return mtk_ccifreq_owned_target(drv, freq);
 
 	mutex_lock(&drv->reg_lock);
 
@@ -313,8 +358,10 @@ static struct devfreq_dev_profile mtk_ccifreq_profile = {
 
 static void mtk_ccifreq_release_protection(struct mtk_ccifreq_drv *drv)
 {
+	mutex_lock(&drv->callback_lock);
 	mt6797_consumer_release(2, drv->rail_cookie);
 	drv->rail_cookie = 0;
+	mutex_unlock(&drv->callback_lock);
 }
 
 static int mtk_ccifreq_probe(struct platform_device *pdev)
@@ -331,6 +378,7 @@ static int mtk_ccifreq_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	drv->dev = dev;
+	mutex_init(&drv->callback_lock);
 	if (of_machine_is_compatible("planet,gemini-pda")) {
 		ret = mt6797_consumer_acquire(dev, 2, &drv->rail_cookie);
 		if (ret)
@@ -591,6 +639,7 @@ int mt6797_test_cci_remove(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto out;
 	}
+	mutex_init(&drv->callback_lock);
 	ret = mt6797_consumer_acquire(&pdev->dev, 2, &drv->rail_cookie);
 	if (ret)
 		goto out;
@@ -600,5 +649,54 @@ int mt6797_test_cci_remove(struct platform_device *pdev)
 out:
 	devres_release_group(&pdev->dev, group);
 	return ret;
+}
+#endif
+
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+#include <kunit/test.h>
+#include "../regulator/mt6797-provider.h"
+
+static int cci_test_veto(struct notifier_block *nb, unsigned long event, void *data)
+{
+	return event == PRE_RATE_CHANGE ? NOTIFY_BAD : NOTIFY_OK;
+}
+
+/* Execute the production dispatch, retaining callback state across attempts. */
+void mt6797_test_cci_targets(struct kunit *test, struct device *dev,
+			   u64 cookie, struct clk *mux)
+{
+	struct mtk_ccifreq_drv drv = { .dev = dev, .rail_cookie = cookie,
+		.pre_freq = 100 };
+	void *saved = dev_get_drvdata(dev);
+	struct notifier_block veto = { .notifier_call = cci_test_veto };
+	unsigned long rate;
+	int guard, vote;
+
+	mutex_init(&drv.callback_lock);
+	dev_set_drvdata(dev, &drv);
+	KUNIT_EXPECT_EQ(test, clk_notifier_register(mux, &veto), 0);
+	rate = 200;
+	KUNIT_EXPECT_EQ(test, mtk_ccifreq_target(dev, &rate, 0), -EBUSY);
+	KUNIT_EXPECT_EQ(test, rate, 100UL);
+	KUNIT_EXPECT_TRUE(test, drv.outcome.retry);
+	KUNIT_EXPECT_FALSE(test, drv.dvfs_fault);
+	KUNIT_EXPECT_EQ(test, clk_notifier_unregister(mux, &veto), 0);
+	mt6797_preflight_test_flush();
+	rate = 200;
+	KUNIT_EXPECT_EQ(test, mtk_ccifreq_target(dev, &rate, 0), 0);
+	KUNIT_EXPECT_EQ(test, rate, 200UL);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), rate);
+	KUNIT_EXPECT_EQ(test, drv.outcome.retained_uv, 1100000);
+	mt6797_preflight_test_flush();
+	rate = 100;
+	KUNIT_EXPECT_EQ(test, mtk_ccifreq_target(dev, &rate, 0), 0);
+	KUNIT_EXPECT_EQ(test, rate, 100UL);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), rate);
+	KUNIT_EXPECT_EQ(test, drv.outcome.retained_uv, 1080000);
+	KUNIT_EXPECT_EQ(test, mt6797_preflight_test_requests(2, &guard, &vote), 2);
+	KUNIT_EXPECT_EQ(test, vote, 1080000);
+	KUNIT_EXPECT_FALSE(test, drv.dvfs_fault);
+	mt6797_preflight_test_flush();
+	dev_set_drvdata(dev, saved);
 }
 #endif

@@ -953,7 +953,7 @@ static void ownership_run(struct kunit *test, int failure)
 			mt6797_preflight_test_flush();
 			KUNIT_EXPECT_EQ(test, kref_read(&dev[0]->kobj.kref), refs[0] + 1);
 		}
-		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_begin(2, cookie[2], 100, &txn),
+		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_begin(3, cookie[2], 100, &txn),
 				-EINVAL);
 		KUNIT_EXPECT_EQ(test, mt6797_consumer_txn_begin(0, 0xdead, 100, &txn),
 				-ESTALE);
@@ -1523,6 +1523,10 @@ static void operational_clock_token(struct kunit *test, struct clk *mux,
 	KUNIT_ASSERT_EQ(test, mt6797_consumer_acquire(dev[user], user, &cookie), 0);
 	listener.dev = dev[user];
 	KUNIT_ASSERT_EQ(test, clk_notifier_register(mux, &listener.nb), 0);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
+	if (user == 2)
+		mt6797_test_cci_targets(test, dev[user], cookie, mux);
+#endif
 	external = clk_hw_get_clk(__clk_get_hw(pll), NULL);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(external));
 	KUNIT_ASSERT_EQ(test, clk_notifier_register(mux, &veto), 0);
@@ -2268,6 +2272,7 @@ static void transition_clock_contract(struct kunit *test)
 	reserved_clock_contract(test, &mux->hw, &pll->hw, &inter->hw);
 	operational_clock_token(test, output, source, temporary, 0);
 	operational_clock_token(test, output, source, temporary, 1);
+	operational_clock_token(test, output, source, temporary, 2);
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 	for (unsigned int user = 0; user < 2; user++)
 		for (int failure = 0; failure < 21; failure++)
