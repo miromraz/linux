@@ -3,6 +3,7 @@
 #include <kunit/resource.h>
 #include <linux/completion.h>
 #include <linux/clk.h>
+#include <linux/clk/mediatek-dvfs.h>
 #include <linux/clk-provider.h>
 #include <linux/kthread.h>
 #include <linux/platform_device.h>
@@ -1193,7 +1194,103 @@ static void production_conversion(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, status.readiness, -EAGAIN);
 }
 
+struct transition_mux {
+	struct clk_hw hw;
+	u8 parent;
+	unsigned int writes, fail_at;
+};
+
+static u8 transition_parent(struct clk_hw *hw)
+{
+	return container_of(hw, struct transition_mux, hw)->parent;
+}
+
+static int transition_reparent(struct clk_hw *hw, u8 index)
+{
+	struct transition_mux *m = container_of(hw, struct transition_mux, hw);
+
+	if (++m->writes == m->fail_at)
+		return -EIO;
+	m->parent = index;
+	return 0;
+}
+
+static const struct clk_ops transition_mux_ops = {
+	.determine_rate = __clk_mux_determine_rate,
+	.get_parent = transition_parent,
+	.set_parent = transition_reparent,
+};
+
+static void transition_unregister(void *data)
+{
+	clk_hw_unregister(data);
+}
+
+static void transition_clock_contract(struct kunit *test)
+{
+	struct lifecycle_clock *pll, *inter;
+	struct transition_mux *mux;
+	const struct clk_hw *parents[2];
+	struct clk_init_data init = { .ops = &lifecycle_ops };
+	struct clk *output, *source, *temporary;
+
+	pll = kunit_kzalloc(test, sizeof(*pll), GFP_KERNEL);
+	inter = kunit_kzalloc(test, sizeof(*inter), GFP_KERNEL);
+	mux = kunit_kzalloc(test, sizeof(*mux), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pll);
+	KUNIT_ASSERT_NOT_NULL(test, inter);
+	KUNIT_ASSERT_NOT_NULL(test, mux);
+	pll->rate = 100;
+	inter->rate = 300;
+	init.name = "transition-pll";
+	pll->hw.init = &init;
+	KUNIT_ASSERT_EQ(test, clk_hw_register(NULL, &pll->hw), 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+		transition_unregister, &pll->hw), 0);
+	init.name = "transition-intermediate";
+	inter->hw.init = &init;
+	KUNIT_ASSERT_EQ(test, clk_hw_register(NULL, &inter->hw), 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+		transition_unregister, &inter->hw), 0);
+	parents[0] = &pll->hw;
+	parents[1] = &inter->hw;
+	init.name = "transition-mux";
+	init.ops = &transition_mux_ops;
+	init.parent_hws = parents;
+	init.num_parents = 2;
+	mux->hw.init = &init;
+	KUNIT_ASSERT_EQ(test, clk_hw_register(NULL, &mux->hw), 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+		transition_unregister, &mux->hw), 0);
+	output = mux->hw.clk;
+	source = pll->hw.clk;
+	temporary = inter->hw.clk;
+	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 200), 0);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 200UL);
+	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 100), 0);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 100UL);
+	mux->fail_at = mux->writes + 1;
+	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 200), -EIO);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 100UL);
+	mux->fail_at = 0;
+	pll->fail = true;
+	/* CCF can consume a provider set_rate error; acceptance must be checked. */
+	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 200), -EIO);
+	KUNIT_EXPECT_TRUE(test, clk_is_match(clk_get_parent(output), temporary));
+	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 300UL);
+	pll->fail = false;
+	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 200), 0);
+	mux->fail_at = mux->writes + 2;
+	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 100), -EIO);
+	KUNIT_EXPECT_TRUE(test, clk_is_match(clk_get_parent(output), temporary));
+	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 300UL);
+	mux->fail_at = 0;
+	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 100), 0);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 100UL);
+}
+
 static struct kunit_case provider_cases[] = {
+	KUNIT_CASE(transition_clock_contract),
 	KUNIT_CASE(direct_cpu_cci_lifetime),
 	KUNIT_CASE(direct_cpu_first_vote_error),
 	KUNIT_CASE(direct_cpu_notifier_stale),

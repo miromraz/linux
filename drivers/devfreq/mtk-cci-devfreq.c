@@ -4,6 +4,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/clk/mediatek-dvfs.h>
 #include <linux/devfreq.h>
 #include <linux/minmax.h>
 #include <linux/module.h>
@@ -32,6 +33,7 @@ struct mtk_ccifreq_drv {
 	struct clk *inter_clk;
 	int inter_voltage;
 	unsigned long pre_freq;
+	bool dvfs_fault;
 	/* Avoid race condition for regulators between notify and policy */
 	struct mutex reg_lock;
 	struct notifier_block opp_nb;
@@ -117,11 +119,8 @@ static int mtk_ccifreq_set_voltage(struct mtk_ccifreq_drv *drv, int new_voltage)
 
 			ret = regulator_set_voltage(drv->proc_reg, voltage,
 						    soc_data->proc_max_volt);
-			if (ret) {
-				regulator_set_voltage(drv->sram_reg, pre_vsram,
-						      soc_data->sram_max_volt);
+			if (ret)
 				return ret;
-			}
 		} else {
 			voltage = max(new_voltage,
 				      pre_vsram - soc_data->max_volt_shift);
@@ -138,11 +137,8 @@ static int mtk_ccifreq_set_voltage(struct mtk_ccifreq_drv *drv, int new_voltage)
 
 			ret = regulator_set_voltage(drv->sram_reg, vsram,
 						    soc_data->sram_max_volt);
-			if (ret) {
-				regulator_set_voltage(drv->proc_reg, pre_voltage,
-						      soc_data->proc_max_volt);
+			if (ret)
 				return ret;
-			}
 		}
 
 		pre_voltage = voltage;
@@ -192,6 +188,11 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 
 	mutex_lock(&drv->reg_lock);
 
+	if (drv->dvfs_fault) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+
 	inter_voltage = drv->inter_voltage;
 	cci_pll = clk_get_parent(drv->cci_clk);
 
@@ -217,7 +218,7 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 	 */
 	*freq = opp_rate;
 
-	if (drv->pre_freq == *freq) {
+	if (drv->pre_freq == *freq && clk_get_rate(drv->cci_clk) == *freq) {
 		ret = 0;
 		goto out_unlock;
 	}
@@ -234,37 +235,19 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 	ret = mtk_ccifreq_set_voltage(drv, target_voltage);
 	if (ret) {
 		dev_err(dev, "failed to prepare voltage\n");
-		goto out_restore_voltage;
+		goto out_fault;
 	}
 
-	/* switch the cci clock to intermediate clock source. */
-	ret = clk_set_parent(drv->cci_clk, drv->inter_clk);
-	if (ret) {
-		dev_err(dev, "failed to re-parent cci clock\n");
-		goto out_restore_voltage;
-	}
-
-	/* set the original clock to target rate. */
-	ret = clk_set_rate(cci_pll, *freq);
-	if (ret) {
-		dev_err(dev, "failed to set cci pll rate: %d\n", ret);
-		clk_set_parent(drv->cci_clk, cci_pll);
-		goto out_restore_voltage;
-	}
-
-	/* switch the cci clock back to the original clock source. */
-	ret = clk_set_parent(drv->cci_clk, cci_pll);
-	if (ret) {
-		dev_err(dev, "failed to re-parent cci clock\n");
-		mtk_ccifreq_set_voltage(drv, inter_voltage);
-		goto out_unlock;
-	}
+	ret = mtk_dvfs_switch_clock(drv->cci_clk, cci_pll, drv->inter_clk,
+				   *freq);
+	if (ret)
+		goto out_fault;
 
 	/* Replace the preparation vote with our persistent target floor. */
 	ret = mtk_ccifreq_set_voltage(drv, voltage);
 	if (ret) {
 		dev_err(dev, "failed to set target voltage\n");
-		goto out_unlock;
+		goto out_fault;
 	}
 
 	drv->pre_freq = *freq;
@@ -272,8 +255,10 @@ static int mtk_ccifreq_target(struct device *dev, unsigned long *freq,
 
 	return 0;
 
-out_restore_voltage:
-	mtk_ccifreq_set_voltage(drv, pre_voltage);
+out_fault:
+	/* Core request rollback does not imply physical voltage rollback. */
+	drv->dvfs_fault = true;
+	drv->pre_freq = 0;
 
 out_unlock:
 	mutex_unlock(&drv->reg_lock);
@@ -286,6 +271,7 @@ static int mtk_ccifreq_opp_notifier(struct notifier_block *nb,
 	struct dev_pm_opp *opp = data;
 	struct mtk_ccifreq_drv *drv;
 	unsigned long freq, volt;
+	int ret = 0;
 
 	drv = container_of(nb, struct mtk_ccifreq_drv, opp_nb);
 
@@ -294,14 +280,20 @@ static int mtk_ccifreq_opp_notifier(struct notifier_block *nb,
 		freq = dev_pm_opp_get_freq(opp);
 
 		/* current opp item is changed */
-		if (freq == drv->pre_freq) {
+		if (drv->dvfs_fault) {
+			ret = -EIO;
+		} else if (freq == drv->pre_freq) {
 			volt = dev_pm_opp_get_voltage(opp);
-			mtk_ccifreq_set_voltage(drv, volt);
+			ret = mtk_ccifreq_set_voltage(drv, volt);
+			if (ret) {
+				drv->dvfs_fault = true;
+				drv->pre_freq = 0;
+			}
 		}
 		mutex_unlock(&drv->reg_lock);
 	}
 
-	return 0;
+	return notifier_from_errno(ret);
 }
 
 static struct devfreq_dev_profile mtk_ccifreq_profile = {

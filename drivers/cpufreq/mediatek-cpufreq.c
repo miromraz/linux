@@ -5,6 +5,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/clk/mediatek-dvfs.h>
 #include <linux/cpu.h>
 #include <linux/cpufreq.h>
 #include <linux/cpumask.h>
@@ -288,38 +289,45 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 		goto out;
 	}
 
-	/* Reparent the CPU clock to intermediate clock. */
-	ret = clk_set_parent(cpu_clk, info->inter_clk);
-	if (ret || !clk_is_match(clk_get_parent(cpu_clk), info->inter_clk)) {
-		ret = ret ?: -EIO;
-		dev_err(cpu_dev,
-			"cpu%d: failed to re-parent cpu clock!\n", policy->cpu);
-		goto fault;
-	}
+	if (info->rail_cookie || !info->soc_data->firmware_pll) {
+		ret = mtk_dvfs_switch_clock(cpu_clk, armpll, info->inter_clk,
+					   freq_hz);
+		if (ret)
+			goto fault;
+	} else {
+		/* Reparent the CPU clock to intermediate clock. */
+		ret = clk_set_parent(cpu_clk, info->inter_clk);
+		if (ret || !clk_is_match(clk_get_parent(cpu_clk), info->inter_clk)) {
+			ret = ret ?: -EIO;
+			dev_err(cpu_dev,
+				"cpu%d: failed to re-parent cpu clock!\n", policy->cpu);
+			goto fault;
+		}
 
-	/* Set the original PLL to target rate. */
-	ret = clk_set_rate(armpll, freq_hz);
-	if (ret) {
-		dev_err(cpu_dev,
-			"cpu%d: failed to scale cpu clock rate!\n", policy->cpu);
-		goto fault;
-	}
+		/* Set the original PLL to target rate. */
+		ret = clk_set_rate(armpll, freq_hz);
+		if (ret) {
+			dev_err(cpu_dev,
+				"cpu%d: failed to scale cpu clock rate!\n", policy->cpu);
+			goto fault;
+		}
 
-	/*
-	 * Verify acceptance before reconnecting the PLL. Firmware may refuse
-	 * an SMC, leaving its cached rate zero on the first transaction.
-	 * Never invent a boot rate or reduce voltage on that uncertainty.
-	 */
-	if (info->soc_data->firmware_pll &&
-	    abs((long)clk_get_rate(armpll) - freq_hz) >= HZ_PER_MHZ) {
-		ret = -EIO;
-		goto fault;
-	}
+		/*
+		 * Verify acceptance before reconnecting the PLL. Firmware may refuse
+		 * an SMC, leaving its cached rate zero on the first transaction.
+		 * Never invent a boot rate or reduce voltage on that uncertainty.
+		 */
+		if (info->soc_data->firmware_pll &&
+		    abs((long)clk_get_rate(armpll) - freq_hz) >= HZ_PER_MHZ) {
+			ret = -EIO;
+			goto fault;
+		}
 
-	ret = clk_set_parent(cpu_clk, armpll);
-	if (ret || !clk_is_match(clk_get_parent(cpu_clk), armpll)) {
-		ret = ret ?: -EIO;
-		goto fault;
+		ret = clk_set_parent(cpu_clk, armpll);
+		if (ret || !clk_is_match(clk_get_parent(cpu_clk), armpll)) {
+			ret = ret ?: -EIO;
+			goto fault;
+		}
 	}
 
 	/* Replace the preparation vote with our persistent target floor. */
