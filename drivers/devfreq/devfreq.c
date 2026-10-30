@@ -2495,8 +2495,218 @@ static void devfreq_outcome_accounting_test(struct kunit *test)
 	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
 }
 
+/* Exercise the sysfs callback, including reset while observation is unknown. */
+static void devfreq_outcome_reset_test(struct kunit *test)
+{
+	struct devfreq_dev_profile profile = { .target_outcome = devfreq_test_outcome };
+	unsigned long table[] = { 100, 200 };
+	unsigned int transitions[] = { 1, 2, 3, 4 };
+	u64 residence[] = { 11, 22 };
+	struct devfreq_outcome_test *f;
+	struct device parent = { };
+	u64 before;
+	unsigned int i;
+
+	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	mutex_init(&f->df.lock);
+	srcu_init_notifier_head(&f->df.transition_notifier_list);
+	dev_set_drvdata(&parent, f);
+	f->df.dev.parent = &parent;
+	f->df.profile = &profile;
+	f->df.freq_table = table;
+	f->df.max_state = ARRAY_SIZE(table);
+	f->df.stats.trans_table = transitions;
+	f->df.stats.time_in_state = residence;
+	f->df.stats.total_trans = 10;
+	f->df.stats.unknown_trans = 2;
+	f->df.stats.unlisted_time = 33;
+	f->df.stats.unknown_time = 44;
+	f->df.stats.last_update = get_jiffies_64() - 100;
+	f->df.outcome.error = -EIO;
+	f->df.outcome.protection_needed = true;
+	KUNIT_EXPECT_EQ(test, trans_stat_store(&f->df.dev, NULL, "1", 1),
+			(ssize_t)-EINVAL);
+	KUNIT_EXPECT_EQ(test, f->df.stats.total_trans, 10U);
+	before = get_jiffies_64();
+	KUNIT_EXPECT_EQ(test, trans_stat_store(&f->df.dev, NULL, "0", 1),
+			(ssize_t)1);
+	for (i = 0; i < ARRAY_SIZE(transitions); i++)
+		KUNIT_EXPECT_EQ(test, transitions[i], 0U);
+	for (i = 0; i < ARRAY_SIZE(residence); i++)
+		KUNIT_EXPECT_EQ(test, residence[i], 0ULL);
+	KUNIT_EXPECT_EQ(test, f->df.stats.total_trans, 0U);
+	KUNIT_EXPECT_EQ(test, f->df.stats.unknown_trans, 0U);
+	KUNIT_EXPECT_EQ(test, f->df.stats.unlisted_time, 0ULL);
+	KUNIT_EXPECT_EQ(test, f->df.stats.unknown_time, 0ULL);
+	KUNIT_EXPECT_GE(test, f->df.stats.last_update, before);
+	KUNIT_EXPECT_EQ(test, f->df.previous_freq, 0UL);
+	KUNIT_EXPECT_EQ(test, f->df.outcome.error, -EIO);
+	KUNIT_EXPECT_TRUE(test, f->df.outcome.protection_needed);
+	/* Reset is not recovery: the next interval belongs to unknown. */
+	f->next.rate = 200;
+	mutex_lock(&f->df.lock);
+	f->df.stats.last_update = get_jiffies_64() - 10;
+	KUNIT_EXPECT_EQ(test, devfreq_set_target(&f->df, 200, 0), 0);
+	KUNIT_EXPECT_GE(test, f->df.stats.unknown_time, 10ULL);
+	KUNIT_EXPECT_EQ(test, f->df.stats.unknown_trans, 1U);
+	KUNIT_EXPECT_EQ(test, f->df.stats.total_trans, 0U);
+	KUNIT_EXPECT_EQ(test, residence[0], 0ULL);
+	KUNIT_EXPECT_EQ(test, residence[1], 0ULL);
+	mutex_unlock(&f->df.lock);
+	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
+}
+
+struct devfreq_legacy_test {
+	struct notifier_block nb;
+	unsigned long old;
+	unsigned long observed;
+	unsigned int pre;
+	unsigned int post;
+};
+
+static int devfreq_test_legacy_target(struct device *dev, unsigned long *freq,
+				      u32 flags)
+{
+	/* A legacy failure must not adopt the callback's modified rate. */
+	*freq = 150;
+	return -EREMOTEIO;
+}
+
+static int devfreq_test_legacy_observer(struct notifier_block *nb,
+					unsigned long event, void *data)
+{
+	struct devfreq_legacy_test *f = container_of(nb, struct devfreq_legacy_test, nb);
+	struct devfreq_freqs *freqs = data;
+
+	if (event == DEVFREQ_PRECHANGE)
+		f->pre++;
+	if (event == DEVFREQ_POSTCHANGE) {
+		f->post++;
+		f->old = freqs->old;
+		f->observed = freqs->new;
+	}
+	return NOTIFY_OK;
+}
+
+static void devfreq_legacy_error_test(struct kunit *test)
+{
+	struct devfreq_dev_profile profile = { .target = devfreq_test_legacy_target };
+	struct devfreq_legacy_test observer = {
+		.nb.notifier_call = devfreq_test_legacy_observer,
+	};
+	struct devfreq *df;
+
+	df = kunit_kzalloc(test, sizeof(*df), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, df);
+	mutex_init(&df->lock);
+	srcu_init_notifier_head(&df->transition_notifier_list);
+	df->profile = &profile;
+	df->previous_freq = 100;
+	df->stats.last_update = 123;
+	KUNIT_EXPECT_EQ(test, devfreq_register_notifier(df, &observer.nb,
+							DEVFREQ_TRANSITION_NOTIFIER), 0);
+	mutex_lock(&df->lock);
+	KUNIT_EXPECT_EQ(test, devfreq_set_target(df, 200, 0), -EREMOTEIO);
+	KUNIT_EXPECT_EQ(test, observer.pre, 1U);
+	KUNIT_EXPECT_EQ(test, observer.post, 1U);
+	KUNIT_EXPECT_EQ(test, observer.old, 100UL);
+	KUNIT_EXPECT_EQ(test, observer.observed, 100UL);
+	KUNIT_EXPECT_EQ(test, df->previous_freq, 100UL);
+	KUNIT_EXPECT_EQ(test, df->stats.last_update, 123ULL);
+	KUNIT_EXPECT_EQ(test, df->stats.total_trans, 0U);
+	mutex_unlock(&df->lock);
+	devfreq_unregister_notifier(df, &observer.nb, DEVFREQ_TRANSITION_NOTIFIER);
+	srcu_cleanup_notifier_head(&df->transition_notifier_list);
+}
+
+/* A status callback must not resurrect a historical target observation. */
+static int devfreq_test_stale_status(struct device *dev,
+				     struct devfreq_dev_status *status)
+{
+	struct devfreq_outcome_test *f = dev_get_drvdata(dev);
+
+	status->current_frequency = 100;
+	status->busy_time = 7;
+	status->total_time = 10;
+	status->private_data = f;
+	return f->next.error;
+}
+
+static void devfreq_outcome_status_contract_test(struct kunit *test)
+{
+	struct devfreq_dev_profile profile = {
+		.target_outcome = devfreq_test_outcome,
+		.get_dev_status = devfreq_test_stale_status,
+	};
+	unsigned long table[] = { 100, 200 };
+	unsigned long rates[] = { 0, 175 };
+	int errors[] = { 0, -EIO };
+	unsigned int transitions[4] = { };
+	u64 residence[2] = { };
+	struct devfreq_outcome_test *f;
+	struct device parent = { };
+	unsigned int i, j;
+
+	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	mutex_init(&f->df.lock);
+	srcu_init_notifier_head(&f->df.transition_notifier_list);
+	dev_set_drvdata(&parent, f);
+	f->df.dev.parent = &parent;
+	f->df.profile = &profile;
+	f->df.freq_table = table;
+	f->df.max_state = ARRAY_SIZE(table);
+	f->df.stats.trans_table = transitions;
+	f->df.stats.time_in_state = residence;
+	mutex_lock(&f->df.lock);
+	for (i = 0; i < ARRAY_SIZE(rates); i++) {
+		for (j = 0; j < ARRAY_SIZE(errors); j++) {
+			f->next.rate = rates[i];
+			f->next.error = -EREMOTEIO;
+			KUNIT_EXPECT_EQ(test, devfreq_set_target(&f->df, 200, 0),
+					-EREMOTEIO);
+			KUNIT_EXPECT_EQ(test, f->df.last_status.current_frequency,
+					rates[i]);
+			f->next.error = errors[j];
+			KUNIT_EXPECT_EQ(test, devfreq_update_stats(&f->df), errors[j]);
+			KUNIT_EXPECT_EQ_MSG(test, f->df.last_status.current_frequency,
+					    rates[i], "outcome=%lu status errno=%d",
+					    rates[i], errors[j]);
+			KUNIT_EXPECT_EQ(test, f->df.previous_freq, rates[i]);
+			KUNIT_EXPECT_EQ(test, f->df.outcome.rate, rates[i]);
+			KUNIT_EXPECT_EQ(test, f->df.outcome.error, -EREMOTEIO);
+			KUNIT_EXPECT_EQ(test, f->df.last_status.busy_time, 7UL);
+			KUNIT_EXPECT_EQ(test, f->df.last_status.total_time, 10UL);
+			KUNIT_EXPECT_PTR_EQ(test, f->df.last_status.private_data, f);
+		}
+	}
+	/* Legacy status callbacks still own frequency, even on error. */
+	profile.target_outcome = NULL;
+	for (j = 0; j < ARRAY_SIZE(errors); j++) {
+		f->next.error = errors[j];
+		KUNIT_EXPECT_EQ(test, devfreq_update_stats(&f->df), errors[j]);
+		KUNIT_EXPECT_EQ(test, f->df.last_status.current_frequency, 100UL);
+		KUNIT_EXPECT_PTR_EQ(test, f->df.last_status.private_data, f);
+	}
+	mutex_unlock(&f->df.lock);
+	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
+}
+
+static struct kunit_case devfreq_outcome_contract_cases[] = {
+	KUNIT_CASE(devfreq_outcome_status_contract_test),
+	{ }
+};
+
+static struct kunit_suite devfreq_outcome_contract_suite = {
+	.name = "devfreq-outcome-contract",
+	.test_cases = devfreq_outcome_contract_cases,
+};
+
 static struct kunit_case devfreq_outcome_cases[] = {
 	KUNIT_CASE(devfreq_outcome_accounting_test),
+	KUNIT_CASE(devfreq_outcome_reset_test),
+	KUNIT_CASE(devfreq_legacy_error_test),
 	{ }
 };
 
@@ -2504,5 +2714,6 @@ static struct kunit_suite devfreq_outcome_suite = {
 	.name = "devfreq-outcome",
 	.test_cases = devfreq_outcome_cases,
 };
-kunit_test_suite(devfreq_outcome_suite);
+
+kunit_test_suites(&devfreq_outcome_suite, &devfreq_outcome_contract_suite);
 #endif

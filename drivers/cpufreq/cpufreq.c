@@ -267,6 +267,48 @@ EXPORT_SYMBOL_GPL(cpufreq_cpu_put);
  *            EXTERNALLY AFFECTING FREQUENCY CHANGES                 *
  *********************************************************************/
 
+/* Track actual delivery, including asynchronous completion and nested calls. */
+struct cpufreq_notifier_context {
+	struct list_head node;
+	struct task_struct *task;
+};
+
+static LIST_HEAD(cpufreq_notifier_contexts);
+static DEFINE_SPINLOCK(cpufreq_notifier_context_lock);
+
+static void cpufreq_notifier_enter(struct cpufreq_notifier_context *ctx)
+{
+	ctx->task = current;
+	spin_lock(&cpufreq_notifier_context_lock);
+	list_add(&ctx->node, &cpufreq_notifier_contexts);
+	spin_unlock(&cpufreq_notifier_context_lock);
+}
+
+static void cpufreq_notifier_exit(struct cpufreq_notifier_context *ctx)
+{
+	spin_lock(&cpufreq_notifier_context_lock);
+	list_del(&ctx->node);
+	spin_unlock(&cpufreq_notifier_context_lock);
+}
+
+/* A synchronous unregister from this context would drain its own reader. */
+bool cpufreq_in_transition_notifier(void)
+{
+	struct cpufreq_notifier_context *ctx;
+	bool active = false;
+
+	spin_lock(&cpufreq_notifier_context_lock);
+	list_for_each_entry(ctx, &cpufreq_notifier_contexts, node) {
+		if (ctx->task == current) {
+			active = true;
+			break;
+		}
+	}
+	spin_unlock(&cpufreq_notifier_context_lock);
+	return active;
+}
+EXPORT_SYMBOL_GPL(cpufreq_in_transition_notifier);
+
 /**
  * adjust_jiffies - Adjust the system "loops_per_jiffy".
  * @val: CPUFREQ_PRECHANGE or CPUFREQ_POSTCHANGE.
@@ -315,6 +357,7 @@ static void cpufreq_notify_transition(struct cpufreq_policy *policy,
 				      struct cpufreq_freqs *freqs,
 				      unsigned int state)
 {
+	struct cpufreq_notifier_context ctx;
 	int cpu;
 
 	BUG_ON(irqs_disabled());
@@ -327,6 +370,7 @@ static void cpufreq_notify_transition(struct cpufreq_policy *policy,
 	pr_debug("notification %u of frequency transition to %u kHz\n",
 		 state, freqs->new);
 
+	cpufreq_notifier_enter(&ctx);
 	switch (state) {
 	case CPUFREQ_PRECHANGE:
 		/*
@@ -361,6 +405,7 @@ static void cpufreq_notify_transition(struct cpufreq_policy *policy,
 		policy->cur = freqs->new;
 		policy->cur_unknown = false;
 	}
+	cpufreq_notifier_exit(&ctx);
 }
 
 /* Do post notifications when there are chances that transition has failed */
@@ -446,6 +491,7 @@ EXPORT_SYMBOL_GPL(cpufreq_freq_transition_end);
  */
 void cpufreq_freq_transition_end_unknown(struct cpufreq_policy *policy, int error)
 {
+	struct cpufreq_notifier_context ctx;
 	struct cpufreq_terminal terminal = {
 		.policy = policy, .error = error, .protection_needed = true,
 	};
@@ -459,6 +505,7 @@ void cpufreq_freq_transition_end_unknown(struct cpufreq_policy *policy, int erro
 
 	policy->cur_unknown = true;
 	cpufreq_stats_record_transition(policy, 0);
+	cpufreq_notifier_enter(&ctx);
 	/* Terminal disposal cannot be vetoed, even by a broken listener. */
 	idx = srcu_read_lock(&cpufreq_transition_notifier_list.srcu);
 	nb = srcu_dereference(cpufreq_transition_notifier_list.head,
@@ -468,6 +515,7 @@ void cpufreq_freq_transition_end_unknown(struct cpufreq_policy *policy, int erro
 		nb = srcu_dereference(nb->next, &cpufreq_transition_notifier_list.srcu);
 	}
 	srcu_read_unlock(&cpufreq_transition_notifier_list.srcu, idx);
+	cpufreq_notifier_exit(&ctx);
 	spin_lock(&policy->transition_lock);
 	policy->transition_ongoing = false;
 	policy->transition_task = NULL;
@@ -3239,6 +3287,9 @@ void mt6797_test_legacy_completion(struct kunit *test)
 }
 
 static int passive_test_mode;
+/* Opt-in hang reproducer: 1 outside delivery, 2 inside real PRE delivery. */
+static int passive_start_reentry;
+module_param(passive_start_reentry, int, 0400);
 
 static int passive_policy_required(unsigned int cpu)
 {
@@ -3301,6 +3352,9 @@ static void passive_registration_matrix(struct cpufreq_policy *policy)
 			policy->cur_unknown = true;
 			expected = -EIO;
 		}
+		if (!mode && passive_start_reentry)
+			mt6797_test_passive_reentry(test, dev, policy,
+						    passive_start_reentry == 2);
 		mt6797_test_passive_registration(test, dev, expected,
 						 mode == 0 || mode == 6 ? 2 : 1);
 		policy->cur_unknown = false;

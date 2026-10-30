@@ -549,6 +549,7 @@ struct cpufreq_terminal {
 
 #ifdef CONFIG_CPU_FREQ
 int cpufreq_policy_required(unsigned int cpu);
+bool cpufreq_in_transition_notifier(void);
 int cpufreq_register_notifier(struct notifier_block *nb, unsigned int list);
 int cpufreq_unregister_notifier(struct notifier_block *nb, unsigned int list);
 
@@ -563,6 +564,12 @@ static inline int cpufreq_policy_required(unsigned int cpu)
 {
 	return 1;
 }
+
+static inline bool cpufreq_in_transition_notifier(void)
+{
+	return false;
+}
+
 static inline int cpufreq_register_notifier(struct notifier_block *nb,
 						unsigned int list)
 {

@@ -94,9 +94,16 @@ void devfreq_get_freq_range(struct devfreq *devfreq, unsigned long *min_freq,
 
 static inline int devfreq_update_stats(struct devfreq *df)
 {
+	int ret;
+
 	if (!df->profile->get_dev_status)
 		return -EINVAL;
 
-	return df->profile->get_dev_status(df->dev.parent, &df->last_status);
+	ret = df->profile->get_dev_status(df->dev.parent, &df->last_status);
+	/* Load sampling cannot replace an explicit target observation. */
+	if (df->profile->target_outcome)
+		df->last_status.current_frequency = df->previous_freq;
+
+	return ret;
 }
 #endif /* __LINUX_DEVFREQ_DEVFREQ_H__ */

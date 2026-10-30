@@ -52,4 +52,6 @@ void *mt6797_test_cpu_open(struct device *dev, unsigned int user);
 int mt6797_test_cpu_target(void *data, unsigned int khz,
 			   struct mt6797_txn_outcome *outcome);
 void mt6797_test_cpu_close(void *data);
+void mt6797_test_passive_reentry(struct kunit *test, struct device *dev,
+				 struct cpufreq_policy *policy, bool from_notifier);
 #endif

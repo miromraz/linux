@@ -311,6 +311,7 @@ static int cpufreq_passive_unregister_notifier(struct devfreq *devfreq)
 			return ret;
 	}
 
+	p_data->nb.notifier_call = NULL;
 	delete_parent_cpu_data(p_data);
 
 	return 0;
@@ -331,6 +332,10 @@ static int cpufreq_passive_register_notifier(struct devfreq *devfreq)
 
 	p_data->cpu_data_list
 		= (struct list_head)LIST_HEAD_INIT(p_data->cpu_data_list);
+
+	/* Reject before subscribing: failure unwind must never drain itself. */
+	if (cpufreq_in_transition_notifier())
+		return -EBUSY;
 
 	p_data->cpu_starting = true;
 	p_data->nb.notifier_call = cpufreq_passive_notifier_call;
@@ -560,6 +565,8 @@ MODULE_LICENSE("GPL v2");
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 #include "../regulator/mt6797-combined-test.h"
 #include <kunit/test.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
 
 struct passive_fixture {
 	struct devfreq df;
@@ -573,12 +580,17 @@ struct passive_fixture {
 	u64 time[4];
 	unsigned int transitions[16];
 	void *saved_data;
+	struct completion *entered, *release;
 };
 
 static int passive_fixture_target(struct device *dev, unsigned long *freq, u32 flags)
 {
 	struct passive_fixture *f = dev_get_drvdata(dev);
 
+	if (f->entered) {
+		complete(f->entered);
+		wait_for_completion_timeout(f->release, 2 * HZ);
+	}
 	f->requested = *freq;
 	f->calls++;
 	return f->fail ? -EIO : 0;
@@ -672,6 +684,91 @@ void mt6797_test_passive_close(void *data)
 	kfree(f);
 }
 
+struct passive_drain_test {
+	struct passive_fixture *f;
+	struct cpufreq_policy *policy;
+	struct completion entered, release, stopping, stopped;
+	int stop_ret;
+};
+
+static int passive_drain_transition(void *arg)
+{
+	struct passive_drain_test *r = arg;
+	struct cpufreq_freqs freqs = {
+		.old = r->policy->cur, .new = r->policy->cur,
+	};
+
+	cpufreq_freq_transition_begin(r->policy, &freqs);
+	cpufreq_freq_transition_end(r->policy, &freqs, 0);
+	while (!kthread_should_stop())
+		msleep(20);
+	return 0;
+}
+
+static int passive_drain_stop(void *arg)
+{
+	struct passive_drain_test *r = arg;
+
+	complete(&r->stopping);
+	r->stop_ret = devfreq_passive_event_handler(&r->f->df, DEVFREQ_GOV_STOP, NULL);
+	complete(&r->stopped);
+	while (!kthread_should_stop())
+		msleep(20);
+	return 0;
+}
+
+static void passive_drain_test(struct kunit *test, struct passive_fixture *f)
+{
+	struct passive_drain_test r = { .f = f, .policy = cpufreq_cpu_get(0) };
+	struct task_struct *transition, *stop;
+	struct devfreq_cpu_data *cpu;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, r.policy);
+	init_completion(&r.entered);
+	init_completion(&r.release);
+	init_completion(&r.stopping);
+	init_completion(&r.stopped);
+	f->entered = &r.entered;
+	f->release = &r.release;
+	/* A same-rate POST must enter the child for this drain test. */
+	list_for_each_entry(cpu, &f->data.cpu_data_list, node)
+		cpu->update_pending = true;
+	transition = kthread_run(passive_drain_transition, &r, "passive-post-test");
+	if (IS_ERR(transition)) {
+		KUNIT_FAIL(test, "transition thread allocation failed");
+		goto out;
+	}
+	if (!wait_for_completion_timeout(&r.entered, HZ)) {
+		KUNIT_FAIL(test, "POST did not reach target");
+		complete(&r.release);
+		kthread_stop(transition);
+		goto out;
+	}
+	stop = kthread_run(passive_drain_stop, &r, "passive-stop-test");
+	if (IS_ERR(stop)) {
+		KUNIT_FAIL(test, "STOP thread allocation failed");
+		complete(&r.release);
+		kthread_stop(transition);
+		goto out;
+	}
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&r.stopping, HZ), 0UL);
+	KUNIT_EXPECT_EQ(test, wait_for_completion_timeout(&r.stopped, HZ / 20), 0UL);
+	complete(&r.release);
+	kthread_stop(transition);
+	kthread_stop(stop);
+	KUNIT_EXPECT_EQ(test, r.stop_ret, 0);
+	KUNIT_EXPECT_TRUE(test, list_empty(&f->data.cpu_data_list));
+	KUNIT_EXPECT_PTR_EQ(test, f->data.nb.notifier_call, NULL);
+	f->entered = NULL;
+	ret = devfreq_passive_event_handler(&f->df, DEVFREQ_GOV_START, NULL);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+out:
+	f->entered = NULL;
+	f->release = NULL;
+	cpufreq_cpu_put(r.policy);
+}
+
 /* Real governor START/STOP, including policy lookup, OPP refs and target. */
 void mt6797_test_passive_registration(struct kunit *test, struct device *dev,
 				      int expected, unsigned int parents)
@@ -683,6 +780,7 @@ void mt6797_test_passive_registration(struct kunit *test, struct device *dev,
 
 	KUNIT_ASSERT_FALSE(test, IS_ERR(f));
 	cpufreq_unregister_notifier(&f->data.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	f->data.nb.notifier_call = NULL;
 	list_del(&f->cpu.node);
 	f->data.get_target_freq = NULL;
 	f->data.parent_type = CPUFREQ_PARENT_DEV;
@@ -691,6 +789,7 @@ void mt6797_test_passive_registration(struct kunit *test, struct device *dev,
 	list_for_each_entry(cpu, &f->data.cpu_data_list, node)
 		count++;
 	if (!ret) {
+		passive_drain_test(test, f);
 		KUNIT_EXPECT_EQ(test, count, parents);
 		KUNIT_EXPECT_GT(test, f->calls, 0U);
 		mt6797_test_passive_hide_first(true);
@@ -742,6 +841,84 @@ void mt6797_test_passive_registration(struct kunit *test, struct device *dev,
 		KUNIT_EXPECT_EQ(test, count, 0U);
 		KUNIT_EXPECT_EQ(test, f->calls, 0U);
 	}
+	dev_set_drvdata(dev, f->saved_data);
+	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
+	kfree(f);
+}
+
+struct passive_reentry_test {
+	struct notifier_block nb;
+	struct passive_fixture *fixture;
+	struct kunit *test;
+	bool returned;
+};
+
+static void passive_reentry_start(struct passive_reentry_test *r)
+{
+	struct passive_fixture *f = r->fixture;
+	int ret;
+
+	pr_info("passive-reentry: entering START state=%d\n", system_state);
+	ret = devfreq_passive_event_handler(&f->df, DEVFREQ_GOV_START, NULL);
+	pr_info("passive-reentry: START returned %d\n", ret);
+	r->returned = true;
+	KUNIT_EXPECT_EQ(r->test, ret, -EBUSY);
+	KUNIT_EXPECT_TRUE(r->test, list_empty(&f->data.cpu_data_list));
+	KUNIT_EXPECT_PTR_EQ(r->test, f->data.nb.notifier_call, NULL);
+	KUNIT_EXPECT_EQ(r->test, f->calls, 0U);
+}
+
+static int passive_reentry_notify(struct notifier_block *nb,
+				  unsigned long event, void *data)
+{
+	struct passive_reentry_test *r = container_of(nb, struct passive_reentry_test, nb);
+
+	if (event == CPUFREQ_PRECHANGE || event == CPUFREQ_POSTCHANGE ||
+	    event == CPUFREQ_TERMINAL)
+		passive_reentry_start(r);
+	return NOTIFY_OK;
+}
+
+/* Keep an external timeout: a regression can block in SRCU synchronization. */
+void mt6797_test_passive_reentry(struct kunit *test, struct device *dev,
+				 struct cpufreq_policy *policy, bool from_notifier)
+{
+	struct passive_fixture *f = mt6797_test_passive_open(dev, 0);
+	struct passive_reentry_test r = {
+		.nb.notifier_call = passive_reentry_notify,
+		.fixture = f,
+		.test = test,
+	};
+	struct cpufreq_freqs freqs = { .old = policy->cur, .new = policy->cur };
+	unsigned int refs = kref_read(&policy->kobj.kref);
+
+	KUNIT_ASSERT_FALSE(test, IS_ERR(f));
+	/* SYSTEM_SCHEDULING already uses the normal SRCU drain, unlike BOOTING. */
+	KUNIT_ASSERT_NE(test, system_state, SYSTEM_BOOTING);
+	cpufreq_unregister_notifier(&f->data.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	f->data.nb.notifier_call = NULL;
+	list_del(&f->cpu.node);
+	f->data.get_target_freq = NULL;
+	f->data.parent_type = CPUFREQ_PARENT_DEV;
+	if (from_notifier)
+		KUNIT_EXPECT_EQ(test, cpufreq_register_notifier(&r.nb,
+								CPUFREQ_TERMINAL_NOTIFIER), 0);
+	cpufreq_freq_transition_begin(policy, &freqs);
+	if (!from_notifier)
+		passive_reentry_start(&r);
+	cpufreq_freq_transition_end(policy, &freqs, 0);
+	KUNIT_EXPECT_FALSE(test, cpufreq_in_transition_notifier());
+	if (from_notifier) {
+		cpufreq_freq_transition_begin(policy, &freqs);
+		cpufreq_freq_transition_end_unknown(policy, -EIO);
+		policy->cur_unknown = false;
+	}
+	KUNIT_EXPECT_TRUE(test, r.returned);
+	KUNIT_EXPECT_FALSE(test, policy->transition_ongoing);
+	KUNIT_EXPECT_EQ(test, kref_read(&policy->kobj.kref), refs);
+	if (from_notifier)
+		cpufreq_unregister_notifier(&r.nb, CPUFREQ_TERMINAL_NOTIFIER);
+	pr_info("passive-reentry: transition completed\n");
 	dev_set_drvdata(dev, f->saved_data);
 	srcu_cleanup_notifier_head(&f->df.transition_notifier_list);
 	kfree(f);

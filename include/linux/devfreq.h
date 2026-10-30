@@ -107,7 +107,10 @@ struct devfreq_outcome {
  *			status to devfreq. Governors are recommended not to
  *			use this directly. Instead, governors are recommended
  *			to use devfreq_update_stats() along with
- *			devfreq.last_status.
+ *			devfreq.last_status. With target_outcome, load counters and
+ *			private_data retain their callback semantics, but the core
+ *			preserves the last target observation as current_frequency
+ *			(zero means unknown), including when this callback fails.
  * @get_cur_freq:	The device should provide the current frequency
  *			at which it is operating.
  * @exit:		An optional callback that is called when devfreq

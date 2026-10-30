@@ -1936,6 +1936,8 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 
 		mt6797_preflight_test_hold(true);
 		mt6797_preflight_test_event();
+		/* Drain the held worker before asserting readiness, not contention. */
+		mt6797_preflight_test_flush();
 		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 200, &outcome), -EAGAIN);
 		KUNIT_EXPECT_EQ(test, f->writes, writes);
 		mt6797_preflight_test_hold(false);
