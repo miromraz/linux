@@ -13,6 +13,8 @@ struct cpufreq_policy *mt6797_test_policy_alloc(unsigned int cpu);
 void mt6797_test_policy_free(struct cpufreq_policy *policy);
 int mt6797_test_core_target(struct cpufreq_policy *policy,
 			   struct cpufreq_driver *driver, unsigned int index);
+struct kunit;
+void mt6797_test_stats_contract(struct kunit *test, struct cpufreq_policy *policy);
 unsigned int mt6797_test_stats_rate(struct cpufreq_policy *policy);
 struct cpufreq_policy *mt6797_test_cpu_policy(void *data);
 bool mt6797_test_cpu_unlocked(void *data);
@@ -21,6 +23,7 @@ struct device;
 void *mt6797_test_passive_open(struct device *dev, unsigned int cpu);
 void mt6797_test_passive_close(void *data);
 void mt6797_test_passive_fail(void *data, bool fail);
+int mt6797_test_passive_error(void *data);
 unsigned int mt6797_test_passive_calls(void *data);
 unsigned long mt6797_test_passive_rate(void *data);
 struct device_node;

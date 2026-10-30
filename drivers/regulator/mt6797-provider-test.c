@@ -1704,7 +1704,10 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 		.nb.notifier_call = reserved_clock_event, .test = test,
 	};
 	struct accounting_observer observer = {
-		.nb = { .notifier_call = accounting_event, .priority = 1 },
+		.nb = { .notifier_call = accounting_event, .priority = -1 },
+	};
+	struct accounting_observer later = {
+		.nb = { .notifier_call = accounting_event, .priority = -2 },
 	};
 	void *info, *passive;
 	struct cpufreq_policy *policy;
@@ -1761,6 +1764,8 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	policy = mt6797_test_cpu_policy(info);
 	observer.test = test;
 	observer.info = info;
+	later.test = test;
+	later.info = info;
 	passive = mt6797_test_passive_open(dev[2], user * 4);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(passive));
 	KUNIT_ASSERT_NOT_NULL(test, policy->stats);
@@ -1818,13 +1823,17 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	injection.failure = failure;
 	KUNIT_ASSERT_EQ(test, cpufreq_register_notifier(&observer.nb,
 				CPUFREQ_TRANSITION_NOTIFIER), 0);
+	KUNIT_ASSERT_EQ(test, cpufreq_register_notifier(&later.nb,
+							CPUFREQ_TRANSITION_NOTIFIER), 0);
 	mt6797_test_cpu_hook(callback_inject, &injection);
 	ret = mt6797_test_cpu_target(info, failure == 7 || failure == 8 ? 100 : 200,
 				     &outcome);
 	mt6797_test_cpu_hook(NULL, NULL);
-	cpufreq_unregister_notifier(&observer.nb, CPUFREQ_TRANSITION_NOTIFIER);
 	KUNIT_EXPECT_EQ(test, ret, outcome.error);
 	KUNIT_EXPECT_EQ(test, observer.pre, 1U);
+	KUNIT_EXPECT_EQ(test, later.pre, observer.pre);
+	KUNIT_EXPECT_EQ(test, later.post, observer.post);
+	KUNIT_EXPECT_EQ(test, later.rate, observer.rate);
 	KUNIT_EXPECT_EQ(test, observer.post, failure == 3 || failure == 6 ? 0U : 1U);
 	if (observer.post)
 		KUNIT_EXPECT_EQ(test, observer.rate, (unsigned int)(outcome.rate / 1000));
@@ -1860,10 +1869,19 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	if (failure == 18) {
 		KUNIT_EXPECT_EQ(test, ret, 0);
 		KUNIT_EXPECT_EQ(test, mt6797_test_passive_calls(passive), 1U);
+		KUNIT_EXPECT_EQ(test, mt6797_test_passive_error(passive), -EIO);
 		mt6797_test_passive_fail(passive, false);
 		mt6797_preflight_test_flush();
 		KUNIT_EXPECT_EQ(test, mt6797_test_cpu_target(info, 200, &outcome), 0);
 		KUNIT_EXPECT_EQ(test, mt6797_test_passive_calls(passive), 2U);
+		KUNIT_EXPECT_EQ(test, mt6797_test_passive_error(passive), 0);
+		KUNIT_EXPECT_EQ(test, observer.pre, 2U);
+		KUNIT_EXPECT_EQ(test, observer.post, 2U);
+		KUNIT_EXPECT_EQ(test, later.pre, 2U);
+		KUNIT_EXPECT_EQ(test, later.post, 2U);
+		KUNIT_EXPECT_EQ(test, later.rate, 200U);
+		KUNIT_EXPECT_EQ(test, observer.rate, 200U);
+		KUNIT_EXPECT_FALSE(test, policy->transition_ongoing);
 	} else if (failure == 16) {
 		KUNIT_EXPECT_EQ(test, ret, 0);
 		KUNIT_EXPECT_EQ(test, outcome.rate, 150000UL);
@@ -1918,6 +1936,9 @@ static void cpu_callback_case(struct kunit *test, struct clk *mux,
 	m->fail_at = 0;
 	m->live_floor = NULL;
 	m->commit_error = false;
+	cpufreq_unregister_notifier(&later.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	cpufreq_unregister_notifier(&observer.nb, CPUFREQ_TRANSITION_NOTIFIER);
+	mt6797_test_stats_contract(test, policy);
 	mt6797_test_passive_close(passive);
 	mt6797_test_cpu_close(info);
 cleanup:

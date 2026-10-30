@@ -18,6 +18,7 @@ struct cpufreq_stats {
 	unsigned int max_state;
 	unsigned int state_num;
 	unsigned int last_index;
+	unsigned int last_freq;
 	u64 *time_in_state;
 	unsigned int *freq_table;
 	unsigned int *trans_table;
@@ -186,7 +187,7 @@ static const struct attribute_group stats_attr_group = {
 static int freq_table_get_index(struct cpufreq_stats *stats, unsigned int freq)
 {
 	int index;
-	for (index = 0; index < stats->max_state; index++)
+	for (index = 0; index < stats->state_num; index++)
 		if (stats->freq_table[index] == freq)
 			return index;
 	return -1;
@@ -210,7 +211,7 @@ void cpufreq_stats_free_table(struct cpufreq_policy *policy)
 
 void cpufreq_stats_create_table(struct cpufreq_policy *policy)
 {
-	unsigned int i = 0, count;
+	unsigned int count;
 	struct cpufreq_stats *stats;
 	unsigned int alloc_size;
 	struct cpufreq_frequency_table *pos;
@@ -246,11 +247,12 @@ void cpufreq_stats_create_table(struct cpufreq_policy *policy)
 	cpufreq_for_each_valid_entry(pos, policy->freq_table)
 		if (policy->freq_table_sorted != CPUFREQ_TABLE_UNSORTED ||
 		    freq_table_get_index(stats, pos->frequency) == -1)
-			stats->freq_table[i++] = pos->frequency;
+			stats->freq_table[stats->state_num++] = pos->frequency;
 
-	stats->state_num = i;
 	stats->last_time = local_clock();
-	stats->last_index = freq_table_get_index(stats, policy->cur);
+	stats->last_freq = policy->cur_unknown ? 0 : policy->cur;
+	stats->last_index = stats->last_freq ?
+		freq_table_get_index(stats, stats->last_freq) : -1;
 
 	policy->stats = stats;
 	if (!sysfs_create_group(&policy->kobj, &stats_attr_group))
@@ -276,14 +278,15 @@ void cpufreq_stats_record_transition(struct cpufreq_policy *policy,
 		cpufreq_stats_reset_table(stats);
 
 	old_index = stats->last_index;
-	new_index = freq_table_get_index(stats, new_freq);
+	new_index = new_freq ? freq_table_get_index(stats, new_freq) : -1;
 
-	if (old_index == new_index)
+	if (stats->last_freq == new_freq)
 		return;
 
 	/* Unlisted/unknown time must not be charged to the previous OPP. */
 	cpufreq_stats_update(stats, stats->last_time);
 	stats->last_index = new_index;
+	stats->last_freq = new_freq;
 	if (old_index >= 0 && new_index >= 0)
 		stats->trans_table[old_index * stats->max_state + new_index]++;
 	if (new_freq)
@@ -292,6 +295,7 @@ void cpufreq_stats_record_transition(struct cpufreq_policy *policy,
 
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_COMBINED_KUNIT_TEST)
 #include "../regulator/mt6797-combined-test.h"
+#include <kunit/test.h>
 
 unsigned int mt6797_test_stats_rate(struct cpufreq_policy *policy)
 {
@@ -300,5 +304,58 @@ unsigned int mt6797_test_stats_rate(struct cpufreq_policy *policy)
 	if (!stats || stats->last_index >= stats->state_num)
 		return 0;
 	return stats->freq_table[stats->last_index];
+}
+
+/* Exercise the real accounting/reset paths; no synthetic frequency rows. */
+void mt6797_test_stats_contract(struct kunit *test, struct cpufreq_policy *policy)
+{
+	struct cpufreq_frequency_table table[] = {
+		{ .frequency = 200 }, { .frequency = 100 },
+		{ .frequency = 100 }, { .frequency = CPUFREQ_TABLE_END },
+	};
+	struct cpufreq_frequency_table *saved = policy->freq_table;
+	unsigned int sorted = policy->freq_table_sorted;
+	struct cpufreq_stats *stats;
+	u64 residence;
+	unsigned int i;
+
+	cpufreq_stats_free_table(policy);
+	policy->freq_table = table;
+	policy->freq_table_sorted = CPUFREQ_TABLE_UNSORTED;
+	cpufreq_stats_create_table(policy);
+	policy->freq_table = saved;
+	policy->freq_table_sorted = sorted;
+	stats = policy->stats;
+	KUNIT_ASSERT_NOT_NULL(test, stats);
+	KUNIT_EXPECT_EQ(test, stats->state_num, 2U);
+	KUNIT_EXPECT_EQ(test, freq_table_get_index(stats, 0), -1);
+	cpufreq_stats_record_transition(policy, 100);
+	store_reset(policy, "", 0);
+	cpufreq_stats_record_transition(policy, 150);
+	residence = stats->time_in_state[1];
+	cpufreq_stats_record_transition(policy, 175);
+	cpufreq_stats_record_transition(policy, 175);
+	KUNIT_EXPECT_EQ(test, stats->total_trans, 2U);
+	KUNIT_EXPECT_EQ(test, stats->last_freq, 175U);
+	KUNIT_EXPECT_EQ(test, stats->time_in_state[1], residence);
+	cpufreq_stats_record_transition(policy, 200);
+	KUNIT_EXPECT_EQ(test, stats->total_trans, 3U);
+	for (i = 0; i < stats->max_state * stats->max_state; i++)
+		KUNIT_EXPECT_EQ(test, stats->trans_table[i], 0U);
+	cpufreq_stats_record_transition(policy, 100);
+	KUNIT_EXPECT_EQ(test, stats->total_trans, 4U);
+	KUNIT_EXPECT_EQ(test, stats->trans_table[1], 1U);
+	cpufreq_stats_record_transition(policy, 150);
+	store_reset(policy, "", 0);
+	cpufreq_stats_record_transition(policy, 175);
+	KUNIT_EXPECT_EQ(test, stats->total_trans, 1U);
+	for (i = 0; i < stats->state_num; i++)
+		KUNIT_EXPECT_EQ(test, stats->time_in_state[i], 0ULL);
+	cpufreq_stats_record_transition(policy, 0);
+	KUNIT_EXPECT_EQ(test, stats->last_index, (unsigned int)-1);
+	KUNIT_EXPECT_EQ(test, stats->total_trans, 1U);
+	cpufreq_stats_record_transition(policy, 0);
+	cpufreq_stats_record_transition(policy, 100);
+	KUNIT_EXPECT_EQ(test, stats->total_trans, 2U);
 }
 #endif

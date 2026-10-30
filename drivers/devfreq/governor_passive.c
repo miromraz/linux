@@ -39,6 +39,7 @@ struct devfreq_cpu_data {
 	struct opp_table *opp_table;
 	unsigned int cur_freq;
 	bool update_pending;
+	int update_error;
 	unsigned int min_freq;
 	unsigned int max_freq;
 };
@@ -248,15 +249,16 @@ static int cpufreq_passive_notifier_call(struct notifier_block *nb,
 
 	mutex_lock(&devfreq->lock);
 	ret = devfreq_update_target(devfreq, freqs->new);
-	mutex_unlock(&devfreq->lock);
 	parent_cpu_data->update_pending = !!ret;
+	parent_cpu_data->update_error = ret;
+	mutex_unlock(&devfreq->lock);
 	if (ret) {
 		/* CPU observation remains true even when the CCI request fails. */
-		dev_err(&devfreq->dev, "failed to update the frequency.\n");
-		return ret;
+		dev_err(&devfreq->dev, "failed to update the frequency: %d\n", ret);
 	}
 
-	return 0;
+	/* A child failure must not suppress other CPU completion listeners. */
+	return NOTIFY_DONE;
 }
 
 static int cpufreq_passive_unregister_notifier(struct devfreq *devfreq)
@@ -558,6 +560,13 @@ void mt6797_test_passive_fail(void *data, bool fail)
 	struct passive_fixture *f = data;
 
 	f->fail = fail;
+}
+
+int mt6797_test_passive_error(void *data)
+{
+	struct passive_fixture *f = data;
+
+	return f->cpu.update_error;
 }
 
 unsigned int mt6797_test_passive_calls(void *data)
