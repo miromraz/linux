@@ -1538,7 +1538,99 @@ put_table:
 	dev_pm_opp_put_opp_table(table);
 }
 
+struct removal_listener {
+	struct notifier_block nb;
+	struct kunit *test;
+	struct device *dev;
+	unsigned int events;
+};
+
+static int removal_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct removal_listener *l = container_of(nb, struct removal_listener, nb);
+
+	if (event == OPP_EVENT_REMOVE) {
+		l->events++;
+		/* Final puts notify without the table mutex held. */
+		KUNIT_EXPECT_EQ(l->test, dev_pm_opp_get_opp_count(l->dev), 0);
+	}
+	return NOTIFY_OK;
+}
+
+static void requirements_single_remove(struct kunit *test)
+{
+	struct platform_device *pdev;
+	struct opp_table *table;
+	struct dev_pm_opp_requirements *a = NULL, *b = NULL;
+	struct dev_pm_opp_requirement value;
+	struct dev_pm_opp *opp;
+	unsigned long rates[] = { 100, 200 }, bad[] = { 100, 300 };
+	unsigned long rate, freq, uv;
+	struct removal_listener listener = {
+		.nb.notifier_call = removal_event, .test = test,
+	};
+	int ret;
+
+	pdev = platform_device_register_simple("single-remove-test", -1, NULL, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(pdev));
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, unregister_device, pdev), 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, remove_opps, &pdev->dev), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&pdev->dev, 100, 800000), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&pdev->dev, 200, 900000), 0);
+	table = dev_pm_opp_get_opp_table(&pdev->dev);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(table));
+	listener.dev = &pdev->dev;
+	ret = dev_pm_opp_register_notifier(&pdev->dev, &listener.nb);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto put_table;
+	ret = dev_pm_opp_requirements_get(table, rates, 2, &a);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto unregister;
+	/* Failed multi-rate admission must not acquire temporary OPP refs. */
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_requirements_get(table, bad, 2, &b), -ERANGE);
+	dev_pm_opp_requirements_put(b);
+	b = NULL;
+	dev_pm_opp_remove(&pdev->dev, 200);
+	dev_pm_opp_remove(&pdev->dev, 200);
+	KUNIT_EXPECT_EQ(test, listener.events, 0U);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_get_opp_count(&pdev->dev), 1);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_enable(&pdev->dev, 200), -ENODEV);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_adjust_voltage(&pdev->dev, 200,
+						      950000, 950000, 950000), -ENODEV);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_add(&pdev->dev, 200, 900000), -EEXIST);
+	opp = dev_pm_opp_find_freq_exact(&pdev->dev, 200, true);
+	KUNIT_EXPECT_TRUE(test, IS_ERR(opp));
+	if (!IS_ERR(opp))
+		dev_pm_opp_put(opp);
+	rate = 200;
+	opp = dev_pm_opp_find_freq_ceil(&pdev->dev, &rate);
+	KUNIT_EXPECT_TRUE(test, IS_ERR(opp));
+	if (!IS_ERR(opp))
+		dev_pm_opp_put(opp);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_requirements_get(table, rates, 2, &b), -ERANGE);
+	dev_pm_opp_requirements_put(b);
+	ret = dev_pm_opp_snapshot_lock(table, &rates[1], &freq, &uv, 1);
+	KUNIT_EXPECT_EQ(test, ret, -ERANGE);
+	if (!ret)
+		dev_pm_opp_snapshot_unlock(table);
+	/* Remove-all must not consume the already removed entry's retained ref. */
+	dev_pm_opp_remove_all_dynamic(&pdev->dev);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_get_opp_count(&pdev->dev), 0);
+	KUNIT_EXPECT_EQ(test, listener.events, 0U);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_requirements_read(a, 1, &value), 0);
+	KUNIT_EXPECT_EQ(test, value.uv, 900000UL);
+	dev_pm_opp_requirements_put(a);
+	KUNIT_EXPECT_EQ(test, listener.events, 2U);
+unregister:
+	dev_pm_opp_unregister_notifier(&pdev->dev, &listener.nb);
+put_table:
+	dev_pm_opp_put_opp_table(table);
+}
+
 static struct kunit_case provider_cases[] = {
+	KUNIT_CASE(requirements_single_remove),
 	KUNIT_CASE(requirements_reservation),
 	KUNIT_CASE(transition_clock_contract),
 	KUNIT_CASE(direct_cpu_cci_lifetime),

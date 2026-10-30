@@ -358,7 +358,7 @@ unsigned long dev_pm_opp_get_max_volt_latency(struct device *dev)
 			uV[i].max = 0;
 
 			list_for_each_entry(opp, &opp_table->opp_list, node) {
-				if (!opp->available)
+				if (!opp->available || opp->removed)
 					continue;
 
 				if (opp->supplies[i].u_volt_min < uV[i].min)
@@ -418,7 +418,10 @@ unsigned long dev_pm_opp_get_suspend_opp_freq(struct device *dev)
 	if (IS_ERR(opp_table))
 		return 0;
 
-	if (opp_table->suspend_opp && opp_table->suspend_opp->available)
+	guard(mutex)(&opp_table->lock);
+
+	if (opp_table->suspend_opp && !opp_table->suspend_opp->removed &&
+	    opp_table->suspend_opp->available)
 		freq = dev_pm_opp_get_freq(opp_table->suspend_opp);
 
 	return freq;
@@ -433,7 +436,7 @@ int _get_opp_count(struct opp_table *opp_table)
 	guard(mutex)(&opp_table->lock);
 
 	list_for_each_entry(opp, &opp_table->opp_list, node) {
-		if (opp->available)
+		if (opp->available && !opp->removed)
 			count++;
 	}
 
@@ -554,7 +557,7 @@ static struct dev_pm_opp *_opp_table_find_key(struct opp_table *opp_table,
 	guard(mutex)(&opp_table->lock);
 
 	list_for_each_entry(temp_opp, &opp_table->opp_list, node) {
-		if (temp_opp->available == available) {
+		if (!temp_opp->removed && temp_opp->available == available) {
 			if (compare(&opp, temp_opp, read(temp_opp, index), *key))
 				break;
 		}
@@ -587,7 +590,7 @@ static struct dev_pm_opp *_opp_table_find_opp_key(struct opp_table *opp_table,
 	guard(mutex)(&opp_table->lock);
 
 	list_for_each_entry(temp_opp, &opp_table->opp_list, node) {
-		if (temp_opp->available == available) {
+		if (!temp_opp->removed && temp_opp->available == available) {
 			read(temp_opp, 0, &temp_key);
 			if (compare(&opp, temp_opp, &temp_key, key)) {
 				/* Increment the reference count of OPP */
@@ -1810,7 +1813,10 @@ void dev_pm_opp_remove(struct device *dev, unsigned long freq)
 
 	scoped_guard(mutex, &opp_table->lock) {
 		list_for_each_entry(iter, &opp_table->opp_list, node) {
-			if (iter->rates[0] == freq) {
+			if (!iter->removed && iter->rates[0] == freq) {
+				iter->removed = true;
+				if (opp_table->suspend_opp == iter)
+					opp_table->suspend_opp = NULL;
 				opp = iter;
 				break;
 			}
@@ -1841,8 +1847,12 @@ static struct dev_pm_opp *_opp_get_next(struct opp_table *opp_table,
 		 * Refcount must be dropped only once for each OPP by OPP core,
 		 * do that with help of "removed" flag.
 		 */
-		if (!opp->removed && dynamic == opp->dynamic)
+		if (!opp->removed && dynamic == opp->dynamic) {
+			opp->removed = true;
+			if (opp_table->suspend_opp == opp)
+				opp_table->suspend_opp = NULL;
 			return opp;
+		}
 	}
 
 	return NULL;
@@ -1858,7 +1868,6 @@ static void _opp_remove_all(struct opp_table *opp_table, bool dynamic)
 	struct dev_pm_opp *opp;
 
 	while ((opp = _opp_get_next(opp_table, dynamic))) {
-		opp->removed = true;
 		dev_pm_opp_put(opp);
 
 		/* Drop the references taken by dev_pm_opp_add() */
@@ -2034,6 +2043,10 @@ static int _opp_is_duplicate(struct device *dev, struct dev_pm_opp *new_opp,
 
 		if (opp_cmp < 0)
 			return 0;
+
+		/* A retained tombstone is not a successfully added live OPP. */
+		if (opp->removed)
+			return -EEXIST;
 
 		/* Duplicate OPPs */
 		dev_warn(dev, "%s: duplicate OPPs detected. Existing: freq: %lu, volt: %lu, enabled: %d. New: freq: %lu, volt: %lu, enabled: %d\n",
@@ -2889,7 +2902,7 @@ static int _opp_set_availability(struct device *dev, unsigned long freq,
 	scoped_guard(mutex, &opp_table->lock) {
 		/* Do we have the frequency? */
 		list_for_each_entry(tmp_opp, &opp_table->opp_list, node) {
-			if (tmp_opp->rates[0] == freq) {
+			if (!tmp_opp->removed && tmp_opp->rates[0] == freq) {
 				opp = dev_pm_opp_get(tmp_opp);
 
 				/* Is update really needed? */
@@ -2958,7 +2971,7 @@ int dev_pm_opp_adjust_voltage(struct device *dev, unsigned long freq,
 	scoped_guard(mutex, &opp_table->lock) {
 		/* Do we have the frequency? */
 		list_for_each_entry(tmp_opp, &opp_table->opp_list, node) {
-			if (tmp_opp->rates[0] == freq) {
+			if (!tmp_opp->removed && tmp_opp->rates[0] == freq) {
 				opp = dev_pm_opp_get(tmp_opp);
 
 				/* Is update really needed? */
@@ -3160,7 +3173,7 @@ int dev_pm_opp_snapshot_lock(struct opp_table *table, const unsigned long *rates
 		ceil = NULL;
 		lower = false;
 		list_for_each_entry(opp, &table->opp_list, node) {
-			if (!opp->available)
+			if (!opp->available || opp->removed)
 				continue;
 			if (opp->rates[0] <= rates[i])
 				lower = true;
@@ -3242,7 +3255,7 @@ int dev_pm_opp_requirements_get(struct opp_table *table,
 			ret = -ERANGE;
 			goto unlock;
 		}
-		s->entries[i].opp = dev_pm_opp_get(ceil);
+		s->entries[i].opp = ceil;
 		s->entries[i].value = (struct dev_pm_opp_requirement) {
 			.rate = ceil->rates[0],
 			.uv = ceil->supplies->u_volt,
@@ -3251,16 +3264,15 @@ int dev_pm_opp_requirements_get(struct opp_table *table,
 		};
 		s->count++;
 	}
+	for (i = 0; i < count; i++)
+		dev_pm_opp_get(s->entries[i].opp);
 	s->table = dev_pm_opp_get_opp_table_ref(table);
 	table->requirements_users++;
 	*snapshot = s;
 unlock:
 	mutex_unlock(&table->lock);
-	if (ret) {
-		while (s->count)
-			dev_pm_opp_put(s->entries[--s->count].opp);
+	if (ret)
 		kfree(s);
-	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dev_pm_opp_requirements_get);
