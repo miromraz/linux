@@ -8,6 +8,8 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 #include <linux/workqueue.h>
+#include <linux/wait.h>
+#include <linux/completion.h>
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/regulator/mt6797.h>
@@ -28,6 +30,34 @@ static struct mt6797_rail_coordinator owner = {
 };
 static struct device_node *rails[MT6797_RAILS];
 static unsigned long attached;
+/* owner_lock admits uses and cancels them before detach waits without locks. */
+static unsigned long detaching;
+static unsigned int provider_uses;
+static DECLARE_WAIT_QUEUE_HEAD(provider_idle);
+
+static int provider_use_get(u64 generation)
+{
+	int ret = 0;
+
+	mutex_lock(&owner_lock);
+	if (attached != GENMASK(1, 0))
+		ret = -EPROBE_DEFER;
+	else if (detaching || generation != owner.generation)
+		ret = -ESTALE;
+	else
+		provider_uses++;
+	mutex_unlock(&owner_lock);
+	return ret;
+}
+
+static void provider_use_put(void)
+{
+	mutex_lock(&owner_lock);
+	if (!--provider_uses)
+		wake_up_all(&provider_idle);
+	mutex_unlock(&owner_lock);
+}
+
 static BLOCKING_NOTIFIER_HEAD(events);
 static void preflight_work(struct work_struct *work);
 static DECLARE_DELAYED_WORK(preflight_job, preflight_work);
@@ -40,6 +70,7 @@ static bool stopping;
 static unsigned int sources;
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 static bool fixture_active;
+static struct completion *drain_observer;
 #endif
 static struct mt6797_preflight_result preflight = { .error = -EPROBE_DEFER };
 
@@ -682,6 +713,12 @@ static int preflight_transaction(struct preflight_user *users,
 	int floor[MT6797_RAIL_USERS];
 	int i, j, ret = 0, clocks = 0, locked = 0;
 
+	/* Includes framework notification and gaps between individual raw calls.
+	 * Teardown from this same notification stack is unsupported; queue it.
+	 */
+	ret = provider_use_get(r->provider_generation);
+	if (ret)
+		return ret;
 	for (i = 0; i < MT6797_RAIL_USERS; i++) {
 		tables[i] = dev_pm_opp_get_opp_table(users[i].dev);
 		if (IS_ERR(tables[i])) {
@@ -738,7 +775,7 @@ static int preflight_transaction(struct preflight_user *users,
 		goto out;
 	}
 	mutex_lock(&owner_lock);
-	if (!preflight_active || (supplier_revoked && user != -2) ||
+	if (!preflight_active || detaching || (supplier_revoked && user != -2) ||
 	    r->generation != preflight.generation ||
 	    r->provider_generation != owner.generation)
 		ret = -ESTALE;
@@ -779,6 +816,7 @@ out:
 	for (i = 0; i < MT6797_RAIL_USERS; i++)
 		if (tables[i])
 			dev_pm_opp_put_opp_table(tables[i]);
+	provider_use_put();
 	return ret;
 }
 
@@ -1115,7 +1153,17 @@ static void detach(void *data)
 	struct attachment *a = data;
 
 	mutex_lock(&owner_lock);
-	/* Engine detach drains raw calls before provider devres can be freed. */
+	/* Cancel admission first. Existing users still own callable endpoints. */
+	detaching |= BIT(a->id);
+	preflight_invalidate();
+	mutex_unlock(&owner_lock);
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+	if (drain_observer)
+		complete(drain_observer);
+#endif
+	wait_event(provider_idle, !READ_ONCE(provider_uses));
+	mutex_lock(&owner_lock);
+	/* This action is registered after the raw resources it protects. */
 	mt6797_rail_detach(&owner, a->id);
 	attached &= ~BIT(a->id);
 	preflight_invalidate();
@@ -1150,6 +1198,7 @@ int mt6797_provider_attach(struct device *dev, enum mt6797_rail_id id,
 	if (ret >= 0)
 		ret = mt6797_rail_attach(&owner, id, &guarded);
 	if (!ret) {
+		detaching &= ~BIT(id);
 		attached |= BIT(id);
 		preflight_invalidate();
 	}
@@ -1259,6 +1308,29 @@ int mt6797_provider_unsubscribe(struct notifier_block *nb)
 EXPORT_SYMBOL_GPL(mt6797_provider_unsubscribe);
 
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+/* Pause after real lifetime admission, without an engine or registry lock. */
+int mt6797_preflight_test_hold_provider(u64 generation, struct completion *entered,
+		struct completion *resume)
+{
+	int ret = provider_use_get(generation);
+	int uv[MT6797_RAILS];
+
+	complete(entered);
+	if (ret)
+		return ret;
+	wait_for_completion(resume);
+	ret = mt6797_provider_sample(generation, uv);
+	provider_use_put();
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_hold_provider);
+
+void mt6797_preflight_test_drain_observer(struct completion *cancelled)
+{
+	drain_observer = cancelled;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_drain_observer);
+
 /* Focused framework fixture: replaces ONLY discovery, not measurement,
  * notification, generation checking or publication. Never enabled on Gemini.
  * The caller owns dynamic OPPs and clock references until stop returns.

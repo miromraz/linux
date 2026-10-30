@@ -119,6 +119,22 @@ struct dev_pm_opp_key {
 
 #if defined(CONFIG_PM_OPP)
 
+/* Immutable accepted requirements for a caller-owned, fixed configuration.
+ * Reads remain available. Conflicting writers return -EBUSY; acquisition
+ * during writer notification returns -EAGAIN. Neither operation waits.
+ * Membership is not frozen. Put outside driver locks (may notify REMOVE).
+ */
+struct dev_pm_opp_requirements;
+struct dev_pm_opp_requirement {
+	unsigned long rate, uv, uv_min, uv_max;
+};
+int dev_pm_opp_requirements_get(struct opp_table *table,
+		const unsigned long *rates, unsigned int count,
+		struct dev_pm_opp_requirements **snapshot);
+int dev_pm_opp_requirements_read(const struct dev_pm_opp_requirements *snapshot,
+		unsigned int index, struct dev_pm_opp_requirement *requirement);
+void dev_pm_opp_requirements_put(struct dev_pm_opp_requirements *snapshot);
+
 /* Bounded raw-hardware transaction. No OPP/framework calls while held.
  * Caller retains the table reference and releases on the acquiring task.
  */

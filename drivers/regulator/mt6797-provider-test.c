@@ -229,6 +229,8 @@ static void provider_invalid(struct kunit *test)
 }
 
 struct sample_task {
+	bool hold_use;
+	struct completion entered, resume;
 	u64 generation;
 	int result;
 	struct completion done;
@@ -239,7 +241,11 @@ static int sample_thread(void *data)
 	struct sample_task *task = data;
 	int uv[2];
 
-	task->result = mt6797_provider_sample(task->generation, uv);
+	if (task->hold_use)
+		task->result = mt6797_preflight_test_hold_provider(task->generation,
+				&task->entered, &task->resume);
+	else
+		task->result = mt6797_provider_sample(task->generation, uv);
 	complete_all(&task->done);
 	return 0;
 }
@@ -260,18 +266,22 @@ static int detach_thread(void *data)
 	return 0;
 }
 
-static void provider_inflight(struct kunit *test)
+static void provider_inflight_case(struct kunit *test, bool hold_use)
 {
 	struct provider_fixture f[2] = { { .uv = 1100000 }, { .uv = 1150000 } };
 	struct mt6797_rail_io io = { .read = fixture_read };
 	struct platform_device *dev[2] = {};
 	struct mt6797_provider_status status;
-	struct sample_task sample;
+	struct sample_task sample = { .hold_use = hold_use };
+	struct completion cancelled;
 	struct detach_task detach;
 	struct task_struct *reader = NULL, *remover = NULL;
 	int i, ret;
 
 	init_completion(&sample.done);
+	init_completion(&sample.entered);
+	init_completion(&sample.resume);
+	init_completion(&cancelled);
 	init_completion(&detach.started);
 	init_completion(&detach.done);
 	for (i = 0; i < 2; i++) {
@@ -292,19 +302,25 @@ static void provider_inflight(struct kunit *test)
 	}
 	mt6797_provider_status(&status);
 	sample.generation = status.engine.generation;
-	f[0].pause = true;
+	f[0].pause = !hold_use;
+	if (hold_use)
+		mt6797_preflight_test_drain_observer(&cancelled);
 	reader = kthread_run(sample_thread, &sample, "rail-read");
 	KUNIT_EXPECT_FALSE(test, IS_ERR(reader));
 	if (IS_ERR(reader))
 		goto out;
-	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&f[0].entered, HZ), 0UL);
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(hold_use ?
+				&sample.entered : &f[0].entered, HZ), 0UL);
 	detach.dev = dev[0];
 	remover = kthread_run(detach_thread, &detach, "rail-detach");
 	KUNIT_EXPECT_FALSE(test, IS_ERR(remover));
 	if (IS_ERR(remover))
 		goto out;
 	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&detach.started, HZ), 0UL);
+	if (hold_use)
+		KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&cancelled, HZ), 0UL);
 	KUNIT_EXPECT_FALSE(test, completion_done(&detach.done));
+	complete_all(&sample.resume);
 	complete(&f[0].resume);
 	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&sample.done, HZ), 0UL);
 	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&detach.done, HZ), 0UL);
@@ -313,6 +329,7 @@ static void provider_inflight(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, status.attached, BIT(MT6797_SRAM));
 	KUNIT_EXPECT_GT(test, status.engine.generation, sample.generation);
 out:
+	complete_all(&sample.resume);
 	complete_all(&f[0].resume);
 	if (!IS_ERR_OR_NULL(reader))
 		wait_for_completion(&sample.done);
@@ -320,10 +337,21 @@ out:
 		wait_for_completion(&detach.done);
 		dev[0] = NULL;
 	}
+	mt6797_preflight_test_drain_observer(NULL);
 	for (i = 0; i < 2; i++)
 		if (!IS_ERR_OR_NULL(dev[i]))
 			platform_device_unregister(dev[i]);
 	mt6797_preflight_test_flush();
+}
+
+static void provider_inflight(struct kunit *test)
+{
+	provider_inflight_case(test, false);
+}
+
+static void provider_transaction_drain(struct kunit *test)
+{
+	provider_inflight_case(test, true);
 }
 
 struct lifecycle_clock {
@@ -1232,6 +1260,116 @@ static int transition_veto(struct notifier_block *nb, unsigned long event,
 	return event == PRE_RATE_CHANGE ? NOTIFY_BAD : NOTIFY_OK;
 }
 
+struct reserved_clock_listener {
+	struct notifier_block nb;
+	struct device *dev;
+	struct kunit *test;
+	unsigned int events;
+};
+
+static int reserved_clock_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct reserved_clock_listener *l = container_of(nb, struct reserved_clock_listener, nb);
+	struct dev_pm_opp *opp;
+	unsigned long rate = 100;
+
+	l->events++;
+	opp = dev_pm_opp_find_freq_ceil(l->dev, &rate);
+	KUNIT_EXPECT_FALSE(l->test, IS_ERR(opp));
+	if (!IS_ERR(opp))
+		dev_pm_opp_put(opp);
+	KUNIT_EXPECT_EQ(l->test, dev_pm_opp_adjust_voltage(l->dev, 100,
+							 900000, 900000, 900000), -EBUSY);
+	KUNIT_EXPECT_EQ(l->test, dev_pm_opp_disable(l->dev, 100), -EBUSY);
+	return NOTIFY_OK;
+}
+
+static void reserved_clock_contract(struct kunit *test, struct clk_hw *mux,
+		struct clk_hw *pll, struct clk_hw *inter)
+{
+	struct platform_device *pdev;
+	struct opp_table *table;
+	struct dev_pm_opp_requirements *snapshot = NULL;
+	struct clk *owned[3] = {};
+	struct clk_hw *hw[] = { mux, pll, inter };
+	struct reserved_clock_listener listener = {
+		.nb.notifier_call = reserved_clock_event, .test = test,
+	};
+	unsigned long rate = 100;
+	int i, ret, claims = 0;
+	bool attempted;
+
+	pdev = platform_device_register_simple("reserved-clock-test", -1, NULL, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(pdev));
+	ret = dev_pm_opp_add(&pdev->dev, 100, 800000);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto device;
+	table = dev_pm_opp_get_opp_table(&pdev->dev);
+	if (IS_ERR(table)) {
+		KUNIT_FAIL(test, "missing OPP table");
+		goto opps;
+	}
+	ret = dev_pm_opp_requirements_get(table, &rate, 1, &snapshot);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto table;
+	for (i = 0; i < ARRAY_SIZE(owned); i++) {
+		owned[i] = clk_hw_get_clk(hw[i], "reserved-clock-owner");
+		KUNIT_EXPECT_FALSE(test, IS_ERR(owned[i]));
+		if (IS_ERR(owned[i]))
+			goto clocks;
+		ret = clk_rate_exclusive_get(owned[i]);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		if (ret)
+			goto clocks;
+		claims++;
+	}
+	listener.dev = &pdev->dev;
+	ret = clk_notifier_register(owned[0], &listener.nb);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto clocks;
+	KUNIT_EXPECT_EQ(test, clk_set_rate(pll->clk, 200), -EBUSY);
+	KUNIT_EXPECT_EQ(test, clk_set_parent(mux->clk, inter->clk), -EBUSY);
+	/* Mux ancestry still protects the PLL before parking. */
+	KUNIT_EXPECT_EQ(test, clk_round_rate(owned[1], 200), 100L);
+	KUNIT_EXPECT_EQ(test, clk_set_parent(owned[0], owned[2]), 0);
+	KUNIT_EXPECT_TRUE(test, clk_is_match(clk_get_parent(owned[0]), owned[2]));
+	KUNIT_EXPECT_EQ(test, clk_round_rate(owned[1], 200), 200L);
+	KUNIT_EXPECT_EQ(test, clk_set_rate(owned[1], 200), 0);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(owned[1]), 200UL);
+	KUNIT_EXPECT_EQ(test, clk_set_parent(owned[0], owned[1]), 0);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(owned[0]), 200UL);
+	KUNIT_EXPECT_GT(test, listener.events, 0U);
+	ret = clk_rate_exclusive_get(mux->clk);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (!ret) {
+		KUNIT_EXPECT_EQ(test, clk_set_parent_tracked(owned[0], owned[2],
+							  &attempted), -EBUSY);
+		KUNIT_EXPECT_FALSE(test, attempted);
+		clk_rate_exclusive_put(mux->clk);
+	}
+	KUNIT_EXPECT_EQ(test, clk_set_parent(owned[0], owned[2]), 0);
+	KUNIT_EXPECT_EQ(test, clk_set_rate(owned[1], 100), 0);
+	KUNIT_EXPECT_EQ(test, clk_set_parent(owned[0], owned[1]), 0);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(owned[0]), 100UL);
+	clk_notifier_unregister(owned[0], &listener.nb);
+clocks:
+	while (claims)
+		clk_rate_exclusive_put(owned[--claims]);
+	for (i = 0; i < ARRAY_SIZE(owned); i++)
+		if (!IS_ERR_OR_NULL(owned[i]))
+			clk_put(owned[i]);
+	dev_pm_opp_requirements_put(snapshot);
+table:
+	dev_pm_opp_put_opp_table(table);
+opps:
+	dev_pm_opp_remove_all_dynamic(&pdev->dev);
+device:
+	platform_device_unregister(pdev);
+}
+
 static void transition_clock_contract(struct kunit *test)
 {
 	struct lifecycle_clock *pll, *inter;
@@ -1306,9 +1444,102 @@ static void transition_clock_contract(struct kunit *test)
 	mux->fail_at = 0;
 	KUNIT_EXPECT_EQ(test, mtk_dvfs_switch_clock(output, source, temporary, 100), 0);
 	KUNIT_EXPECT_EQ(test, clk_get_rate(output), 100UL);
+	reserved_clock_contract(test, &mux->hw, &pll->hw, &inter->hw);
+}
+
+struct requirements_listener {
+	struct notifier_block nb;
+	struct opp_table *table;
+	struct kunit *test;
+	unsigned int events;
+};
+
+static int requirements_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	struct requirements_listener *l = container_of(nb, struct requirements_listener, nb);
+	struct dev_pm_opp_requirements *snapshot = NULL;
+	unsigned long rate = 100;
+
+	if (event != OPP_EVENT_ADJUST_VOLTAGE && event != OPP_EVENT_DISABLE)
+		return NOTIFY_OK;
+	l->events++;
+	/* Committed writer is still notifying: never wait on driver reg_lock. */
+	KUNIT_EXPECT_EQ(l->test, dev_pm_opp_requirements_get(l->table, &rate, 1,
+							 &snapshot), -EAGAIN);
+	dev_pm_opp_requirements_put(snapshot);
+	return NOTIFY_OK;
+}
+
+static void requirements_reservation(struct kunit *test)
+{
+	struct platform_device *pdev;
+	struct opp_table *table;
+	struct dev_pm_opp_requirements *snapshot = NULL, *second = NULL;
+	struct dev_pm_opp_requirement value;
+	struct dev_pm_opp *opp;
+	unsigned long rates[] = { 100, 150, 200 }, lookup = 150;
+	struct requirements_listener listener = {
+		.nb.notifier_call = requirements_event, .test = test,
+	};
+	int ret;
+
+	pdev = platform_device_register_simple("requirements-test", -1, NULL, 0);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(pdev));
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, unregister_device, pdev), 0);
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test, remove_opps, &pdev->dev), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&pdev->dev, 100, 800000), 0);
+	KUNIT_ASSERT_EQ(test, dev_pm_opp_add(&pdev->dev, 200, 900000), 0);
+	table = dev_pm_opp_get_opp_table(&pdev->dev);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(table));
+	listener.table = table;
+	ret = dev_pm_opp_register_notifier(&pdev->dev, &listener.nb);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto put_table;
+	ret = dev_pm_opp_requirements_get(table, rates, ARRAY_SIZE(rates), &snapshot);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto unregister;
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_requirements_read(snapshot, 1, &value), 0);
+	KUNIT_EXPECT_EQ(test, value.rate, 200UL);
+	KUNIT_EXPECT_EQ(test, value.uv, 900000UL);
+	/* A lookup on the reserving task must complete, without table-lock recursion. */
+	opp = dev_pm_opp_find_freq_ceil(&pdev->dev, &lookup);
+	KUNIT_EXPECT_FALSE(test, IS_ERR(opp));
+	if (!IS_ERR(opp))
+		dev_pm_opp_put(opp);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_adjust_voltage(&pdev->dev, 100,
+						      850000, 840000, 860000), -EBUSY);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_disable(&pdev->dev, 100), -EBUSY);
+	KUNIT_EXPECT_EQ(test, listener.events, 0U);
+	dev_pm_opp_requirements_put(snapshot);
+	snapshot = NULL;
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_adjust_voltage(&pdev->dev, 100,
+						      850000, 840000, 860000), 0);
+	KUNIT_EXPECT_EQ(test, listener.events, 1U);
+	ret = dev_pm_opp_requirements_get(table, rates, ARRAY_SIZE(rates), &snapshot);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto unregister;
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_requirements_read(snapshot, 0, &value), 0);
+	KUNIT_EXPECT_EQ(test, value.uv, 850000UL);
+	KUNIT_EXPECT_EQ(test, value.uv_min, 840000UL);
+	KUNIT_EXPECT_EQ(test, value.uv_max, 860000UL);
+	/* Logical removal cannot free accepted entries or permit new selection. */
+	dev_pm_opp_remove_all_dynamic(&pdev->dev);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_requirements_read(snapshot, 0, &value), 0);
+	KUNIT_EXPECT_EQ(test, value.uv, 850000UL);
+	KUNIT_EXPECT_EQ(test, dev_pm_opp_requirements_get(table, rates, 1, &second), -ERANGE);
+	dev_pm_opp_requirements_put(second);
+	dev_pm_opp_requirements_put(snapshot);
+unregister:
+	dev_pm_opp_unregister_notifier(&pdev->dev, &listener.nb);
+put_table:
+	dev_pm_opp_put_opp_table(table);
 }
 
 static struct kunit_case provider_cases[] = {
+	KUNIT_CASE(requirements_reservation),
 	KUNIT_CASE(transition_clock_contract),
 	KUNIT_CASE(direct_cpu_cci_lifetime),
 	KUNIT_CASE(direct_cpu_first_vote_error),
@@ -1324,6 +1555,7 @@ static struct kunit_case provider_cases[] = {
 	KUNIT_CASE(provider_orders),
 	KUNIT_CASE(provider_invalid),
 	KUNIT_CASE(provider_inflight),
+	KUNIT_CASE(provider_transaction_drain),
 	KUNIT_CASE(production_ownership),
 	KUNIT_CASE(ownership_provider_generation),
 	KUNIT_CASE(ownership_first_vote_failure),

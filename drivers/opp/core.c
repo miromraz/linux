@@ -2896,6 +2896,9 @@ static int _opp_set_availability(struct device *dev, unsigned long freq,
 				if (opp->available == availability_req)
 					return 0;
 
+				if (opp_table->requirements_users)
+					return -EBUSY;
+				opp_table->requirements_writers++;
 				opp->available = availability_req;
 				break;
 			}
@@ -2912,6 +2915,9 @@ static int _opp_set_availability(struct device *dev, unsigned long freq,
 	else
 		blocking_notifier_call_chain(&opp_table->head,
 					     OPP_EVENT_DISABLE, opp);
+
+	scoped_guard(mutex, &opp_table->lock)
+		opp_table->requirements_writers--;
 
 	return 0;
 }
@@ -2959,6 +2965,9 @@ int dev_pm_opp_adjust_voltage(struct device *dev, unsigned long freq,
 				if (opp->supplies->u_volt == u_volt)
 					return 0;
 
+				if (opp_table->requirements_users)
+					return -EBUSY;
+				opp_table->requirements_writers++;
 				opp->supplies->u_volt = u_volt;
 				opp->supplies->u_volt_min = u_volt_min;
 				opp->supplies->u_volt_max = u_volt_max;
@@ -2974,6 +2983,9 @@ int dev_pm_opp_adjust_voltage(struct device *dev, unsigned long freq,
 	/* Notify the voltage change of the OPP */
 	blocking_notifier_call_chain(&opp_table->head, OPP_EVENT_ADJUST_VOLTAGE,
 				     opp);
+
+	scoped_guard(mutex, &opp_table->lock)
+		opp_table->requirements_writers--;
 
 	return 0;
 }
@@ -3172,3 +3184,109 @@ void dev_pm_opp_snapshot_unlock(struct opp_table *table)
 	mutex_unlock(&table->lock);
 }
 EXPORT_SYMBOL_GPL(dev_pm_opp_snapshot_unlock);
+
+struct opp_requirement_entry {
+	struct dev_pm_opp *opp;
+	struct dev_pm_opp_requirement value;
+};
+
+struct dev_pm_opp_requirements {
+	struct opp_table *table;
+	unsigned int count;
+	struct opp_requirement_entry entries[];
+};
+
+int dev_pm_opp_requirements_get(struct opp_table *table,
+		const unsigned long *rates, unsigned int count,
+		struct dev_pm_opp_requirements **snapshot)
+{
+	struct dev_pm_opp_requirements *s;
+	struct dev_pm_opp *opp, *ceil;
+	unsigned int i;
+	bool lower;
+	int ret = 0;
+
+	if (!table || !rates || !count || !snapshot)
+		return -EINVAL;
+	*snapshot = NULL;
+	s = kzalloc(struct_size(s, entries, count), GFP_KERNEL);
+	if (!s)
+		return -ENOMEM;
+	if (!mutex_trylock(&table->lock)) {
+		kfree(s);
+		return -EAGAIN;
+	}
+	if (!assert_single_clk(table, 0) || table->regulator_count != 1 ||
+	    table->required_opp_count || lazy_linking_pending(table) ||
+	    table->path_count || table->is_genpd) {
+		ret = -EOPNOTSUPP;
+		goto unlock;
+	}
+	if (table->requirements_writers) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
+	for (i = 0; i < count; i++) {
+		ceil = NULL;
+		lower = false;
+		list_for_each_entry(opp, &table->opp_list, node) {
+			if (!opp->available || opp->removed)
+				continue;
+			if (opp->rates[0] <= rates[i])
+				lower = true;
+			if (opp->rates[0] >= rates[i] && !ceil)
+				ceil = opp;
+		}
+		if (!rates[i] || !lower || !ceil || !ceil->supplies->u_volt ||
+		    ceil->supplies->u_volt > INT_MAX) {
+			ret = -ERANGE;
+			goto unlock;
+		}
+		s->entries[i].opp = dev_pm_opp_get(ceil);
+		s->entries[i].value = (struct dev_pm_opp_requirement) {
+			.rate = ceil->rates[0],
+			.uv = ceil->supplies->u_volt,
+			.uv_min = ceil->supplies->u_volt_min,
+			.uv_max = ceil->supplies->u_volt_max,
+		};
+		s->count++;
+	}
+	s->table = dev_pm_opp_get_opp_table_ref(table);
+	table->requirements_users++;
+	*snapshot = s;
+unlock:
+	mutex_unlock(&table->lock);
+	if (ret) {
+		while (s->count)
+			dev_pm_opp_put(s->entries[--s->count].opp);
+		kfree(s);
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dev_pm_opp_requirements_get);
+
+int dev_pm_opp_requirements_read(const struct dev_pm_opp_requirements *snapshot,
+		unsigned int index, struct dev_pm_opp_requirement *requirement)
+{
+	if (!snapshot || !requirement || index >= snapshot->count)
+		return -EINVAL;
+	*requirement = snapshot->entries[index].value;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dev_pm_opp_requirements_read);
+
+void dev_pm_opp_requirements_put(struct dev_pm_opp_requirements *snapshot)
+{
+	struct opp_table *table;
+
+	if (!snapshot)
+		return;
+	table = snapshot->table;
+	scoped_guard(mutex, &table->lock)
+		table->requirements_users--;
+	while (snapshot->count)
+		dev_pm_opp_put(snapshot->entries[--snapshot->count].opp);
+	dev_pm_opp_put_opp_table(table);
+	kfree(snapshot);
+}
+EXPORT_SYMBOL_GPL(dev_pm_opp_requirements_put);

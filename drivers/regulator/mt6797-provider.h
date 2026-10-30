@@ -50,6 +50,10 @@ int mt6797_provider_sample(u64 generation, int uv[MT6797_RAILS]);
 void mt6797_provider_status(struct mt6797_provider_status *status);
 #if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
 struct clk;
+struct completion;
+int mt6797_preflight_test_hold_provider(u64 generation, struct completion *entered,
+		struct completion *resume);
+void mt6797_preflight_test_drain_observer(struct completion *cancelled);
 int mt6797_preflight_test_handover(struct device **dev, struct clk *clk,
 		struct mt6797_preflight_result *result, unsigned int user,
 		int request, bool returning);

@@ -211,6 +211,8 @@ struct opp_table {
 	struct list_head opp_list;
 	struct kref kref;
 	struct mutex lock;
+	/* Protected by lock; writers remain active through notification. */
+	unsigned int requirements_users, requirements_writers;
 
 	struct device_node *np;
 	unsigned long clock_latency_ns_max;

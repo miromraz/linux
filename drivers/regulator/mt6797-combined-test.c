@@ -14,6 +14,7 @@
 #include <linux/nvmem-provider.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/sched/task.h>
 #include <linux/pm_opp.h>
 #include <linux/regmap.h>
 #include <linux/regulator/mt6797.h>
@@ -79,6 +80,8 @@ struct combined {
 	bool observer_pause;
 	struct notifier_block vote_nb;
 	bool detach_at_transfer;
+	struct completion transfer_cancelled;
+	struct task_struct *transfer_detach;
 	struct combined_clock clocks[6];
 	struct mutex observer_lock;
 	struct kunit *test;
@@ -391,6 +394,15 @@ static void combined_transaction_matrix(struct kunit *test, struct combined *f)
 	}
 }
 
+static int transfer_detach_thread(void *data)
+{
+	struct combined *f = data;
+
+	devres_release_group(&f->rail[0]->dev, f->group[0]);
+	f->group[0] = NULL;
+	return 0;
+}
+
 static void transfer_fault(void *data, unsigned int user, bool returning, int phase)
 {
 	struct combined *f = data;
@@ -398,8 +410,17 @@ static void transfer_fault(void *data, unsigned int user, bool returning, int ph
 	if (!returning || !phase)
 		return;
 	if (f->detach_at_transfer && !user) {
-		devres_release_group(&f->rail[0]->dev, f->group[0]);
-		f->group[0] = NULL;
+		/* Supplier teardown must run outside its own transaction stack. */
+		init_completion(&f->transfer_cancelled);
+		mt6797_preflight_test_drain_observer(&f->transfer_cancelled);
+		f->transfer_detach = kthread_run(transfer_detach_thread, f, "transfer-detach");
+		KUNIT_EXPECT_FALSE(f->test, IS_ERR(f->transfer_detach));
+		if (!IS_ERR(f->transfer_detach)) {
+			/* Active use prevents exit until this hook returns. */
+			get_task_struct(f->transfer_detach);
+			KUNIT_EXPECT_NE(f->test,
+				wait_for_completion_timeout(&f->transfer_cancelled, 5 * HZ), 0UL);
+		}
 	} else if (!f->detach_at_transfer && user == 1) {
 		/* Real adapter read rejects the invalid enable bank. */
 		f->sram[0] = 0;
@@ -411,6 +432,12 @@ static void transfer_fault_cleanup(void *data)
 	struct combined *f = data;
 
 	mt6797_test_transfer_hook(NULL, NULL);
+	if (!IS_ERR_OR_NULL(f->transfer_detach)) {
+		kthread_stop(f->transfer_detach);
+		put_task_struct(f->transfer_detach);
+	}
+	f->transfer_detach = NULL;
+	mt6797_preflight_test_drain_observer(NULL);
 	f->sram[0] = 255;
 }
 
