@@ -11,7 +11,13 @@
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/regulator/mt6797.h>
+#include <linux/regulator/consumer.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/machine.h>
 #include "mt6797-provider.h"
+#if IS_ENABLED(CONFIG_REGULATOR_MT6797_PROVIDER_KUNIT_TEST)
+#include "internal.h"
+#endif
 
 static DEFINE_MUTEX(owner_lock);
 /* Serializes reference acquisition/replacement, never taken by notifiers. */
@@ -376,6 +382,232 @@ int mt6797_preflight_ceiling(struct device *dev, unsigned long rate,
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_ceiling);
 
+/* Private logical supplies share one physical writer. Regulator core owns
+ * the guard and consumer requests; the engine arbitrates the three domains.
+ * No devres object or consumer driver callback is retained here.
+ */
+struct protected_supply {
+	struct regulator_desc desc;
+	struct regulator_dev *rdev;
+	struct regulator *guard, *vote;
+	int guard_uv, vote_uv;
+	unsigned int users;
+};
+static struct protected_supply protected[MT6797_RAIL_USERS];
+static struct device *lease_device;
+static struct regulator_dev *sram_rdev;
+static struct regulator *sram_guard;
+
+static int lease_sram_read(struct regulator_dev *rdev)
+{
+	int uv[MT6797_RAILS], ret;
+	u64 generation;
+
+	mutex_lock(&owner_lock);
+	generation = owner.generation;
+	mutex_unlock(&owner_lock);
+	ret = mt6797_provider_sample(generation, uv);
+	return ret ?: uv[MT6797_SRAM];
+}
+
+static const struct regulator_ops lease_sram_ops = {
+	.get_voltage = lease_sram_read,
+};
+static const struct regulator_desc lease_sram_desc = {
+	.name = "mt6797-sram-protection", .type = REGULATOR_VOLTAGE,
+	.owner = THIS_MODULE, .ops = &lease_sram_ops,
+	.n_voltages = 1, .fixed_uV = 1200000,
+};
+static u64 next_cookie;
+struct consumer_lease {
+	struct list_head node;
+	u64 cookie;
+	unsigned int user;
+};
+static LIST_HEAD(consumer_leases);
+static struct task_struct *lease_task;
+/* Valid under transaction_lock; each setter reserves the framework afresh. */
+static struct mt6797_preflight_result *lease_snapshot;
+static bool lease_setting;
+static int preflight_transaction(struct preflight_user *users,
+				 struct mt6797_preflight_result *r,
+				 int user, struct device *consumer,
+				 int request, bool returning);
+
+static int lease_write(struct regulator_dev *rdev, int min_uv, int max_uv,
+		       unsigned int *selector)
+{
+	struct protected_supply *s = rdev_get_drvdata(rdev);
+	int ret;
+
+	if (current != lease_task || !lease_snapshot || lease_setting)
+		return -ESTALE;
+	/* Regulator notifications run without clock/table reservations. Take a
+	 * fresh snapshot inside the setter, after PRE notification, and release
+	 * it before the core delivers POST or ABORT notification.
+	 */
+	lease_setting = true;
+	ret = preflight_transaction(pf_users, lease_snapshot, s - protected,
+				    NULL, max(min_uv, 1040000), false);
+	lease_setting = false;
+	return ret;
+}
+
+static int lease_read(struct regulator_dev *rdev)
+{
+	int uv[MT6797_RAILS], ret;
+	u64 generation;
+
+	mutex_lock(&owner_lock);
+	generation = owner.generation;
+	mutex_unlock(&owner_lock);
+	ret = mt6797_provider_sample(generation, uv);
+	return ret ?: uv[MT6797_PROC];
+}
+
+static const struct regulator_ops lease_ops = {
+	.set_voltage = lease_write,
+	.get_voltage = lease_read,
+};
+
+static int lease_supplies(void)
+{
+	static const char * const names[] = {
+		"mt6797-cpu0-protection", "mt6797-cpu4-protection",
+		"mt6797-cci-protection",
+	};
+	struct regulator_init_data init = {
+		.constraints = {
+			.min_uV = 1040000, .max_uV = 1200000,
+			.valid_ops_mask = REGULATOR_CHANGE_VOLTAGE,
+		},
+	};
+	int i, ret, uv[MT6797_RAILS];
+
+	if (!lease_device) {
+		lease_device = root_device_register("mt6797-protection");
+		if (IS_ERR(lease_device)) {
+			ret = PTR_ERR(lease_device);
+			lease_device = NULL;
+			return ret;
+		}
+		/* Live clocks outlast consumer unbind. Their guards must also
+		 * outlast module teardown, including retained-error paths.
+		 */
+		__module_get(THIS_MODULE);
+	}
+	ret = mt6797_provider_sample(lease_snapshot->provider_generation, uv);
+	if (ret)
+		return ret;
+	if (!sram_rdev) {
+		struct regulator_init_data fixed = {
+			.constraints = { .min_uV = 1200000, .max_uV = 1200000 },
+		};
+		struct regulator_config config = {
+			.dev = lease_device, .init_data = &fixed,
+		};
+
+		sram_rdev = regulator_register(lease_device, &lease_sram_desc, &config);
+		if (IS_ERR(sram_rdev)) {
+			ret = PTR_ERR(sram_rdev);
+			sram_rdev = NULL;
+			return ret;
+		}
+	}
+	if (!sram_guard) {
+		sram_guard = regulator_get(NULL, lease_sram_desc.name);
+		if (IS_ERR(sram_guard)) {
+			ret = PTR_ERR(sram_guard);
+			sram_guard = NULL;
+			return ret;
+		}
+	}
+	ret = regulator_set_voltage(sram_guard, 1200000, 1200000);
+	if (ret)
+		return ret;
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		struct protected_supply *s = &protected[i];
+		struct regulator_config config = {
+			.dev = lease_device, .init_data = &init, .driver_data = s,
+		};
+
+		if (!s->rdev) {
+			s->desc.name = names[i];
+			s->desc.type = REGULATOR_VOLTAGE;
+			s->desc.owner = THIS_MODULE;
+			s->desc.ops = &lease_ops;
+			s->rdev = regulator_register(lease_device, &s->desc, &config);
+			if (IS_ERR(s->rdev)) {
+				ret = PTR_ERR(s->rdev);
+				s->rdev = NULL;
+				return ret;
+			}
+		}
+		if (!s->guard) {
+			s->guard = regulator_get(NULL, names[i]);
+			if (IS_ERR(s->guard)) {
+				ret = PTR_ERR(s->guard);
+				s->guard = NULL;
+				return ret;
+			}
+		}
+		if (!s->guard_uv && !s->vote) {
+			/* Install every boot request without lowering boot voltage. */
+			ret = regulator_set_voltage(s->guard, uv[0], 1200000);
+			if (ret)
+				return ret;
+			s->guard_uv = uv[0];
+		}
+	}
+	return 0;
+}
+
+static int lease_transfer(unsigned int user, int request, bool returning)
+{
+	struct protected_supply *s = &protected[user];
+	struct regulator *replacement;
+	int ret;
+
+	if (returning) {
+		ret = regulator_set_voltage(s->guard, max(request, s->vote_uv), 1200000);
+		if (ret)
+			return ret;
+		s->guard_uv = max(request, s->vote_uv);
+		/* The consumer vote still exists while replacement is verified. */
+	} else {
+		if (s->vote)
+			return -EBUSY;
+		replacement = regulator_get(NULL, s->desc.name);
+		if (IS_ERR(replacement))
+			return PTR_ERR(replacement);
+		ret = regulator_set_voltage(replacement, request, 1200000);
+		if (ret) {
+			regulator_put(replacement);
+			return ret;
+		}
+		s->vote = replacement;
+		s->vote_uv = request;
+	}
+	/* An unchanged core request may skip the setter. Revalidate after all
+	 * notifier delivery before discarding any existing ownership.
+	 */
+	ret = lease_write(s->rdev, max(s->guard_uv, s->vote_uv), 1200000, NULL);
+	if (ret)
+		return ret;
+	if (returning) {
+		regulator_put(s->vote);
+		s->vote = NULL;
+		s->vote_uv = 0;
+	} else {
+		ret = regulator_set_voltage(s->guard, 0, 1200000);
+		if (ret)
+			return ret;
+		s->guard_uv = 0;
+		return lease_write(s->rdev, s->vote_uv, 1200000, NULL);
+	}
+	return 0;
+}
+
 /* No rounding, programming, clock enable, regulator handles or admission. */
 static int preflight_measure(struct mt6797_preflight_result *r)
 {
@@ -440,12 +672,32 @@ static int preflight_transaction(struct preflight_user *users,
 		locked++;
 		floor[i] = max(r->uv[i][0], r->uv[i][1]);
 	}
+	if (user >= 0 && users == pf_users && !lease_setting) {
+		while (locked)
+			dev_pm_opp_snapshot_unlock(tables[--locked]);
+		while (clocks) {
+			clocks--;
+			clk_rate_exclusive_put(users[clocks / 2].clk[clocks % 2]);
+		}
+		lease_task = current;
+		lease_snapshot = r;
+		ret = lease_supplies();
+		if (!ret)
+			ret = lease_transfer(user, returning ? max(floor[user], 1040000) :
+					     request, returning);
+		lease_task = NULL;
+		lease_snapshot = NULL;
+		goto out;
+	}
 	mutex_lock(&owner_lock);
 	if (!preflight_active || supplier_revoked || r->generation != preflight.generation ||
 	    r->provider_generation != owner.generation)
 		ret = -ESTALE;
 	else if (user < 0)
 		ret = mt6797_rail_prepare(&owner, r->provider_generation, floor);
+	else if (users == pf_users && lease_setting)
+		ret = mt6797_rail_replace(&owner, r->provider_generation, user,
+					  request, floor);
 	else if (consumer_owner[user] && consumer_owner[user] != consumer)
 		ret = -EBUSY;
 	else if (returning && !consumer_owner[user])
@@ -480,22 +732,26 @@ static int preflight_convert(struct preflight_user *users,
 	return preflight_transaction(users, r, -1, NULL, 0, false);
 }
 
-/* The device reference belongs to the registry until successful return. A
- * failed bind may discard its local state without destroying this protection.
+/* Cookies distinguish independent local lifetimes, including same-device ABA.
+ * The registry owns votes even when the last local release cannot transfer.
  */
-static int consumer_handover(struct device *dev, unsigned int user,
-			    bool returning)
+int mt6797_consumer_acquire(struct device *dev, unsigned int user, u64 *cookie)
 {
 	struct mt6797_preflight_result result;
-	bool owned;
+	struct protected_supply *s;
+	struct consumer_lease *lease;
 	int request, ret;
 
-	if (!dev || user >= MT6797_RAIL_USERS)
+	if (!dev || !cookie || user >= MT6797_RAIL_USERS)
 		return -EINVAL;
+	*cookie = 0;
+	lease = kzalloc_obj(*lease);
+	if (!lease)
+		return -ENOMEM;
 	mutex_lock(&transaction_lock);
+	s = &protected[user];
 	mutex_lock(&owner_lock);
 	result = preflight;
-	owned = consumer_owner[user] == dev;
 	ret = !preflight_active || supplier_revoked ? -EPROBE_DEFER : result.error;
 	mutex_unlock(&owner_lock);
 	if (ret)
@@ -504,32 +760,80 @@ static int consumer_handover(struct device *dev, unsigned int user,
 		ret = -EINVAL;
 		goto out;
 	}
+	if (s->users)
+		goto acquired;
+	if (s->vote) {
+		ret = -EBUSY;
+		goto out;
+	}
 	request = max_t(unsigned long, 1040000,
 			max(result.uv[user][0], result.uv[user][1]));
-	if (!returning && !owned)
-		get_device(dev);
-	ret = preflight_transaction(pf_users, &result, user, dev, request, returning);
-	if ((!returning && !owned && ret) || (returning && !ret))
+	ret = preflight_transaction(pf_users, &result, user, dev, request, false);
+	if (s->vote) {
+		mutex_lock(&owner_lock);
+		consumer_owner[user] = get_device(dev);
+		mutex_unlock(&owner_lock);
+	}
+	if (ret)
+		goto out;
+acquired:
+	lease->cookie = ++next_cookie;
+	lease->user = user;
+	list_add(&lease->node, &consumer_leases);
+	s->users++;
+	*cookie = lease->cookie;
+	lease = NULL;
+out:
+	mutex_unlock(&transaction_lock);
+	kfree(lease);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_consumer_acquire);
+
+int mt6797_consumer_release(unsigned int user, u64 cookie)
+{
+	struct mt6797_preflight_result result;
+	struct protected_supply *s;
+	struct device *dev;
+	struct consumer_lease *lease, *found = NULL;
+	int ret = 0;
+
+	if (user >= MT6797_RAIL_USERS || !cookie)
+		return -EINVAL;
+	mutex_lock(&transaction_lock);
+	s = &protected[user];
+	list_for_each_entry(lease, &consumer_leases, node)
+		if (lease->user == user && lease->cookie == cookie) {
+			found = lease;
+			break;
+		}
+	if (!found) {
+		ret = -ESTALE;
+		goto out;
+	}
+	list_del(&found->node);
+	kfree(found);
+	if (--s->users)
+		goto out;
+	mutex_lock(&owner_lock);
+	result = preflight;
+	dev = consumer_owner[user];
+	mutex_unlock(&owner_lock);
+	ret = preflight_transaction(pf_users, &result, user, dev, 0, true);
+	/* A failed physical reconciliation may already have installed a guard.
+	 * Keep identity and resources until the whole transaction succeeds.
+	 */
+	if (!ret) {
+		mutex_lock(&owner_lock);
+		consumer_owner[user] = NULL;
+		mutex_unlock(&owner_lock);
 		put_device(dev);
+	}
 out:
 	mutex_unlock(&transaction_lock);
 	return ret;
 }
-
-int mt6797_consumer_bind_gate(struct device *dev, unsigned int user)
-{
-	int ret;
-
-	ret = consumer_handover(dev, user, false);
-	if (ret)
-		return ret;
-	/* Phase3 rollback/accounting/thermal contracts are not admitted. Exercise
-	 * balanced bind unwind, retaining the owner if secure return fails.
-	 */
-	ret = consumer_handover(dev, user, true);
-	return ret ?: -EAGAIN;
-}
-EXPORT_SYMBOL_GPL(mt6797_consumer_bind_gate);
+EXPORT_SYMBOL_GPL(mt6797_consumer_release);
 
 static void preflight_work(struct work_struct *work)
 {
@@ -641,6 +945,11 @@ static int preflight_nvmem_event(struct notifier_block *nb,
 static int preflight_supplier_event(struct notifier_block *nb,
 				    unsigned long event, void *data)
 {
+	struct device *dev = data;
+
+	if (event == BUS_NOTIFY_UNBIND_DRIVER && dev->of_node &&
+	    of_device_is_compatible(dev->of_node, "mediatek,mt6797-cci"))
+		return NOTIFY_DONE;
 	if (!preflight_bus_relevant(data))
 		return NOTIFY_DONE;
 	mutex_lock(&owner_lock);
@@ -865,18 +1174,62 @@ int mt6797_preflight_test_handover(struct device **dev, struct clk *clk,
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_handover);
 
-int mt6797_preflight_test_start(struct device *dev, struct clk *clk)
+int mt6797_preflight_test_regulator_notifier(unsigned int user,
+					    struct notifier_block *nb, bool add)
+{
+	int ret;
+
+	if (user >= MT6797_RAIL_USERS || !fixture_active)
+		return -EINVAL;
+	mutex_lock(&transaction_lock);
+	if (!protected[user].guard)
+		ret = -ENOENT;
+	else if (add)
+		ret = regulator_register_notifier(protected[user].guard, nb);
+	else
+		ret = regulator_unregister_notifier(protected[user].guard, nb);
+	mutex_unlock(&transaction_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_regulator_notifier);
+
+/* Observe regulator-core requests, not the coordinator's cached floors. */
+int mt6797_preflight_test_requests(unsigned int user, int *guard, int *vote)
+{
+	struct protected_supply *s;
+	int count;
+
+	if (user >= MT6797_RAIL_USERS || !fixture_active)
+		return -EINVAL;
+	mutex_lock(&transaction_lock);
+	s = &protected[user];
+	*guard = s->guard ? s->guard->voltage[PM_SUSPEND_ON].min_uV : 0;
+	*vote = s->vote ? s->vote->voltage[PM_SUSPEND_ON].min_uV : 0;
+	count = !!s->guard + !!s->vote;
+	mutex_unlock(&transaction_lock);
+	return count;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_requests);
+
+int mt6797_preflight_test_start_users(struct device **dev, struct clk *clk)
 {
 	int i, j, ret;
 
 	if (of_machine_is_compatible("planet,gemini-pda"))
 		return -EBUSY;
+	/* A new isolated fixture has no live clocks or retained raw endpoints. */
+	mutex_lock(&owner_lock);
+	if (!attached && !preflight_active) {
+		memset(owner.floor, 0, sizeof(owner.floor));
+		owner.fault = false;
+	}
+	mutex_unlock(&owner_lock);
 	for (i = 0; i < MT6797_RAIL_USERS; i++) {
 		struct preflight_user *u = &pf_users[i];
 
-		u->dev = dev;
+		u->dev = dev[i];
 		u->opp_nb.notifier_call = preflight_opp_event;
-		ret = dev_pm_opp_register_notifier(dev, &u->opp_nb);
+		ret = dev_pm_opp_register_notifier(dev[i], &u->opp_nb);
 		if (ret)
 			goto fail;
 		u->opp_notify = true;
@@ -898,6 +1251,14 @@ int mt6797_preflight_test_start(struct device *dev, struct clk *clk)
 fail:
 	mt6797_preflight_test_stop();
 	return ret;
+}
+EXPORT_SYMBOL_GPL(mt6797_preflight_test_start_users);
+
+int mt6797_preflight_test_start(struct device *dev, struct clk *clk)
+{
+	struct device *users[] = { dev, dev, dev };
+
+	return mt6797_preflight_test_start_users(users, clk);
 }
 EXPORT_SYMBOL_GPL(mt6797_preflight_test_start);
 
@@ -933,10 +1294,44 @@ void mt6797_preflight_test_stop(void)
 			dev_pm_opp_unregister_notifier(u->dev, &u->opp_nb);
 		memset(u, 0, sizeof(*u));
 	}
+	mutex_lock(&transaction_lock);
+	for (i = 0; i < MT6797_RAIL_USERS; i++) {
+		struct protected_supply *s = &protected[i];
+		struct device *dev;
+
+		if (!s->rdev)
+			continue;
+		regulator_put(s->vote);
+		regulator_put(s->guard);
+		regulator_unregister(s->rdev);
+		mutex_lock(&owner_lock);
+		dev = consumer_owner[i];
+		consumer_owner[i] = NULL;
+		mutex_unlock(&owner_lock);
+		put_device(dev);
+		memset(s, 0, sizeof(*s));
+	}
+	regulator_put(sram_guard);
+	sram_guard = NULL;
+	if (sram_rdev)
+		regulator_unregister(sram_rdev);
+	sram_rdev = NULL;
+	if (lease_device) {
+		root_device_unregister(lease_device);
+		lease_device = NULL;
+		module_put(THIS_MODULE);
+	}
+	while (!list_empty(&consumer_leases)) {
+		struct consumer_lease *lease;
+
+		lease = list_first_entry(&consumer_leases, struct consumer_lease, node);
+		list_del(&lease->node);
+		kfree(lease);
+	}
 	mutex_lock(&owner_lock);
-	/* Fixture transactions borrow devices; production retains references. */
 	memset(consumer_owner, 0, sizeof(consumer_owner));
 	mutex_unlock(&owner_lock);
+	mutex_unlock(&transaction_lock);
 	fixture_active = false;
 	flush_work(&notify_job);
 }

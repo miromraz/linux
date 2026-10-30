@@ -23,6 +23,7 @@ struct mtk_ccifreq_platform_data {
 };
 
 struct mtk_ccifreq_drv {
+	u64 rail_cookie;
 	struct device *dev;
 	struct devfreq *devfreq;
 	struct regulator *proc_reg;
@@ -307,6 +308,12 @@ static struct devfreq_dev_profile mtk_ccifreq_profile = {
 	.target = mtk_ccifreq_target,
 };
 
+static void mtk_ccifreq_release_protection(struct mtk_ccifreq_drv *drv)
+{
+	mt6797_consumer_release(2, drv->rail_cookie);
+	drv->rail_cookie = 0;
+}
+
 static int mtk_ccifreq_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -316,15 +323,19 @@ static int mtk_ccifreq_probe(struct platform_device *pdev)
 	unsigned long rate, opp_volt;
 	int ret;
 
-	/* Handover and secure unwind precede the still-closed Phase3 gate. */
-	if (of_machine_is_compatible("planet,gemini-pda"))
-		return mt6797_consumer_bind_gate(dev, 2);
-
 	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)
 		return -ENOMEM;
 
 	drv->dev = dev;
+	if (of_machine_is_compatible("planet,gemini-pda")) {
+		ret = mt6797_consumer_acquire(dev, 2, &drv->rail_cookie);
+		if (ret)
+			return ret;
+		/* Phase3 remains closed. Use the normal protected release boundary. */
+		mtk_ccifreq_release_protection(drv);
+		return -EAGAIN;
+	}
 	drv->soc_data = (const struct mtk_ccifreq_platform_data *)
 				of_device_get_match_data(&pdev->dev);
 	mutex_init(&drv->reg_lock);
@@ -473,6 +484,10 @@ static void mtk_ccifreq_remove(struct platform_device *pdev)
 	struct mtk_ccifreq_drv *drv;
 
 	drv = platform_get_drvdata(pdev);
+	if (drv->rail_cookie) {
+		mtk_ccifreq_release_protection(drv);
+		return;
+	}
 
 	dev_pm_opp_unregister_notifier(dev, &drv->opp_nb);
 	dev_pm_opp_of_remove_table(dev);

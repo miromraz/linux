@@ -50,6 +50,8 @@ struct mtk_cpufreq_platform_data {
  * the original PLL becomes stable at target frequency.
  */
 struct mtk_cpu_dvfs_info {
+	u64 rail_cookie;
+	unsigned int rail_user;
 	struct cpumask cpus;
 	struct device *cpu_dev;
 	struct device *cci_dev;
@@ -470,9 +472,22 @@ static int mtk_cpu_dvfs_info_init(struct mtk_cpu_dvfs_info *info, int cpu)
 	unsigned long rate;
 	int ret;
 
-	/* Handover and secure unwind precede the still-closed Phase3 gate. */
-	if (cpu < 8 && of_machine_is_compatible("planet,gemini-pda"))
-		return mt6797_consumer_bind_gate(get_cpu_device(cpu / 4 * 4), cpu / 4);
+	if (cpu < 8 && of_machine_is_compatible("planet,gemini-pda")) {
+		int sibling;
+
+		info->cpu_dev = get_cpu_device(cpu / 4 * 4);
+		info->rail_user = cpu / 4;
+		ret = dev_pm_opp_of_get_sharing_cpus(info->cpu_dev, &info->cpus);
+		if (ret)
+			return ret;
+		if (!cpumask_test_cpu(cpu, &info->cpus))
+			return -EINVAL;
+		for_each_cpu(sibling, &info->cpus)
+			if (sibling / 4 != info->rail_user)
+				return -EINVAL;
+		return mt6797_consumer_acquire(info->cpu_dev, info->rail_user,
+					       &info->rail_cookie);
+	}
 
 	cpu_dev = get_cpu_device(cpu);
 	if (!cpu_dev)
@@ -664,6 +679,11 @@ out_put_cci_dev:
 
 static void mtk_cpu_dvfs_info_release(struct mtk_cpu_dvfs_info *info)
 {
+	if (info->rail_cookie) {
+		mt6797_consumer_release(info->rail_user, info->rail_cookie);
+		info->rail_cookie = 0;
+		return;
+	}
 	regulator_disable(info->proc_reg);
 	regulator_put(info->proc_reg);
 	if (info->sram_reg) {
@@ -796,6 +816,9 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 	for_each_present_cpu(cpu) {
 		struct device *cpu_dev;
 
+		/* Protected A53 initialization does not admit the A72/B path. */
+		if (cpu >= 8 && of_machine_is_compatible("planet,gemini-pda"))
+			continue;
 		info = mtk_cpu_dvfs_info_lookup(cpu);
 		if (info)
 			continue;
@@ -823,6 +846,11 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 		list_add(&info->list_head, &dvfs_info_list);
 	}
 
+	/* Protected initialization must never publish operational callbacks. */
+	if (of_machine_is_compatible("planet,gemini-pda")) {
+		ret = -EAGAIN;
+		goto release_dvfs_info_list;
+	}
 	ret = cpufreq_register_driver(&mtk_cpufreq_driver);
 	if (ret) {
 		dev_err_probe(&pdev->dev, ret, "failed to register mtk cpufreq driver\n");

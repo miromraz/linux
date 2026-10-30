@@ -4,14 +4,21 @@
 
 #include <linux/errno.h>
 #include <linux/kconfig.h>
+#include <linux/types.h>
 
 struct device;
 
-/* Bind-time ownership exercise only; operational Phase3 admission is closed. */
+/* Protected lifetimes only. These calls never grant operational admission. */
 #if IS_REACHABLE(CONFIG_REGULATOR_MT6797_PROVIDER)
-int mt6797_consumer_bind_gate(struct device *dev, unsigned int user);
+int mt6797_consumer_acquire(struct device *dev, unsigned int user, u64 *cookie);
+int mt6797_consumer_release(unsigned int user, u64 cookie);
 #else
-static inline int mt6797_consumer_bind_gate(struct device *dev, unsigned int user)
+static inline int mt6797_consumer_acquire(struct device *dev, unsigned int user,
+					u64 *cookie)
+{
+	return -EPROBE_DEFER;
+}
+static inline int mt6797_consumer_release(unsigned int user, u64 cookie)
 {
 	return -EPROBE_DEFER;
 }
