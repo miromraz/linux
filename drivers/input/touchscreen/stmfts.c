@@ -454,10 +454,13 @@ static void stmfts5_parse_events(struct stmfts_data *sdata)
 		}
 
 		switch (event[0] & STMFTS5_MASK_EVENT_ID) {
-		case STMFTS5_EV_STATUS_UPDATE:
-		case STMFTS5_EV_USER_REPORT:
 		case STMFTS5_EV_DEBUG:
 			goto sync;
+
+		case STMFTS5_EV_STATUS_UPDATE:
+		case STMFTS5_EV_USER_REPORT:
+			/* Not a touch event; skip it but keep draining the batch. */
+			continue;
 
 		case STMFTS5_EV_MULTI_TOUCH_ENTER:
 		case STMFTS5_EV_MULTI_TOUCH_MOTION:
