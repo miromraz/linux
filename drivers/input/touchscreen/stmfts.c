@@ -152,6 +152,15 @@ struct stmfts_data {
 	bool powered;
 
 	/*
+	 * Whether the driver actually registered as a DRM panel follower.
+	 * Latched at probe: drm_is_panel_follower() only reports that a "panel"
+	 * phandle is present, but the follower add can still fail (e.g. the
+	 * panel node is disabled), in which case the driver falls back to
+	 * powering the chip itself and the system-sleep ops must run normally.
+	 */
+	bool is_follower;
+
+	/*
 	 * In-cell controllers (e.g. on the Pixel 4a) are powered through the
 	 * display panel and lose power whenever it does, so they follow the
 	 * panel's prepare/unprepare instead of the system sleep callbacks.
@@ -1115,11 +1124,27 @@ static int stmfts_probe(struct i2c_client *client)
 	if (drm_is_panel_follower(dev)) {
 		sdata->panel_follower.funcs = &stmfts_panel_follower_funcs;
 		err = devm_drm_panel_add_follower(dev, &sdata->panel_follower);
-	} else {
-		err = stmfts_power_on(sdata);
+		if (!err) {
+			sdata->is_follower = true;
+		} else if (err != -ENODEV) {
+			/*
+			 * -EPROBE_DEFER: the panel is not registered yet,
+			 * retry later. Anything but -ENODEV is a real failure.
+			 */
+			return err;
+		}
+		/*
+		 * -ENODEV: the framework decided we are not actually a
+		 * follower (e.g. the panel node is disabled). Fall back to
+		 * powering the controller in place, below.
+		 */
 	}
-	if (err)
-		return err;
+
+	if (!sdata->is_follower) {
+		err = stmfts_power_on(sdata);
+		if (err)
+			return err;
+	}
 
 	/*
 	 * input_open() calls pm_runtime_resume_and_get(), which fails with
@@ -1234,7 +1259,7 @@ static int stmfts_suspend(struct device *dev)
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 
 	/* The panel powers a follower off before the panel goes down. */
-	if (!drm_is_panel_follower(dev))
+	if (!sdata->is_follower)
 		stmfts_power_off(sdata);
 
 	return 0;
@@ -1244,7 +1269,7 @@ static int stmfts_resume(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 
-	if (drm_is_panel_follower(dev))
+	if (sdata->is_follower)
 		return 0;
 
 	return stmfts_power_on(sdata);
