@@ -1035,6 +1035,17 @@ static int stmfts_probe(struct i2c_client *client)
 	if (err)
 		return err;
 
+	/*
+	 * input_open() calls pm_runtime_resume_and_get(), which fails with
+	 * -EACCES until runtime PM is enabled, and userspace can open the
+	 * input device as soon as it is registered.
+	 */
+	err = devm_pm_runtime_enable(dev);
+	if (err)
+		return err;
+
+	device_enable_async_suspend(dev);
+
 	err = input_register_device(sdata->input);
 	if (err)
 		return err;
@@ -1053,15 +1064,7 @@ static int stmfts_probe(struct i2c_client *client)
 		}
 	}
 
-	pm_runtime_enable(dev);
-	device_enable_async_suspend(dev);
-
 	return 0;
-}
-
-static void stmfts_remove(struct i2c_client *client)
-{
-	pm_runtime_disable(&client->dev);
 }
 
 static int stmfts_runtime_suspend(struct device *dev)
@@ -1196,7 +1199,6 @@ static struct i2c_driver stmfts_driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = stmfts_probe,
-	.remove = stmfts_remove,
 	.id_table = stmfts_id,
 };
 
