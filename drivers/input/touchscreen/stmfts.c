@@ -20,6 +20,8 @@
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 
+#include <drm/drm_panel.h>
+
 /* I2C commands */
 #define STMFTS_READ_INFO			0x80
 #define STMFTS_READ_STATUS			0x84
@@ -148,6 +150,13 @@ struct stmfts_data {
 	bool stylus_enabled;
 	bool running;
 	bool powered;
+
+	/*
+	 * In-cell controllers (e.g. on the Pixel 4a) are powered through the
+	 * display panel and lose power whenever it does, so they follow the
+	 * panel's prepare/unprepare instead of the system sleep callbacks.
+	 */
+	struct drm_panel_follower panel_follower;
 };
 
 struct stmfts_chip_ops {
@@ -966,6 +975,29 @@ static int stmfts_enable_led(struct stmfts_data *sdata)
 	return 0;
 }
 
+static int stmfts_panel_prepared(struct drm_panel_follower *follower)
+{
+	struct stmfts_data *sdata = container_of(follower, struct stmfts_data,
+						 panel_follower);
+
+	return stmfts_power_on(sdata);
+}
+
+static int stmfts_panel_unpreparing(struct drm_panel_follower *follower)
+{
+	struct stmfts_data *sdata = container_of(follower, struct stmfts_data,
+						 panel_follower);
+
+	stmfts_power_off(sdata);
+
+	return 0;
+}
+
+static const struct drm_panel_follower_funcs stmfts_panel_follower_funcs = {
+	.panel_prepared = stmfts_panel_prepared,
+	.panel_unpreparing = stmfts_panel_unpreparing,
+};
+
 static int stmfts_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -1040,11 +1072,25 @@ static int stmfts_probe(struct i2c_client *client)
 
 	dev_dbg(dev, "initializing ST-Microelectronics FTS...\n");
 
-	err = stmfts_power_on(sdata);
+	/*
+	 * Registered first so that on unbind the follower is removed (which
+	 * powers it off if the panel is prepared) before this runs; it is a
+	 * no-op while the controller is off.
+	 */
+	err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
 	if (err)
 		return err;
 
-	err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
+	/*
+	 * A panel follower is powered on from stmfts_panel_prepared(), right
+	 * away if the panel is already prepared, otherwise once it is.
+	 */
+	if (drm_is_panel_follower(dev)) {
+		sdata->panel_follower.funcs = &stmfts_panel_follower_funcs;
+		err = devm_drm_panel_add_follower(dev, &sdata->panel_follower);
+	} else {
+		err = stmfts_power_on(sdata);
+	}
 	if (err)
 		return err;
 
@@ -1084,6 +1130,10 @@ static int stmfts_runtime_suspend(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	int ret;
+
+	/* A panel follower is off while its panel is. */
+	if (!sdata->powered)
+		return 0;
 
 	ret = i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 	if (ret)
@@ -1142,6 +1192,9 @@ static int stmfts_runtime_resume(struct device *dev)
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	int err;
 
+	if (!sdata->powered)
+		return 0;
+
 	err = sdata->ops->runtime_resume(sdata);
 	if (err)
 		dev_err(dev, "failed to resume device: %d\n", err);
@@ -1153,7 +1206,9 @@ static int stmfts_suspend(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 
-	stmfts_power_off(sdata);
+	/* The panel powers a follower off before the panel goes down. */
+	if (!drm_is_panel_follower(dev))
+		stmfts_power_off(sdata);
 
 	return 0;
 }
@@ -1161,6 +1216,9 @@ static int stmfts_suspend(struct device *dev)
 static int stmfts_resume(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
+
+	if (drm_is_panel_follower(dev))
+		return 0;
 
 	return stmfts_power_on(sdata);
 }
