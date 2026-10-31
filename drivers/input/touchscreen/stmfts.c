@@ -7,6 +7,7 @@
  * Copyright Petr Hodina <petr.hodina@protonmail.com>
  */
 
+#include <linux/bits.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
@@ -16,11 +17,8 @@
 #include <linux/irq.h>
 #include <linux/leds.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
-
-#include <drm/drm_panel.h>
 
 /* I2C commands */
 #define STMFTS_READ_INFO			0x80
@@ -43,6 +41,10 @@
 #define STMFTS_SS_CX_TUNING			0xa4
 #define STMFTS5_SET_SCAN_MODE			0xa0
 
+/* FTS5 scan mode commands */
+#define STMFTS5_SCAN_MODE_ACTIVE		0x00
+#define STMFTS5_SCAN_ACTIVE_MULTI_TOUCH		BIT(0)
+
 /* events */
 #define STMFTS_EV_NO_EVENT			0x00
 #define STMFTS_EV_MULTI_TOUCH_DETECTED		0x02
@@ -59,16 +61,19 @@
 #define STMFTS_EV_STATUS			0x16
 #define STMFTS_EV_DEBUG				0xdb
 
-/* events FTS5 */
+/*
+ * FTS5 events: the event ID is in the high nibble of event[0], the low
+ * nibble carries additional payload (bits 5:4 of the touch major axis for
+ * touch events), so it must be masked before comparing.
+ */
 #define STMFTS5_EV_CONTROLLER_READY		0x03
-/* FTM5 event IDs (event[0] bits [3:2] carry touch-major; mask with STMFTS5_MASK_EVENT_ID) */
-#define STMFTS5_EV_MULTI_TOUCH_ENTER		0x13
-#define STMFTS5_EV_MULTI_TOUCH_MOTION		0x23
-#define STMFTS5_EV_MULTI_TOUCH_LEAVE		0x33
-#define STMFTS5_EV_STATUS_UPDATE		0x43
-#define STMFTS5_EV_USER_REPORT			0x53
-#define STMFTS5_EV_DEBUG			0xe3
-#define STMFTS5_EV_ERROR			0xf3
+#define STMFTS5_EV_MULTI_TOUCH_ENTER		0x10
+#define STMFTS5_EV_MULTI_TOUCH_MOTION		0x20
+#define STMFTS5_EV_MULTI_TOUCH_LEAVE		0x30
+#define STMFTS5_EV_STATUS_UPDATE		0x40
+#define STMFTS5_EV_USER_REPORT			0x50
+#define STMFTS5_EV_DEBUG			0xe0
+#define STMFTS5_EV_ERROR			0xf0
 
 /* multi touch related event masks */
 #define STMFTS_MASK_EVENT_ID			0x0f
@@ -76,8 +81,10 @@
 #define STMFTS_MASK_LEFT_EVENT			0x0f
 #define STMFTS_MASK_X_MSB			0x0f
 #define STMFTS_MASK_Y_LSB			0xf0
+#define STMFTS5_MASK_EVENT_ID			0xf0
 #define STMFTS5_MASK_TOUCH_TYPE			0x0f
-#define STMFTS5_MASK_EVENT_ID			0xf3
+#define STMFTS5_MASK_MAJOR_MSB			0x0c
+#define STMFTS5_MASK_MINOR_MSB			0xc0
 
 /* touch type classifications */
 #define STMFTS_TOUCH_TYPE_INVALID		0x00
@@ -91,6 +98,8 @@
 #define STMFTS_MASK_KEY_NO_TOUCH		0x00
 #define STMFTS_MASK_KEY_MENU			0x01
 #define STMFTS_MASK_KEY_BACK			0x02
+
+#define STMFTS_RESET_TIMEOUT_MS	300
 
 #define STMFTS_EVENT_SIZE	8
 #define STMFTS_STACK_DEPTH	32
@@ -133,46 +142,20 @@ struct stmfts_data {
 
 	struct completion cmd_done;
 
-	unsigned long touch_id;
-	unsigned long stylus_id;
-
 	bool use_key;
 	bool led_status;
 	bool hover_enabled;
 	bool stylus_enabled;
 	bool running;
-	bool powered;
-
-	/*
-	 * Whether the driver actually registered as a DRM panel follower.
-	 * Latched at probe: drm_is_panel_follower() only reports that a "panel"
-	 * phandle is present, but the follower add can still fail (e.g. the
-	 * panel node is disabled), in which case the driver falls back to
-	 * powering the chip itself and the system-sleep ops must run normally.
-	 */
-	bool is_follower;
-
-	/*
-	 * Set when the chip is an in-cell module whose physical power is
-	 * sequenced by the DSI panel (e.g. Pixel 4a sunfish: the touch IC
-	 * sits inside the bonded OLED assembly and is powered through the
-	 * panel's own VSP/VSN rails). The DRM panel-follower framework
-	 * drives stmfts_power_on() / stmfts_power_off() in lockstep with
-	 * the panel's prepare/unprepare callbacks.
-	 */
-	struct drm_panel_follower panel_follower;
 };
 
 struct stmfts_chip_ops {
 	int  (*configure)(struct stmfts_data *sdata);
-	void (*power_off)(struct stmfts_data *sdata);
 	int  (*setup_input)(struct stmfts_data *sdata);
-	int  (*input_open)(struct input_dev *dev);
-	void (*input_close)(struct input_dev *dev);
 	void (*parse_events)(struct stmfts_data *sdata);
+	int  (*set_scan)(struct stmfts_data *sdata, bool enable);
 	int  (*set_hover)(struct stmfts_data *sdata, bool enable);
 	int  (*runtime_resume)(struct stmfts_data *sdata);
-	int  (*set_scan)(struct stmfts_data *sdata, u8 mode);
 };
 
 static int stmfts_brightness_set(struct led_classdev *led_cdev,
@@ -277,54 +260,32 @@ static void stmfts_report_contact_release(struct stmfts_data *sdata,
 static void stmfts5_report_contact_event(struct stmfts_data *sdata,
 					 const u8 event[])
 {
-	u8 area;
-	u8 maj;
-	u8 min;
-	/* FTM5 event format:
-	 * event[0] = event ID (0x13/0x23)
-	 * event[1] = touch type (low 4 bits) | touch ID (high 4 bits)
-	 * event[2] = X LSB
-	 * event[3] = X MSB (low 4 bits) | Y MSB (high 4 bits)
-	 * event[4] = Y LSB
+	/*
+	 * FTS5 touch event format:
+	 * event[0] = event ID (high nibble) | major bits 5:4 (bits 3:2)
+	 * event[1] = touch ID (high nibble) | touch type (low nibble)
+	 * event[2] = X bits 7:0
+	 * event[3] = Y bits 3:0 (high nibble) | X bits 11:8 (low nibble)
+	 * event[4] = Y bits 11:4
 	 * event[5] = pressure
-	 * event[6] = major (low 4 bits) | minor (high 4 bits)
-	 * event[7] = minor (high 2 bits)
+	 * event[6] = major bits 3:0 (high nibble) | minor bits 3:0 (low nibble)
+	 * event[7] = minor bits 5:4 (bits 7:6)
 	 */
 	u8 touch_id = (event[1] & STMFTS_MASK_TOUCH_ID) >> 4;
 	u8 touch_type = event[1] & STMFTS5_MASK_TOUCH_TYPE;
-	int x, y, distance;
-	unsigned int tool = MT_TOOL_FINGER;
-	bool touch_condition = true;
-
-	/* Parse coordinates with better precision */
-	x = (((int)event[3] & STMFTS_MASK_X_MSB) << 8) | event[2];
-	y = ((int)event[4] << 4) | ((event[3] & STMFTS_MASK_Y_LSB) >> 4);
-
-	/* Parse pressure - ensure non-zero for active touch */
-	area = event[5];
-	if (area <= 0 && touch_type != STMFTS_TOUCH_TYPE_HOVER) {
-		/* Should not happen for contact events. Set minimum pressure
-		 * to prevent touch from being dropped
-		 */
-		dev_warn_once(&sdata->client->dev,
-			      "zero pressure on contact event, slot %d\n", touch_id);
-		area = 1;
-	}
-
-	/* Parse touch area with improved bit extraction */
-	maj = (((event[0] & 0x0C) << 2) | ((event[6] & 0xF0) >> 4));
-	min = (((event[7] & 0xC0) >> 2) | (event[6] & 0x0F));
-
+	u16 x = ((event[3] & STMFTS_MASK_X_MSB) << 8) | event[2];
+	u16 y = (event[4] << 4) | ((event[3] & STMFTS_MASK_Y_LSB) >> 4);
+	u8 area = event[5];
+	u8 maj = ((event[0] & STMFTS5_MASK_MAJOR_MSB) << 2) | (event[6] >> 4);
+	u8 min = ((event[7] & STMFTS5_MASK_MINOR_MSB) >> 2) | (event[6] & 0x0f);
 	/* Distance is 0 for touching, max for hovering */
-	distance = 0;
+	int distance = 0;
+	unsigned int tool;
 
-	/* Classify touch type and set appropriate tool and parameters */
 	switch (touch_type) {
 	case STMFTS_TOUCH_TYPE_STYLUS:
 		if (sdata->stylus_enabled) {
 			tool = MT_TOOL_PEN;
-			__set_bit(touch_id, &sdata->stylus_id);
-			__clear_bit(touch_id, &sdata->touch_id);
 			break;
 		}
 		fallthrough; /* Report as finger if stylus not enabled */
@@ -332,24 +293,16 @@ static void stmfts5_report_contact_event(struct stmfts_data *sdata,
 	case STMFTS_TOUCH_TYPE_FINGER:
 	case STMFTS_TOUCH_TYPE_GLOVE:
 		tool = MT_TOOL_FINGER;
-		__set_bit(touch_id, &sdata->touch_id);
-		__clear_bit(touch_id, &sdata->stylus_id);
 		break;
 
 	case STMFTS_TOUCH_TYPE_PALM:
 		/* Palm touch - report but can be filtered by userspace */
 		tool = MT_TOOL_PALM;
-		__set_bit(touch_id, &sdata->touch_id);
-		__clear_bit(touch_id, &sdata->stylus_id);
 		break;
 
 	case STMFTS_TOUCH_TYPE_HOVER:
 		tool = MT_TOOL_FINGER;
-		touch_condition = false;
-		area = 0;
 		distance = 255;
-		__set_bit(touch_id, &sdata->touch_id);
-		__clear_bit(touch_id, &sdata->stylus_id);
 		break;
 
 	case STMFTS_TOUCH_TYPE_INVALID:
@@ -360,14 +313,20 @@ static void stmfts5_report_contact_event(struct stmfts_data *sdata,
 		return;
 	}
 
-	/* Boundary check - some devices report max value, adjust */
-	if (x >= sdata->prop.max_x)
-		x = sdata->prop.max_x - 1;
-	if (y >= sdata->prop.max_y)
-		y = sdata->prop.max_y - 1;
+	if (touch_type == STMFTS_TOUCH_TYPE_HOVER) {
+		area = 0;
+	} else if (!area) {
+		/*
+		 * Should not happen for contact events. Set minimum pressure
+		 * to prevent touch from being dropped.
+		 */
+		dev_warn_once(&sdata->client->dev,
+			      "zero pressure on contact event, slot %d\n",
+			      touch_id);
+		area = 1;
+	}
 
 	input_mt_slot(sdata->input, touch_id);
-	input_report_key(sdata->input, BTN_TOUCH, touch_condition);
 	input_mt_report_slot_state(sdata->input, tool, true);
 
 	input_report_abs(sdata->input, ABS_MT_POSITION_X, x);
@@ -376,52 +335,16 @@ static void stmfts5_report_contact_event(struct stmfts_data *sdata,
 	input_report_abs(sdata->input, ABS_MT_TOUCH_MINOR, min);
 	input_report_abs(sdata->input, ABS_MT_PRESSURE, area);
 	input_report_abs(sdata->input, ABS_MT_DISTANCE, distance);
-
-	input_sync(sdata->input);
 }
 
 static void stmfts5_report_contact_release(struct stmfts_data *sdata,
 					   const u8 event[])
 {
-	/* FTM5 format: touch ID is in high 4 bits of event[1] */
+	/* format: touch ID is in high 4 bits of event[1] */
 	u8 touch_id = (event[1] & STMFTS_MASK_TOUCH_ID) >> 4;
-	u8 touch_type = event[1] & STMFTS5_MASK_TOUCH_TYPE;
-	unsigned int tool = MT_TOOL_FINGER;
-
-	/* Determine tool type based on touch classification */
-	switch (touch_type) {
-	case STMFTS_TOUCH_TYPE_STYLUS:
-		if (sdata->stylus_enabled) {
-			tool = MT_TOOL_PEN;
-			__clear_bit(touch_id, &sdata->stylus_id);
-		} else {
-			__clear_bit(touch_id, &sdata->touch_id);
-		}
-		break;
-
-	case STMFTS_TOUCH_TYPE_PALM:
-		tool = MT_TOOL_PALM;
-		__clear_bit(touch_id, &sdata->touch_id);
-		break;
-
-	case STMFTS_TOUCH_TYPE_FINGER:
-	case STMFTS_TOUCH_TYPE_GLOVE:
-	case STMFTS_TOUCH_TYPE_HOVER:
-	default:
-		tool = MT_TOOL_FINGER;
-		__clear_bit(touch_id, &sdata->touch_id);
-		break;
-	}
 
 	input_mt_slot(sdata->input, touch_id);
-	input_report_abs(sdata->input, ABS_MT_PRESSURE, 0);
-	input_mt_report_slot_state(sdata->input, tool, false);
-
-	/* Report BTN_TOUCH only if no touches remain */
-	if (!sdata->touch_id && !sdata->stylus_id)
-		input_report_key(sdata->input, BTN_TOUCH, 0);
-
-	input_sync(sdata->input);
+	input_mt_report_slot_inactive(sdata->input);
 }
 
 static void stmfts_report_hover_event(struct stmfts_data *sdata,
@@ -521,19 +444,20 @@ static void stmfts5_parse_events(struct stmfts_data *sdata)
 	for (int i = 0; i < STMFTS_STACK_DEPTH; i++) {
 		u8 *event = &sdata->data[i * STMFTS_EVENT_SIZE];
 
-		switch (event[0] & STMFTS5_MASK_EVENT_ID) {
+		switch (event[0]) {
 		case STMFTS5_EV_CONTROLLER_READY:
 			complete(&sdata->cmd_done);
 			fallthrough;
 
 		case STMFTS_EV_NO_EVENT:
-		case STMFTS5_EV_DEBUG:
-			return;
+			goto sync;
+		}
 
+		switch (event[0] & STMFTS5_MASK_EVENT_ID) {
 		case STMFTS5_EV_STATUS_UPDATE:
 		case STMFTS5_EV_USER_REPORT:
-			/* Not a touch event; skip it but keep draining the batch. */
-			continue;
+		case STMFTS5_EV_DEBUG:
+			goto sync;
 
 		case STMFTS5_EV_MULTI_TOUCH_ENTER:
 		case STMFTS5_EV_MULTI_TOUCH_MOTION:
@@ -556,6 +480,10 @@ static void stmfts5_parse_events(struct stmfts_data *sdata)
 				"unknown FTS5 event %#02x\n", event[0]);
 		}
 	}
+
+sync:
+	input_mt_sync_frame(sdata->input);
+	input_sync(sdata->input);
 }
 
 static irqreturn_t stmfts_irq_handler(int irq, void *dev)
@@ -592,23 +520,32 @@ static int stmfts_command(struct stmfts_data *sdata, const u8 cmd)
 	return 0;
 }
 
-static int stmfts5_set_scan_mode(struct stmfts_data *sdata, const u8 val)
+static int stmfts_set_scan(struct stmfts_data *sdata, bool enable)
 {
+	return i2c_smbus_write_byte(sdata->client,
+				    enable ? STMFTS_MS_MT_SENSE_ON :
+					     STMFTS_MS_MT_SENSE_OFF);
+}
+
+static int stmfts_set_hover(struct stmfts_data *sdata, bool enable)
+{
+	return i2c_smbus_write_byte(sdata->client,
+				    enable ? STMFTS_SS_HOVER_SENSE_ON :
+					     STMFTS_SS_HOVER_SENSE_OFF);
+}
+
+static int stmfts5_set_scan(struct stmfts_data *sdata, bool enable)
+{
+	u8 scan_mode_cmd[3] = { STMFTS5_SET_SCAN_MODE, STMFTS5_SCAN_MODE_ACTIVE,
+				enable ? STMFTS5_SCAN_ACTIVE_MULTI_TOUCH : 0 };
 	int err;
 
-	u8 scan_mode_cmd[3] = { STMFTS5_SET_SCAN_MODE, 0x00, val };
-	struct i2c_msg msg = {
-		.addr = sdata->client->addr,
-		.len = sizeof(scan_mode_cmd),
-		.buf = scan_mode_cmd,
-	};
-
-	err = i2c_transfer(sdata->client->adapter, &msg, 1);
-	if (err != 1)
+	err = i2c_master_send(sdata->client, scan_mode_cmd,
+			      sizeof(scan_mode_cmd));
+	if (err != sizeof(scan_mode_cmd))
 		return err < 0 ? err : -EIO;
 
 	return 0;
-
 }
 
 static int stmfts_input_open(struct input_dev *dev)
@@ -620,7 +557,7 @@ static int stmfts_input_open(struct input_dev *dev)
 	if (err)
 		return err;
 
-	err = i2c_smbus_write_byte(sdata->client, STMFTS_MS_MT_SENSE_ON);
+	err = sdata->ops->set_scan(sdata, true);
 	if (err) {
 		pm_runtime_put_sync(&sdata->client->dev);
 		return err;
@@ -629,9 +566,8 @@ static int stmfts_input_open(struct input_dev *dev)
 	scoped_guard(mutex, &sdata->mutex) {
 		sdata->running = true;
 
-		if (sdata->hover_enabled) {
-			err = i2c_smbus_write_byte(sdata->client,
-						   STMFTS_SS_HOVER_SENSE_ON);
+		if (sdata->hover_enabled && sdata->ops->set_hover) {
+			err = sdata->ops->set_hover(sdata, true);
 			if (err)
 				dev_warn(&sdata->client->dev,
 					 "failed to enable hover\n");
@@ -650,34 +586,12 @@ static int stmfts_input_open(struct input_dev *dev)
 	return 0;
 }
 
-static int stmfts5_input_open(struct input_dev *dev)
-{
-	struct stmfts_data *sdata = input_get_drvdata(dev);
-	int err;
-
-	err = pm_runtime_resume_and_get(&sdata->client->dev);
-	if (err)
-		return err;
-
-	mutex_lock(&sdata->mutex);
-	sdata->running = true;
-	mutex_unlock(&sdata->mutex);
-
-	err = stmfts5_set_scan_mode(sdata, 0xff);
-	if (err) {
-		pm_runtime_put_sync(&sdata->client->dev);
-		return err;
-	}
-
-	return 0;
-}
-
 static void stmfts_input_close(struct input_dev *dev)
 {
 	struct stmfts_data *sdata = input_get_drvdata(dev);
 	int err;
 
-	err = i2c_smbus_write_byte(sdata->client, STMFTS_MS_MT_SENSE_OFF);
+	err = sdata->ops->set_scan(sdata, false);
 	if (err)
 		dev_warn(&sdata->client->dev,
 			 "failed to disable touchscreen: %d\n", err);
@@ -685,9 +599,8 @@ static void stmfts_input_close(struct input_dev *dev)
 	scoped_guard(mutex, &sdata->mutex) {
 		sdata->running = false;
 
-		if (sdata->hover_enabled) {
-			err = i2c_smbus_write_byte(sdata->client,
-						   STMFTS_SS_HOVER_SENSE_OFF);
+		if (sdata->hover_enabled && sdata->ops->set_hover) {
+			err = sdata->ops->set_hover(sdata, false);
 			if (err)
 				dev_warn(&sdata->client->dev,
 					 "failed to disable hover: %d\n", err);
@@ -701,23 +614,6 @@ static void stmfts_input_close(struct input_dev *dev)
 			dev_warn(&sdata->client->dev,
 				 "failed to disable touchkey: %d\n", err);
 	}
-
-	pm_runtime_put_sync(&sdata->client->dev);
-}
-
-static void stmfts5_input_close(struct input_dev *dev)
-{
-	struct stmfts_data *sdata = input_get_drvdata(dev);
-	int err;
-
-	err = stmfts5_set_scan_mode(sdata, 0x00);
-	if (err)
-		dev_warn(&sdata->client->dev,
-			 "failed to disable touchscreen: %d\n", err);
-
-	mutex_lock(&sdata->mutex);
-	sdata->running = false;
-	mutex_unlock(&sdata->mutex);
 
 	pm_runtime_put_sync(&sdata->client->dev);
 }
@@ -860,15 +756,6 @@ static int stmfts_read_system_info(struct stmfts_data *sdata)
 	return 0;
 }
 
-static void stmfts_reset(struct stmfts_data *sdata)
-{
-	gpiod_set_value_cansleep(sdata->reset_gpio, 1);
-	msleep(20);
-
-	gpiod_set_value_cansleep(sdata->reset_gpio, 0);
-	msleep(50);
-}
-
 static int stmfts_configure(struct stmfts_data *sdata)
 {
 	int err;
@@ -877,17 +764,13 @@ static int stmfts_configure(struct stmfts_data *sdata)
 	if (err)
 		return err;
 
-	enable_irq(sdata->client->irq);
-
-	msleep(50);
-
 	err = stmfts_command(sdata, STMFTS_SYSTEM_RESET);
 	if (err)
-		goto err_disable_irq;
+		return err;
 
 	err = stmfts_command(sdata, STMFTS_SLEEP_OUT);
 	if (err)
-		goto err_disable_irq;
+		return err;
 
 	/* optional tuning */
 	err = stmfts_command(sdata, STMFTS_MS_CX_TUNING);
@@ -903,41 +786,59 @@ static int stmfts_configure(struct stmfts_data *sdata)
 
 	err = stmfts_command(sdata, STMFTS_FULL_FORCE_CALIBRATION);
 	if (err)
-		goto err_disable_irq;
+		return err;
 
 	return 0;
-
-err_disable_irq:
-	disable_irq(sdata->client->irq);
-	return err;
 }
 
 static int stmfts_power_on(struct stmfts_data *sdata)
 {
 	int err;
 
+	if (sdata->reset_gpio) {
+		gpiod_set_value_cansleep(sdata->reset_gpio, 1);
+		/* a short delay before powering up */
+		usleep_range(1000, 1500);
+	}
+
 	err = regulator_bulk_enable(ARRAY_SIZE(stmfts_supplies),
 				    sdata->supplies);
 	if (err)
 		return err;
 
-	/*
-	 * The datasheet does not specify the power on time, but considering
-	 * that the reset time is < 10ms, I sleep 20ms to be sure
-	 */
-	msleep(20);
+	if (sdata->reset_gpio) {
+		reinit_completion(&sdata->cmd_done);
 
-	if (sdata->reset_gpio)
-		stmfts_reset(sdata);
+		/*
+		 * The datasheet does not specify the power on time, but
+		 * considering that the reset time is < 10ms, sleep for 20ms
+		 * to be sure before releasing reset line.
+		 */
+		msleep(20);
+		gpiod_set_value_cansleep(sdata->reset_gpio, 0);
 
-	/*
-	 * The configure op leaves the interrupt enabled on success and
-	 * unwinds it itself on failure, so only the regulators are left
-	 * to undo here.
-	 */
+		enable_irq(sdata->client->irq);
+
+		if (!wait_for_completion_timeout(&sdata->cmd_done,
+						 msecs_to_jiffies(STMFTS_RESET_TIMEOUT_MS))) {
+			dev_err(&sdata->client->dev, "controller not ready after reset");
+			err = -ETIMEDOUT;
+			goto err_disable_irq;
+		}
+	} else {
+		/*
+		 * We do not know the real controller state (was it powered
+		 * off or reset). Let's hope that this is enough time to
+		 * initialize.
+		 */
+		msleep(70);
+
+		enable_irq(sdata->client->irq);
+	}
+
 	err = sdata->ops->configure(sdata);
 	if (err)
-		goto err_disable_regulators;
+		goto err_disable_irq;
 
 	/*
 	 * At this point no one is using the touchscreen
@@ -945,11 +846,11 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 	 */
 	(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 
-	sdata->powered = true;
-
 	return 0;
 
-err_disable_regulators:
+err_disable_irq:
+	disable_irq(sdata->client->irq);
+
 	regulator_bulk_disable(ARRAY_SIZE(stmfts_supplies), sdata->supplies);
 	return err;
 }
@@ -957,50 +858,28 @@ err_disable_regulators:
 static int stmfts5_configure(struct stmfts_data *sdata)
 {
 	u8 event[STMFTS_EVENT_SIZE];
-	int ret;
+	int err;
 
 	/* Verify I2C communication */
-	ret = i2c_smbus_read_i2c_block_data(sdata->client,
+	err = i2c_smbus_read_i2c_block_data(sdata->client,
 					    STMFTS_READ_ALL_EVENT,
 					    sizeof(event), event);
-	if (ret < 0)
-		return ret;
-
-	enable_irq(sdata->client->irq);
+	if (err < 0)
+		return err;
 
 	return 0;
-}
-
-static void stmfts5_chip_power_off(struct stmfts_data *sdata)
-{
-	i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
-	msleep(20);
 }
 
 static void stmfts_power_off(void *data)
 {
 	struct stmfts_data *sdata = data;
 
-	/*
-	 * Idempotent: this is both the devm unbind action and the panel
-	 * follower's .panel_unpreparing callback, and on unbind the DRM
-	 * framework may also call the latter, so guard against a double
-	 * power-off (which would underflow the regulator/IRQ enable counts).
-	 */
-	if (!sdata->powered)
-		return;
-	sdata->powered = false;
-
 	disable_irq(sdata->client->irq);
 
 	if (sdata->reset_gpio)
 		gpiod_set_value_cansleep(sdata->reset_gpio, 1);
 
-	if (sdata->ops->power_off)
-		sdata->ops->power_off(sdata);
-
-	regulator_bulk_disable(ARRAY_SIZE(stmfts_supplies),
-			       sdata->supplies);
+	regulator_bulk_disable(ARRAY_SIZE(stmfts_supplies), sdata->supplies);
 }
 
 static int stmfts_setup_input(struct stmfts_data *sdata)
@@ -1009,6 +888,8 @@ static int stmfts_setup_input(struct stmfts_data *sdata)
 
 	input_set_abs_params(sdata->input, ABS_MT_ORIENTATION, 0, 255, 0, 0);
 	input_set_abs_params(sdata->input, ABS_DISTANCE, 0, 255, 0, 0);
+	input_set_abs_params(sdata->input, ABS_MT_TOOL_TYPE, 0,
+			     MT_TOOL_PALM, 0, 0);
 
 	sdata->use_key = device_property_read_bool(dev, "touch-key-connected");
 	if (sdata->use_key) {
@@ -1030,12 +911,6 @@ static int stmfts5_setup_input(struct stmfts_data *sdata)
 		return dev_err_probe(dev, PTR_ERR(sdata->mode_switch_gpio),
 				     "Failed to get GPIO 'switch'\n");
 
-	/* Mark as direct input device for calibration support */
-	__set_bit(INPUT_PROP_DIRECT, sdata->input->propbit);
-
-	/* Set up basic touch capabilities */
-	input_set_capability(sdata->input, EV_KEY, BTN_TOUCH);
-
 	/* Set resolution for accurate calibration */
 	if (!input_abs_get_res(sdata->input, ABS_MT_POSITION_X)) {
 		input_abs_set_res(sdata->input, ABS_MT_POSITION_X, 10);
@@ -1047,20 +922,8 @@ static int stmfts5_setup_input(struct stmfts_data *sdata)
 	/* Enable stylus support if requested */
 	sdata->stylus_enabled = device_property_read_bool(dev, "stylus-enabled");
 
-	/* Initialize touch tracking bitmaps */
-	sdata->touch_id = 0;
-	sdata->stylus_id = 0;
-
-	/* Initialize MT slots with support for pen tool type */
 	return input_mt_init_slots(sdata->input, STMFTS_MAX_FINGERS,
-				   INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
-}
-
-static int stmfts_set_hover(struct stmfts_data *sdata, bool enable)
-{
-	return i2c_smbus_write_byte(sdata->client,
-				    enable ? STMFTS_SS_HOVER_SENSE_ON :
-					     STMFTS_SS_HOVER_SENSE_OFF);
+				   INPUT_MT_DIRECT);
 }
 
 static int stmfts_enable_led(struct stmfts_data *sdata)
@@ -1087,60 +950,11 @@ static int stmfts_enable_led(struct stmfts_data *sdata)
 	return 0;
 }
 
-static int stmfts_panel_prepared(struct drm_panel_follower *follower)
-{
-	struct stmfts_data *sdata =
-		container_of(follower, struct stmfts_data, panel_follower);
-	int err;
-
-	err = stmfts_power_on(sdata);
-	if (err)
-		return err;
-
-	/*
-	 * If userspace already has the input device open, the chip just came
-	 * back from a panel-driven power cycle: stmfts_power_on() left it in
-	 * SLEEP_IN and it lost its calibration and scan state. Re-run the same
-	 * wake sequence that runtime PM / input_open drive in the non-follower
-	 * path (SLEEP_OUT, tuning, calibration, then start scanning) so touch
-	 * resumes calibrated, without requiring a close+reopen of the evdev —
-	 * userspace compositors keep the fd open across display blank/wake.
-	 */
-	if (sdata->running) {
-		err = sdata->ops->runtime_resume(sdata);
-		if (err)
-			return err;
-
-		if (sdata->ops->set_scan) {
-			err = sdata->ops->set_scan(sdata, 0xff);
-			if (err)
-				return err;
-		}
-	}
-
-	return 0;
-}
-
-static int stmfts_panel_unpreparing(struct drm_panel_follower *follower)
-{
-	struct stmfts_data *sdata =
-		container_of(follower, struct stmfts_data, panel_follower);
-
-	stmfts_power_off(sdata);
-	return 0;
-}
-
-static const struct drm_panel_follower_funcs stmfts_panel_follower_funcs = {
-	.panel_prepared = stmfts_panel_prepared,
-	.panel_unpreparing = stmfts_panel_unpreparing,
-};
-
 static int stmfts_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	int err;
 	struct stmfts_data *sdata;
-	bool is_panel_follower = false;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C |
 						I2C_FUNC_SMBUS_BYTE_DATA |
@@ -1158,14 +972,6 @@ static int stmfts_probe(struct i2c_client *client)
 	init_completion(&sdata->cmd_done);
 
 	sdata->ops = i2c_get_match_data(client);
-	if (!sdata->ops)
-		/*
-		 * No OF match data: instantiated via the i2c_device_id table
-		 * (e.g. sysfs new_device) or without OF. There is no way to
-		 * tell which chip variant this is, so refuse rather than
-		 * dereference a NULL ops table.
-		 */
-		return dev_err_probe(dev, -ENODEV, "no chip match data\n");
 
 	err = devm_regulator_bulk_get_const(dev,
 					    ARRAY_SIZE(stmfts_supplies),
@@ -1185,8 +991,8 @@ static int stmfts_probe(struct i2c_client *client)
 
 	sdata->input->name = STMFTS_DEV_NAME;
 	sdata->input->id.bustype = BUS_I2C;
-	sdata->input->open = sdata->ops->input_open;
-	sdata->input->close = sdata->ops->input_close;
+	sdata->input->open = stmfts_input_open;
+	sdata->input->close = stmfts_input_close;
 
 	input_set_capability(sdata->input, EV_ABS, ABS_MT_POSITION_X);
 	input_set_capability(sdata->input, EV_ABS, ABS_MT_POSITION_Y);
@@ -1218,25 +1024,14 @@ static int stmfts_probe(struct i2c_client *client)
 
 	dev_dbg(dev, "initializing ST-Microelectronics FTS...\n");
 
-	/*
-	 * Enable runtime PM before the input device is registered. input_open()
-	 * calls pm_runtime_resume_and_get(), which returns -EACCES until the
-	 * runtime-PM state machine is up, and userspace can open the evdev the
-	 * moment it is registered. In legacy mode runtime PM drives the chip's
-	 * SLEEP_IN / SLEEP_OUT cycle; in panel-follower mode the callbacks
-	 * short-circuit while the chip is powered off. devm undoes it on unbind.
-	 */
-	err = devm_pm_runtime_enable(dev);
+	err = stmfts_power_on(sdata);
 	if (err)
 		return err;
-	device_enable_async_suspend(dev);
 
-	/*
-	 * The input device (and LEDs) are registered before the chip is brought
-	 * up: in panel-follower mode power-on happens later, when the panel
-	 * framework calls stmfts_panel_prepared() and enables the IRQ, so a
-	 * registered input device must already exist to receive events.
-	 */
+	err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
+	if (err)
+		return err;
+
 	err = input_register_device(sdata->input);
 	if (err)
 		return err;
@@ -1255,59 +1050,21 @@ static int stmfts_probe(struct i2c_client *client)
 		}
 	}
 
-	if (drm_is_panel_follower(dev)) {
-		sdata->panel_follower.funcs = &stmfts_panel_follower_funcs;
-		err = devm_drm_panel_add_follower(dev, &sdata->panel_follower);
-		if (!err) {
-			is_panel_follower = true;
-		} else if (err != -ENODEV) {
-			/*
-			 * -EPROBE_DEFER: panel not registered yet, retry later.
-			 * Anything else: real failure.
-			 */
-			return err;
-		}
-		/*
-		 * -ENODEV: the framework determined we're not actually a
-		 * follower (e.g. DRM_PANEL not built). Fall back to the
-		 * legacy in-place power-on path below.
-		 */
-	}
-	sdata->is_follower = is_panel_follower;
-
-	if (!is_panel_follower) {
-		err = stmfts_power_on(sdata);
-		if (err)
-			return err;
-	}
-
-	/*
-	 * Register the power-off action in both modes. In panel-follower
-	 * mode the panel framework powers the chip on via panel_prepared();
-	 * without this action a device left powered (screen on) at unbind
-	 * would leak its regulator enables. stmfts_power_off() is guarded by
-	 * sdata->powered so it is a no-op when the chip is already off.
-	 */
-	err = devm_add_action_or_reset(dev, stmfts_power_off, sdata);
-	if (err)
-		return err;
+	pm_runtime_enable(dev);
+	device_enable_async_suspend(dev);
 
 	return 0;
+}
+
+static void stmfts_remove(struct i2c_client *client)
+{
+	pm_runtime_disable(&client->dev);
 }
 
 static int stmfts_runtime_suspend(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	int ret;
-
-	/*
-	 * The chip may be physically powered off — cut by the panel follower
-	 * on screen blank, or not yet powered before probe's power-on — so
-	 * there is nothing on the bus to put to sleep. Otherwise runtime PM
-	 * drives SLEEP_IN / SLEEP_OUT in both follower and legacy modes.
-	 */
-	if (!sdata->powered)
-		return 0;
 
 	ret = i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 	if (ret)
@@ -1325,41 +1082,36 @@ static int stmfts5_chip_runtime_resume(struct stmfts_data *sdata)
 {
 	struct i2c_client *client = sdata->client;
 	struct device *dev = &client->dev;
-	u8 int_enable_cmd[4] = {0xB6, 0x00, 0x2C, 0x01};
-	struct i2c_msg msg = {
-		.addr = client->addr,
-		.len = sizeof(int_enable_cmd),
-		.buf = int_enable_cmd,
-	};
-	int ret;
+	u8 int_enable_cmd[4] = { 0xB6, 0x00, 0x2C, 0x01 };
+	int err;
 
-	ret = i2c_smbus_write_byte(client, STMFTS_SLEEP_OUT);
-	if (ret)
-		return ret;
+	err = i2c_smbus_write_byte(client, STMFTS_SLEEP_OUT);
+	if (err)
+		return err;
 
 	msleep(20);
 
 	/* Perform capacitance tuning after wakeup */
-	ret = i2c_smbus_write_byte(client, STMFTS_MS_CX_TUNING);
-	if (ret)
-		dev_warn(dev, "MS_CX_TUNING failed: %d\n", ret);
+	err = i2c_smbus_write_byte(client, STMFTS_MS_CX_TUNING);
+	if (err)
+		dev_warn(dev, "MS_CX_TUNING failed: %d\n", err);
 	msleep(20);
 
-	ret = i2c_smbus_write_byte(client, STMFTS_SS_CX_TUNING);
-	if (ret)
-		dev_warn(dev, "SS_CX_TUNING failed: %d\n", ret);
+	err = i2c_smbus_write_byte(client, STMFTS_SS_CX_TUNING);
+	if (err)
+		dev_warn(dev, "SS_CX_TUNING failed: %d\n", err);
 	msleep(20);
 
 	/* Force calibration */
-	ret = i2c_smbus_write_byte(client, STMFTS_FULL_FORCE_CALIBRATION);
-	if (ret)
-		dev_warn(dev, "FORCE_CALIBRATION failed: %d\n", ret);
+	err = i2c_smbus_write_byte(client, STMFTS_FULL_FORCE_CALIBRATION);
+	if (err)
+		dev_warn(dev, "FORCE_CALIBRATION failed: %d\n", err);
 	msleep(50);
 
 	/* Enable controller interrupts */
-	ret = i2c_transfer(client->adapter, &msg, 1);
-	if (ret != 1)
-		return ret < 0 ? ret : -EIO;
+	err = i2c_master_send(client, int_enable_cmd, sizeof(int_enable_cmd));
+	if (err != sizeof(int_enable_cmd))
+		return err < 0 ? err : -EIO;
 
 	msleep(20);
 
@@ -1369,30 +1121,18 @@ static int stmfts5_chip_runtime_resume(struct stmfts_data *sdata)
 static int stmfts_runtime_resume(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
-	int ret;
+	int err;
 
-	if (!sdata->powered)
-		return 0;
+	err = sdata->ops->runtime_resume(sdata);
+	if (err)
+		dev_err(dev, "failed to resume device: %d\n", err);
 
-	ret = sdata->ops->runtime_resume(sdata);
-	if (ret)
-		dev_err(dev, "failed to resume device: %d\n", ret);
-
-	return ret;
+	return err;
 }
 
 static int stmfts_suspend(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
-
-	/*
-	 * Panel-follower mode: the DRM panel framework calls our
-	 * panel_unpreparing() right before the panel itself is
-	 * unprepared, which is the correct moment to power off an
-	 * in-cell touch. System-sleep ops therefore have nothing to do.
-	 */
-	if (sdata->is_follower)
-		return 0;
 
 	stmfts_power_off(sdata);
 
@@ -1403,9 +1143,6 @@ static int stmfts_resume(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 
-	if (sdata->is_follower)
-		return 0;
-
 	return stmfts_power_on(sdata);
 }
 
@@ -1414,28 +1151,24 @@ static const struct dev_pm_ops stmfts_pm_ops = {
 	RUNTIME_PM_OPS(stmfts_runtime_suspend, stmfts_runtime_resume, NULL)
 };
 
-#ifdef CONFIG_OF
 static const struct stmfts_chip_ops stmfts4_ops = {
 	.configure	= stmfts_configure,
 	.setup_input	= stmfts_setup_input,
-	.input_open	= stmfts_input_open,
-	.input_close	= stmfts_input_close,
 	.parse_events	= stmfts_parse_events,
+	.set_scan	= stmfts_set_scan,
 	.set_hover	= stmfts_set_hover,
 	.runtime_resume	= stmfts_chip_runtime_resume,
 };
 
 static const struct stmfts_chip_ops stmfts5_ops = {
 	.configure	= stmfts5_configure,
-	.power_off	= stmfts5_chip_power_off,
 	.setup_input	= stmfts5_setup_input,
-	.input_open	= stmfts5_input_open,
-	.input_close	= stmfts5_input_close,
 	.parse_events	= stmfts5_parse_events,
+	.set_scan	= stmfts5_set_scan,
 	.runtime_resume	= stmfts5_chip_runtime_resume,
-	.set_scan	= stmfts5_set_scan_mode,
 };
 
+#ifdef CONFIG_OF
 static const struct of_device_id stmfts_of_match[] = {
 	{ .compatible = "st,stmfts",	.data = &stmfts4_ops },
 	{ .compatible = "st,stmfts5",	.data = &stmfts5_ops },
@@ -1445,7 +1178,8 @@ MODULE_DEVICE_TABLE(of, stmfts_of_match);
 #endif
 
 static const struct i2c_device_id stmfts_id[] = {
-	{ .name = "stmfts" },
+	{ .name = "stmfts",	.driver_data = (kernel_ulong_t)&stmfts4_ops },
+	{ .name = "stmfts5",	.driver_data = (kernel_ulong_t)&stmfts5_ops },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, stmfts_id);
@@ -1459,6 +1193,7 @@ static struct i2c_driver stmfts_driver = {
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = stmfts_probe,
+	.remove = stmfts_remove,
 	.id_table = stmfts_id,
 };
 
