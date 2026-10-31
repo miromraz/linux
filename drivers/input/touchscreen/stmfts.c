@@ -147,6 +147,7 @@ struct stmfts_data {
 	bool hover_enabled;
 	bool stylus_enabled;
 	bool running;
+	bool powered;
 };
 
 struct stmfts_chip_ops {
@@ -849,6 +850,8 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 	 */
 	(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 
+	sdata->powered = true;
+
 	return 0;
 
 err_disable_irq:
@@ -876,6 +879,16 @@ static int stmfts5_configure(struct stmfts_data *sdata)
 static void stmfts_power_off(void *data)
 {
 	struct stmfts_data *sdata = data;
+
+	/*
+	 * A failed stmfts_power_on() has already disabled the IRQ and the
+	 * regulators, so don't unbalance them again on the next suspend or
+	 * on unbind.
+	 */
+	if (!sdata->powered)
+		return;
+
+	sdata->powered = false;
 
 	disable_irq(sdata->client->irq);
 
