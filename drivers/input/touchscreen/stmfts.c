@@ -570,10 +570,16 @@ static int stmfts_input_open(struct input_dev *dev)
 	if (err)
 		return err;
 
-	err = sdata->ops->set_scan(sdata, true);
-	if (err) {
-		pm_runtime_put_sync(&sdata->client->dev);
-		return err;
+	/*
+	 * A panel follower whose panel is off starts scanning from
+	 * stmfts_panel_prepared() once the panel is back on.
+	 */
+	if (sdata->powered) {
+		err = sdata->ops->set_scan(sdata, true);
+		if (err) {
+			pm_runtime_put_sync(&sdata->client->dev);
+			return err;
+		}
 	}
 
 	scoped_guard(mutex, &sdata->mutex) {
@@ -604,10 +610,12 @@ static void stmfts_input_close(struct input_dev *dev)
 	struct stmfts_data *sdata = input_get_drvdata(dev);
 	int err;
 
-	err = sdata->ops->set_scan(sdata, false);
-	if (err)
-		dev_warn(&sdata->client->dev,
-			 "failed to disable touchscreen: %d\n", err);
+	if (sdata->powered) {
+		err = sdata->ops->set_scan(sdata, false);
+		if (err)
+			dev_warn(&sdata->client->dev,
+				 "failed to disable touchscreen: %d\n", err);
+	}
 
 	scoped_guard(mutex, &sdata->mutex) {
 		sdata->running = false;
@@ -979,8 +987,27 @@ static int stmfts_panel_prepared(struct drm_panel_follower *follower)
 {
 	struct stmfts_data *sdata = container_of(follower, struct stmfts_data,
 						 panel_follower);
+	int err;
 
-	return stmfts_power_on(sdata);
+	err = stmfts_power_on(sdata);
+	if (err)
+		return err;
+
+	/*
+	 * stmfts_power_on() leaves the controller in SLEEP_IN, uncalibrated
+	 * and not scanning. Userspace keeps the input device open across
+	 * display blank, so if it is open redo what runtime resume and
+	 * stmfts_input_open() did before the panel cut the power.
+	 */
+	if (sdata->running) {
+		err = sdata->ops->runtime_resume(sdata);
+		if (err)
+			return err;
+
+		err = sdata->ops->set_scan(sdata, true);
+	}
+
+	return err;
 }
 
 static int stmfts_panel_unpreparing(struct drm_panel_follower *follower)
