@@ -1084,6 +1084,14 @@ static int fastrpc_get_args(u32 kernel, struct fastrpc_invoke_ctx *ctx)
 		if (ctx->maps[i]) {
 			struct vm_area_struct *vma = NULL;
 
+			/*
+			 * The DSP reads fd-backed buffers directly; on
+			 * non-coherent compute banks, clean CPU caches first.
+			 */
+			if (ctx->maps[i]->table)
+				dma_sync_sgtable_for_device(dev, ctx->maps[i]->table,
+							    DMA_BIDIRECTIONAL);
+
 			rpra[i].buf.pv = (u64) ctx->args[i].ptr;
 			pages[i].addr = ctx->maps[i]->dma_addr;
 
@@ -1179,7 +1187,11 @@ static int fastrpc_put_args(struct fastrpc_invoke_ctx *ctx,
 	fdlist = (uint64_t *)(pages + inbufs + outbufs + handles);
 
 	for (i = inbufs; i < ctx->nbufs; ++i) {
-		if (!ctx->maps[i]) {
+		if (ctx->maps[i] && ctx->maps[i]->table) {
+			/* drop stale CPU cache lines over what the DSP wrote */
+			dma_sync_sgtable_for_cpu(fl->sctx->dev, ctx->maps[i]->table,
+						 DMA_BIDIRECTIONAL);
+		} else if (!ctx->maps[i]) {
 			void *src = (void *)(uintptr_t)rpra[i].buf.pv;
 			void *dst = (void *)(uintptr_t)ctx->args[i].ptr;
 			u64 len = rpra[i].buf.len;
