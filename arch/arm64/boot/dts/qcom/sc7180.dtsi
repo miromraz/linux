@@ -3645,11 +3645,20 @@
 					<&camnoc_virt MASTER_CAMNOC_HF1_UNCOMP 0
 					 &camnoc_virt SLAVE_CAMNOC_UNCOMP 0>,
 					<&camnoc_virt MASTER_CAMNOC_SF_UNCOMP 0
-					 &camnoc_virt SLAVE_CAMNOC_UNCOMP 0>;
+					 &camnoc_virt SLAVE_CAMNOC_UNCOMP 0>,
+					<&mmss_noc MASTER_CAMNOC_HF0 0
+					 &mc_virt SLAVE_EBI1 0>,
+					<&mmss_noc MASTER_CAMNOC_HF1 0
+					 &mc_virt SLAVE_EBI1 0>,
+					<&mmss_noc MASTER_CAMNOC_SF 0
+					 &mc_virt SLAVE_EBI1 0>;
 			interconnect-names = "cam_ahb",
 					     "cam_hf_0_camnoc",
 					     "cam_hf_1_camnoc",
-					     "cam_sf_camnoc";
+					     "cam_sf_camnoc",
+					     "cam_hf_0_mnoc",
+					     "cam_hf_1_mnoc",
+					     "cam_sf_mnoc";
 
 			power-domains = <&camcc IFE_0_GDSC>,
 					<&camcc IFE_1_GDSC>,

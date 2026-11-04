@@ -2157,6 +2157,22 @@ static const struct resources_icc icc_res_sc7180[] = {
 		.icc_bw_tbl.avg = 2097152,
 		.icc_bw_tbl.peak = 2097152,
 	},
+	/* CAMNOC to DDR; the camnoc_virt votes above do not reach memory */
+	{
+		.name = "cam_hf_0_mnoc",
+		.icc_bw_tbl.avg = 2097152,
+		.icc_bw_tbl.peak = 3000000,
+	},
+	{
+		.name = "cam_hf_1_mnoc",
+		.icc_bw_tbl.avg = 2097152,
+		.icc_bw_tbl.peak = 3000000,
+	},
+	{
+		.name = "cam_sf_mnoc",
+		.icc_bw_tbl.avg = 2097152,
+		.icc_bw_tbl.peak = 3000000,
+	},
 };
 
 static const struct camss_subdev_resources csiphy_res_8250[] = {
@@ -5622,6 +5638,13 @@ static int camss_icc_get(struct camss *camss)
 	for (i = 0; i < camss->res->icc_path_num; i++) {
 		camss->icc_path[i] = devm_of_icc_get(camss->dev,
 						     icc_res[i].name);
+		/* Paths added later are optional for older device trees */
+		if (PTR_ERR(camss->icc_path[i]) == -ENODATA) {
+			dev_warn(camss->dev, "no interconnect %s\n",
+				 icc_res[i].name);
+			camss->icc_path[i] = NULL;
+			continue;
+		}
 		if (IS_ERR(camss->icc_path[i]))
 			return PTR_ERR(camss->icc_path[i]);
 	}
