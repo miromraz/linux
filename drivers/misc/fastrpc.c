@@ -98,6 +98,9 @@
 #define FASTRPC_RMID_INIT_MEM_MAP      10
 #define FASTRPC_RMID_INIT_MEM_UNMAP    11
 
+/* DSP-side AEE_EUNSUPPORTED, as returned in the invoke result */
+#define FASTRPC_DSP_EUNSUPPORTED	((int)0x80000414)
+
 /* Protection Domain(PD) ids */
 #define ROOT_PD		(0)
 #define USER_PD		(1)
@@ -223,6 +226,8 @@ struct fastrpc_map {
 	u64 len;
 	u64 raddr;
 	u32 attr;
+	/* mapped with the legacy INIT_MMAP method, unmap with INIT_MUNMAP */
+	bool legacy_mmap;
 	struct kref refcount;
 };
 
@@ -2061,6 +2066,7 @@ static int fastrpc_req_mem_unmap_impl(struct fastrpc_user *fl, struct fastrpc_me
 	struct fastrpc_invoke_args args[1] = { [0] = { 0 } };
 	struct fastrpc_map *map = NULL, *iter, *m;
 	struct fastrpc_mem_unmap_req_msg req_msg = { 0 };
+	struct fastrpc_munmap_req_msg legacy_msg = { 0 };
 	int err = 0;
 	u32 sc;
 	struct device *dev = fl->sctx->dev;
@@ -2080,15 +2086,22 @@ static int fastrpc_req_mem_unmap_impl(struct fastrpc_user *fl, struct fastrpc_me
 		return -EINVAL;
 	}
 
-	req_msg.client_id = fl->client_id;
-	req_msg.len = map->len;
-	req_msg.vaddrin = map->raddr;
-	req_msg.fd = map->fd;
-
-	args[0].ptr = (u64) (uintptr_t) &req_msg;
-	args[0].length = sizeof(req_msg);
-
-	sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MEM_UNMAP, 1, 0);
+	if (map->legacy_mmap) {
+		legacy_msg.client_id = fl->client_id;
+		legacy_msg.vaddr = map->raddr;
+		legacy_msg.size = map->len;
+		args[0].ptr = (u64) (uintptr_t) &legacy_msg;
+		args[0].length = sizeof(legacy_msg);
+		sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MUNMAP, 1, 0);
+	} else {
+		req_msg.client_id = fl->client_id;
+		req_msg.len = map->len;
+		req_msg.vaddrin = map->raddr;
+		req_msg.fd = map->fd;
+		args[0].ptr = (u64) (uintptr_t) &req_msg;
+		args[0].length = sizeof(req_msg);
+		sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MEM_UNMAP, 1, 0);
+	}
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc,
 				      &args[0]);
 	if (err) {
@@ -2108,6 +2121,43 @@ static int fastrpc_req_mem_unmap(struct fastrpc_user *fl, char __user *argp)
 		return -EFAULT;
 
 	return fastrpc_req_mem_unmap_impl(fl, &req);
+}
+
+/*
+ * Older DSP firmware (e.g. the SM7125/SC7180 CDSP) rejects INIT_MEM_MAP with
+ * AEE_EUNSUPPORTED but implements the legacy INIT_MMAP method, which takes the
+ * same physical page list plus the caller's virtual address. The DSP requests
+ * such fd-backed maps when it grows an unsigned PD's heap.
+ */
+static int fastrpc_mem_map_legacy(struct fastrpc_user *fl,
+				  struct fastrpc_map *map,
+				  struct fastrpc_mem_map *req,
+				  struct fastrpc_phy_page *pages,
+				  struct fastrpc_mmap_rsp_msg *rsp_msg)
+{
+	struct fastrpc_invoke_args args[3] = { [0 ... 2] = { 0 } };
+	struct fastrpc_mmap_req_msg req_msg = { 0 };
+	int err;
+
+	req_msg.client_id = fl->client_id;
+	req_msg.flags = req->flags;
+	req_msg.vaddr = req->vaddrin;
+	req_msg.num = sizeof(*pages);
+
+	args[0].ptr = (u64) (uintptr_t) &req_msg;
+	args[0].length = sizeof(req_msg);
+	args[1].ptr = (u64) (uintptr_t) pages;
+	args[1].length = sizeof(*pages);
+	args[2].ptr = (u64) (uintptr_t) rsp_msg;
+	args[2].length = sizeof(*rsp_msg);
+
+	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE,
+				      FASTRPC_SCALARS(FASTRPC_RMID_INIT_MMAP, 2, 1),
+				      &args[0]);
+	if (!err)
+		map->legacy_mmap = true;
+
+	return err;
 }
 
 static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
@@ -2159,6 +2209,8 @@ static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
 
 	sc = FASTRPC_SCALARS(FASTRPC_RMID_INIT_MEM_MAP, 3, 1);
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc, &args[0]);
+	if (err == FASTRPC_DSP_EUNSUPPORTED && !req.offset)
+		err = fastrpc_mem_map_legacy(fl, map, &req, &pages, &rsp_msg);
 	if (err) {
 		dev_err(dev, "mem mmap error, fd %d, vaddr %llx, size %lld\n",
 			req.fd, req.vaddrin, map->len);
