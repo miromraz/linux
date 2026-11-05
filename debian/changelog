@@ -1,3 +1,11 @@
+linux-sunfish (7.2.8-sm7150-20261105.1+git9a66fdc0d7fd) trixie; urgency=medium
+
+  * Rebase onto stable v7.2.8, the kernel BengalOS ships for its other qcom
+    devices. Kernel release, package names and kernel-base follow it.
+  * Test build: not yet verified on hardware.
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Thu, 05 Nov 2026 00:00:00 +0000
+
 linux-sunfish (7.1.0-sm7150-20261026.3+git473d9fb95156) trixie; urgency=medium
 
   * Align OBS with release/sunfish-0.26.1024.1, including all five lens and

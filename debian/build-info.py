@@ -65,7 +65,7 @@ def main():
     if not re.fullmatch(r'[0-9a-f]{40}', baseline):
         raise ValueError('invalid debian/kernel-base')
     release = Path('include/config/kernel.release').read_text().strip()
-    if release != '7.1.0-sm7150':
+    if release != '7.2.8-sm7150':
         raise ValueError(f'unexpected kernel release: {release}')
     report = {
         'package_version': command('dpkg-parsechangelog', '-S', 'Version'),
