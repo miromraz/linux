@@ -2290,6 +2290,17 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 			goto error_init;
 		}
 
+		if (vfe_line_is_pix(&vfe->line[i])) {
+			ret = vfe_pix_ctrls_init(vfe);
+			if (ret < 0) {
+				dev_err(dev, "Failed to init controls: %d\n",
+					ret);
+				goto error_init;
+			}
+			sd->ctrl_handler = &vfe->pix_ctrls;
+			video_out->vdev.ctrl_handler = &vfe->pix_ctrls;
+		}
+
 		pads[MSM_VFE_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 		pads[MSM_VFE_PAD_SRC].flags = MEDIA_PAD_FL_SOURCE;
 
@@ -2363,6 +2374,7 @@ error_init:
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
 	}
+	v4l2_ctrl_handler_free(&vfe->pix_ctrls);
 
 	return ret;
 }
@@ -2383,6 +2395,7 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
 		v4l2_device_unregister_subdev(sd);
 		media_entity_cleanup(&sd->entity);
 	}
+	v4l2_ctrl_handler_free(&vfe->pix_ctrls);
 
 	/* unregistering a queue can stop and power down the line */
 	mutex_destroy(&vfe->power_lock);

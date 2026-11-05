@@ -13,6 +13,7 @@
 #include <linux/clk.h>
 #include <linux/spinlock_types.h>
 #include <media/media-entity.h>
+#include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
 
@@ -221,6 +222,11 @@ struct vfe_device {
 	bool wedged;
 	/* PIX DMA frames retained after an unconfirmed reset */
 	size_t quarantined;
+	/* PIX image controls, only written while !pix_active (titan170_pix) */
+	struct v4l2_ctrl_handler pix_ctrls;
+	u16 pix_wb_r;	/* U12Q7 */
+	u16 pix_wb_b;	/* U12Q7 */
+	u8 pix_gamma;	/* gamma * 10, 0 = linear */
 	spinlock_t output_lock;
 	enum vfe_line_id wm_output_map[MSM_VFE_IMAGE_MASTERS_NUM];
 	struct vfe_line line[VFE_LINE_NUM_MAX];
@@ -334,6 +340,14 @@ bool vfe_is_lite(struct vfe_device *vfe);
  * titan170_pix module parameter is set.
  */
 bool vfe_line_is_pix(struct vfe_line *line);
+
+/*
+ * vfe_pix_ctrls_init - Create the PIX white balance and gamma controls
+ * @vfe: VFE Device
+ *
+ * Return 0 on success or a negative error code otherwise
+ */
+int vfe_pix_ctrls_init(struct vfe_device *vfe);
 
 /*
  * vfe_hw_version - Process write master done interrupt

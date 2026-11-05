@@ -971,6 +971,30 @@ static void pix_test_lost_done_and_sof_undetected(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
 }
 
+static void pix_test_gamma_curve(struct kunit *test)
+{
+	unsigned int g, in, prev;
+
+	for (in = 0; in <= 1024; in += 16)
+		KUNIT_EXPECT_EQ(test, vfe_pix_gamma_curve(in, 0), min(in, 1023u));
+
+	/* 1023 * (in / 1023) ^ (1 / 2.2) */
+	KUNIT_EXPECT_LE(test, abs((int)vfe_pix_gamma_curve(16, 22) - 155), 1);
+	KUNIT_EXPECT_LE(test, abs((int)vfe_pix_gamma_curve(128, 22) - 398), 1);
+	KUNIT_EXPECT_LE(test, abs((int)vfe_pix_gamma_curve(512, 22) - 747), 1);
+	KUNIT_EXPECT_LE(test, abs((int)vfe_pix_gamma_curve(1008, 22) - 1016), 1);
+
+	/* the LUT delta is unsigned, so the curve must never step back */
+	for (g = 1; g <= GAMMA_CTRL_MAX; g++) {
+		prev = 0;
+		for (in = 0; in <= 1024; in += 16) {
+			KUNIT_EXPECT_GE(test, vfe_pix_gamma_curve(in, g), prev);
+			prev = vfe_pix_gamma_curve(in, g);
+		}
+		KUNIT_EXPECT_EQ(test, prev, 1023);
+	}
+}
+
 static struct kunit_case pix_test_cases[] = {
 	KUNIT_CASE(pix_test_pix_then_rdi),
 	KUNIT_CASE(pix_test_rdi_then_pix),
@@ -994,6 +1018,7 @@ static struct kunit_case pix_test_cases[] = {
 	KUNIT_CASE(pix_test_unretired_at_sof_fails_closed),
 	KUNIT_CASE(pix_test_missed_sof),
 	KUNIT_CASE(pix_test_lost_done_and_sof_undetected),
+	KUNIT_CASE(pix_test_gamma_curve),
 	{}
 };
 

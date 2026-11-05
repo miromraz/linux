@@ -8,6 +8,7 @@
  */
 
 #include <linux/dma-mapping.h>
+#include <linux/int_log.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -15,6 +16,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
 
 #include <kunit/static_stub.h>
@@ -148,6 +150,7 @@
 #define VFE_DEMO_WB_LEFT_OFFSET_CFG_0		(0x704)
 #define VFE_DEMO_WB_LEFT_OFFSET_CFG_1		(0x708)
 #define		WB_GAIN_UNITY			(0x80) /* U12Q7 */
+#define		WB_GAIN_MAX			(0xfff)
 #define VFE_DEMO_INTERP_COEFF_CFG		(0x71c)
 #define VFE_DEMO_INTERP_CLASSIFIER_0		(0x720)
 
@@ -178,6 +181,8 @@
 #define VFE_DMI_DATA_LO				(0xc30)
 #define		GAMMA_LUT_ENTRIES		64
 #define		GAMMA_LUT_DELTA_SHIFT		10
+#define		GAMMA_LUT_MAX			1023
+#define		GAMMA_CTRL_MAX			30
 
 #define VFE_FULL_OUT_Y				(0xe0c)
 #define VFE_FULL_OUT_C				(0xe2c)
@@ -455,8 +460,10 @@ static void vfe_violation_read(struct vfe_device *vfe)
  *
  * Register layout from the stock Titan 170 kernel (cam_vfe170.h,
  * cam_vfe_bus_ver2.c) and the generated titan170_ife.h. Image quality blocks
- * (BLS, LSC, CCM, gamma curve, stats) are left off; the output is a fixed
- * transport proof, not tuned.
+ * (BLS, LSC, CCM, stats) are left off; the output is a transport proof, not
+ * tuned. Only the R/B white balance gains and the RGB LUT gamma are
+ * adjustable, through the pix_ctrls V4L2 controls, and are applied at stream
+ * start.
  */
 
 struct vfe_pix_bayer {
@@ -530,10 +537,41 @@ static void vfe_pix_out_rnd_clamp(struct vfe_device *vfe, u32 base, u32 width,
 }
 
 /*
- * Linear RGB LUT: whatever the internal bit depth after demosaic, CST sees
- * a well defined 10-bit input. Each entry is a 10-bit base and 10-bit delta.
+ * Gamma curve for the RGB LUT: GAMMA_LUT_MAX * (in / GAMMA_LUT_MAX) ^ (10 /
+ * gamma), gamma being the display gamma times 10 and 0 meaning linear. Done
+ * as 2^-(log2(MAX / in) * 10 / gamma): the integer part is a shift, the
+ * fraction goes through a Taylor series of e^-u, u = fraction * ln 2.
  */
-static void vfe_pix_rgb_lut_linear(struct vfe_device *vfe)
+#define LN2_Q30	744261118
+
+static u32 vfe_pix_gamma_curve(u32 in, u32 gamma)
+{
+	u64 t, u, r = 1ULL << 30;
+	unsigned int k, shift;
+
+	if (!gamma || in >= GAMMA_LUT_MAX)
+		return min(in, GAMMA_LUT_MAX);
+	if (!in)
+		return 0;
+
+	/* Q24 */
+	t = div_u64((u64)(intlog2(GAMMA_LUT_MAX) - intlog2(in)) * 10, gamma);
+	if ((t >> 24) > 10)
+		return 0;
+
+	u = ((t & 0xffffff) * LN2_Q30) >> 24;
+	for (k = 6; k; k--)
+		r = (1ULL << 30) - div_u64((r * u) >> 30, k);
+
+	shift = 30 + (t >> 24);
+	return (GAMMA_LUT_MAX * r + (1ULL << (shift - 1))) >> shift;
+}
+
+/*
+ * RGB LUT: whatever the internal bit depth after demosaic, CST sees a well
+ * defined 10-bit input. Each entry is a 10-bit base and 10-bit delta.
+ */
+static void vfe_pix_rgb_lut(struct vfe_device *vfe)
 {
 	static const u8 ram_sel[] = {
 		DMI_RAM_SEL_RGBLUT_CH0_BANK0,
@@ -541,19 +579,20 @@ static void vfe_pix_rgb_lut_linear(struct vfe_device *vfe)
 		DMI_RAM_SEL_RGBLUT_CH2_BANK0,
 	};
 	const u32 step = 1024 / GAMMA_LUT_ENTRIES;
+	u16 curve[GAMMA_LUT_ENTRIES + 1];
 	unsigned int c, i;
+
+	for (i = 0; i <= GAMMA_LUT_ENTRIES; i++)
+		curve[i] = vfe_pix_gamma_curve(i * step, vfe->pix_gamma);
 
 	for (c = 0; c < ARRAY_SIZE(ram_sel); c++) {
 		writel_relaxed(DMI_CFG_AUTO_INC_EN | ram_sel[c],
 			       vfe->base + VFE_DMI_CFG);
 		writel_relaxed(0, vfe->base + VFE_DMI_ADDR);
-		for (i = 0; i < GAMMA_LUT_ENTRIES; i++) {
-			u32 base = i * step;
-			u32 delta = i == GAMMA_LUT_ENTRIES - 1 ? 1023 - base : step;
-
-			writel_relaxed(base | delta << GAMMA_LUT_DELTA_SHIFT,
+		for (i = 0; i < GAMMA_LUT_ENTRIES; i++)
+			writel_relaxed(curve[i] |
+				       (curve[i + 1] - curve[i]) << GAMMA_LUT_DELTA_SHIFT,
 				       vfe->base + VFE_DMI_DATA_LO);
-		}
 	}
 	writel_relaxed(0, vfe->base + VFE_DMI_CFG);
 	/* bank 0 on all three channels */
@@ -594,17 +633,17 @@ static void vfe_pix_config(struct vfe_device *vfe, const struct vfe_pix_bayer *b
 	writel_relaxed(bayer->demux_even, vfe->base + VFE_DEMUX_EVEN_CFG);
 	writel_relaxed(bayer->demux_odd, vfe->base + VFE_DEMUX_ODD_CFG);
 
-	/* demosaic with its reset interpolation defaults, unity WB */
+	/* demosaic with its reset interpolation defaults, green gain unity */
 	writel_relaxed(DEMO_CFG_DYN_G_CLAMP_EN, vfe->base + VFE_DEMO_CFG);
 	writel_relaxed(0x00008000, vfe->base + VFE_DEMO_INTERP_COEFF_CFG);
 	writel_relaxed(0x08000066, vfe->base + VFE_DEMO_INTERP_CLASSIFIER_0);
-	writel_relaxed(WB_GAIN_UNITY | WB_GAIN_UNITY << 16,
+	writel_relaxed(WB_GAIN_UNITY | vfe->pix_wb_b << 16,
 		       vfe->base + VFE_DEMO_WB_LEFT_CFG_0);
-	writel_relaxed(WB_GAIN_UNITY, vfe->base + VFE_DEMO_WB_LEFT_CFG_1);
+	writel_relaxed(vfe->pix_wb_r, vfe->base + VFE_DEMO_WB_LEFT_CFG_1);
 	writel_relaxed(0, vfe->base + VFE_DEMO_WB_LEFT_OFFSET_CFG_0);
 	writel_relaxed(0, vfe->base + VFE_DEMO_WB_LEFT_OFFSET_CFG_1);
 
-	vfe_pix_rgb_lut_linear(vfe);
+	vfe_pix_rgb_lut(vfe);
 
 	for (i = 0; i < 3; i++) {
 		u32 ch = VFE_COLOR_XFORM_CH(i);
@@ -1592,6 +1631,63 @@ static const struct camss_video_ops vfe_video_ops_170 = {
 	.queue_buffer = vfe_queue_buffer_v2,
 	.flush_buffers = vfe_flush_buffers,
 };
+
+static int vfe_pix_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct vfe_device *vfe = container_of(ctrl->handler, struct vfe_device,
+					      pix_ctrls);
+	int ret = 0;
+
+	/* The values are only read when the pipeline is programmed at start */
+	mutex_lock(&vfe->stream_lock);
+	if (vfe->pix_active) {
+		mutex_unlock(&vfe->stream_lock);
+		return -EBUSY;
+	}
+
+	switch (ctrl->id) {
+	case V4L2_CID_RED_BALANCE:
+		vfe->pix_wb_r = ctrl->val;
+		break;
+	case V4L2_CID_BLUE_BALANCE:
+		vfe->pix_wb_b = ctrl->val;
+		break;
+	case V4L2_CID_GAMMA:
+		vfe->pix_gamma = ctrl->val;
+		break;
+	default:
+		ret = -EINVAL;
+	}
+	mutex_unlock(&vfe->stream_lock);
+
+	return ret;
+}
+
+static const struct v4l2_ctrl_ops vfe_pix_ctrl_ops = {
+	.s_ctrl = vfe_pix_s_ctrl,
+};
+
+int vfe_pix_ctrls_init(struct vfe_device *vfe)
+{
+	struct v4l2_ctrl_handler *hdl = &vfe->pix_ctrls;
+	int ret;
+
+	v4l2_ctrl_handler_init(hdl, 3);
+	v4l2_ctrl_new_std(hdl, &vfe_pix_ctrl_ops, V4L2_CID_RED_BALANCE, 0,
+			  WB_GAIN_MAX, 1, WB_GAIN_UNITY);
+	v4l2_ctrl_new_std(hdl, &vfe_pix_ctrl_ops, V4L2_CID_BLUE_BALANCE, 0,
+			  WB_GAIN_MAX, 1, WB_GAIN_UNITY);
+	v4l2_ctrl_new_std(hdl, &vfe_pix_ctrl_ops, V4L2_CID_GAMMA, 0,
+			  GAMMA_CTRL_MAX, 1, 0);
+	ret = hdl->error;
+	if (!ret)
+		/* apply the defaults to the fields vfe_pix_config() reads */
+		ret = v4l2_ctrl_handler_setup(hdl);
+	if (ret)
+		v4l2_ctrl_handler_free(hdl);
+
+	return ret;
+}
 
 static void vfe_subdev_init(struct device *dev, struct vfe_device *vfe)
 {
