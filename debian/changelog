@@ -1,3 +1,13 @@
+linux-sunfish (7.2.8-sm7150-20261106.1+git9a66fdc0d7fd) trixie; urgency=medium
+
+  * CAMSS Titan 170 PIX: red/blue white-balance and gamma controls on the
+    PIX video node (defaults keep the fixed unity/linear pipeline).
+    Hardware-tested on a Pixel 4a: grey-world gains + gamma 2.2 give a
+    neutral, correctly toned frame; no faults.
+  * Includes 20261105.2 (FastRPC fixes, PIX path; both hardware-tested).
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Fri, 06 Nov 2026 00:00:00 +0000
+
 linux-sunfish (7.2.8-sm7150-20261105.2+git9a66fdc0d7fd) trixie; urgency=medium
 
   * FastRPC: sync fd-backed buffers around invocations and fall back to the
