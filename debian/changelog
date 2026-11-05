@@ -1,3 +1,13 @@
+linux-sunfish (7.2.8-sm7150-20261105.2+git9a66fdc0d7fd) trixie; urgency=medium
+
+  * FastRPC: sync fd-backed buffers around invocations and fall back to the
+    legacy INIT_MMAP (both from the A52q port) for CDSP offload.
+  * CAMSS: experimental Titan 170 PIX path (CSID IPP -> VFE NV12), enabled
+    for SM7150 behind qcom_camss.titan170_pix (default off).
+  * Test build: not yet verified on hardware.
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Thu, 05 Nov 2026 00:00:00 +0000
+
 linux-sunfish (7.2.8-sm7150-20261105.1+git9a66fdc0d7fd) trixie; urgency=medium
 
   * Rebase onto stable v7.2.8, the kernel BengalOS ships for its other qcom
