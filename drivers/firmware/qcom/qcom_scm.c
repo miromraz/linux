@@ -121,6 +121,7 @@ enum qcom_scm_qseecom_tz_cmd_listener {
 enum qcom_scm_qseecom_tz_cmd_app {
 	QSEECOM_TZ_CMD_APP_SEND			= 1,
 	QSEECOM_TZ_CMD_APP_START		= 1,	/* (QSEE_OS, APP_MGR) */
+	QSEECOM_TZ_CMD_APP_SHUTDOWN		= 2,	/* (QSEE_OS, APP_MGR) */
 	QSEECOM_TZ_CMD_APP_LOOKUP		= 3,
 };
 
@@ -2296,6 +2297,38 @@ int qcom_scm_qseecom_app_load(phys_addr_t img_phys, size_t mdt_len,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_load);
+
+/**
+ * qcom_scm_qseecom_app_shutdown() - Stop a QSEE app.
+ * @app_id: The ID of the app, as returned by qcom_scm_qseecom_app_load().
+ *
+ * QSEE keeps an app running after the driver that loaded it is gone, and
+ * refuses to load it again while it runs.
+ *
+ * Return: Zero on success, nonzero on failure.
+ */
+int qcom_scm_qseecom_app_shutdown(u32 app_id)
+{
+	struct qcom_scm_qseecom_resp res = {};
+	struct qcom_scm_desc desc = {};
+	int status;
+
+	desc.owner = QSEECOM_TZ_OWNER_QSEE_OS;
+	desc.svc = QSEECOM_TZ_SVC_APP_MGR;
+	desc.cmd = QSEECOM_TZ_CMD_APP_SHUTDOWN;
+	desc.arginfo = QCOM_SCM_ARGS(1, QCOM_SCM_VAL);
+	desc.args[0] = app_id;
+
+	status = qcom_scm_qseecom_call(&desc, &res);
+	if (status)
+		return status;
+
+	if (res.result != QSEECOM_RESULT_SUCCESS)
+		return -EIO;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_shutdown);
 
 /**
  * qcom_scm_qseecom_app_send() - Send to and receive data from a given QSEE app.

@@ -595,8 +595,23 @@ static void fpc1020_remove(struct platform_device *pdev)
 {
 	struct fpc1020 *fpc1020 = platform_get_drvdata(pdev);
 	unsigned int i;
+	int ret;
 
 	misc_deregister(&fpc1020->miscdev);
+
+	/* Waits out a command in flight from a still-open file. */
+	mutex_lock(&fpc1020->lock);
+
+	/*
+	 * QSEE keeps the trustlet running after we are gone and refuses to
+	 * load it again, and cannot look it up by name to attach to it.
+	 */
+	if (fpc1020->ready) {
+		ret = qcom_scm_qseecom_app_shutdown(fpc1020->app_id);
+		if (ret)
+			dev_err(&pdev->dev, "cannot shut the trustlet down: %d\n",
+				ret);
+	}
 
 	/* QSEE would otherwise keep writing into buffers devres frees. */
 	for (i = 0; i < FPC1020_NUM_LISTENERS; i++)
@@ -604,6 +619,8 @@ static void fpc1020_remove(struct platform_device *pdev)
 		    qcom_scm_qseecom_listener_unregister(fpc1020_listeners[i].id))
 			dev_err(&pdev->dev, "cannot unregister listener 0x%x\n",
 				fpc1020_listeners[i].id);
+
+	mutex_unlock(&fpc1020->lock);
 }
 
 static const struct of_device_id fpc1020_of_match[] = {
