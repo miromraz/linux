@@ -1,3 +1,13 @@
+linux-sunfish (7.2.8-sm7150-20261106.4+git9a66fdc0d7fd) trixie; urgency=medium
+
+  * TEST: videocc retain bits for Venus encode. Set the RETAIN_PERIPH and
+    RETAIN_MEM bits (CBCR 13/14) on the Venus core and AXI clocks, as the
+    downstream driver does, to test the SoC reset on the first encoded
+    frame. Not hardware-tested.
+  * Includes 20261106.3 (QRTR early-packet fix).
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Fri, 06 Nov 2026 00:00:00 +0000
+
 linux-sunfish (7.2.8-sm7150-20261106.3+git9a66fdc0d7fd) trixie; urgency=medium
 
   * net: qrtr: smd: queue packets that arrive before probe completes. A
