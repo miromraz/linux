@@ -1,3 +1,14 @@
+linux-sunfish (7.2.8-sm7150-20261106.3+git9a66fdc0d7fd) trixie; urgency=medium
+
+  * net: qrtr: smd: queue packets that arrive before probe completes. A
+    remote that speaks as soon as its channel opens could lose its first
+    packets; on a Pixel 4a one boot came up without the ADSP audio services
+    (no sound card). Hardware-tested: 4 clean boots, and a qrtr_smd reload
+    storm queued (not dropped) an early modem packet; services recovered.
+  * Includes 20261106.1 (FastRPC fixes, Titan 170 PIX path + controls).
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Fri, 06 Nov 2026 00:00:00 +0000
+
 linux-sunfish (7.2.8-sm7150-20261106.1+git9a66fdc0d7fd) trixie; urgency=medium
 
   * CAMSS Titan 170 PIX: red/blue white-balance and gamma controls on the
