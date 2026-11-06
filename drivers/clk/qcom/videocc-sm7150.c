@@ -322,11 +322,31 @@ static const u32 videocc_sm7150_critical_cbcrs[] = {
 	0x984, /* VIDEOCC_XO_CLK */
 };
 
+static void videocc_sm7150_clk_regs_configure(struct device *dev,
+					      struct regmap *regmap)
+{
+	/*
+	 * Downstream sets RETAIN_PERIPH and RETAIN_MEM on every Venus clock
+	 * before enabling it, which sets CBCR bits 13 and 14.
+	 */
+	qcom_branch_set_force_periph_on(regmap, videocc_mvs0_core_clk, true);
+	qcom_branch_set_force_mem_core(regmap, videocc_mvs0_core_clk, true);
+	qcom_branch_set_force_periph_on(regmap, videocc_mvs0_axi_clk, true);
+	qcom_branch_set_force_mem_core(regmap, videocc_mvs0_axi_clk, true);
+	qcom_branch_set_force_periph_on(regmap, videocc_mvs1_core_clk, true);
+	qcom_branch_set_force_mem_core(regmap, videocc_mvs1_core_clk, true);
+	qcom_branch_set_force_periph_on(regmap, videocc_mvs1_axi_clk, true);
+	qcom_branch_set_force_mem_core(regmap, videocc_mvs1_axi_clk, true);
+	qcom_branch_set_force_periph_on(regmap, videocc_mvsc_core_clk, true);
+	qcom_branch_set_force_mem_core(regmap, videocc_mvsc_core_clk, true);
+}
+
 static const struct qcom_cc_driver_data videocc_sm7150_driver_data = {
 	.alpha_plls = videocc_sm7150_plls,
 	.num_alpha_plls = ARRAY_SIZE(videocc_sm7150_plls),
 	.clk_cbcrs = videocc_sm7150_critical_cbcrs,
 	.num_clk_cbcrs = ARRAY_SIZE(videocc_sm7150_critical_cbcrs),
+	.clk_regs_configure = videocc_sm7150_clk_regs_configure,
 };
 
 static const struct qcom_cc_desc videocc_sm7150_desc = {
