@@ -1,3 +1,12 @@
+linux-sunfish (7.2.8-sm7150-20261106.2+git9a66fdc0d7fd) trixie; urgency=medium
+
+  * LPASS rx/tx/va macros: switch to the PM clock framework (upstream v7.3
+    backport) so the LPASS_HW_MACRO vote drops when audio is idle.
+  * sm7150 LPI pinctrl: add the runtime PM ops every other variant has.
+  * Test build for ADSP power collapse; not yet verified on hardware.
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Fri, 06 Nov 2026 00:00:00 +0000
+
 linux-sunfish (7.2.8-sm7150-20261106.1+git9a66fdc0d7fd) trixie; urgency=medium
 
   * CAMSS Titan 170 PIX: red/blue white-balance and gamma controls on the
