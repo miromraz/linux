@@ -1,3 +1,13 @@
+linux-sunfish (7.2.8-sm7150-20261107.1+git9a66fdc0d7fd) trixie; urgency=medium
+
+  * misc: fpc1020: shut the trustlet down on remove. Adds
+    qcom_scm_qseecom_app_shutdown(); without it the FPC TA stays resident
+    after rmmod and the next load fails with -22 until a reboot.
+    Hardware-tested on a Pixel 4a: load, rmmod, reload works.
+  * Includes 20261106.3 (QRTR early-packet fix).
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Sat, 07 Nov 2026 00:00:00 +0000
+
 linux-sunfish (7.2.8-sm7150-20261106.3+git9a66fdc0d7fd) trixie; urgency=medium
 
   * net: qrtr: smd: queue packets that arrive before probe completes. A
