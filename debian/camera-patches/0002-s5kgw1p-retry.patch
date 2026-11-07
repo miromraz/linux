@@ -1,0 +1,79 @@
+From e8426a5da5023c30fe7fb75a774ed60b81c1896a Mon Sep 17 00:00:00 2001
+From: miromraz <miroslav.mraz@techmania.cz>
+Date: Fri, 6 Nov 2026 15:04:08 +0000
+Subject: [PATCH] media: i2c: s5kgw1p: retry stream start after a power cycle
+
+The sensor intermittently NAKs the very first I2C access after reset is
+released; CCI reports it as a queue timeout (-110). The probe already
+retries the chip-id read with a power cycle, but stream-on did not: when
+the first write after runtime resume (page select at 0xfcfc, the start of
+the init sequence) hit the glitch, the whole stream start failed:
+
+  i2c-qcom-cci ac4a000.cci: master 0 queue 0 timeout
+  s5kgw1p 15-002d: Error writing reg 0xfcfc: -110
+  qcom-camss acb3000.isp: start-failure unwind: subdev stream-on failed (-110)
+
+Retry s5kgw1p_start() up to S5KGW1P_ID_RETRIES times, power-cycling the
+sensor between attempts (power_off, 5-6 ms, power_on) like the probe.
+The cycle goes through runtime PM (put_sync_suspend/resume_and_get) so
+the PM status and usage count stay consistent on every path, including a
+failed power-on. Re-running start() after a partial write is safe: it
+begins with the page select and a software reset.
+
+Signed-off-by: miromraz <miroslav.mraz@techmania.cz>
+---
+ drivers/media/i2c/s5kgw1p.c | 31 +++++++++++++++++++++++++++----
+ 1 file changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/media/i2c/s5kgw1p.c b/drivers/media/i2c/s5kgw1p.c
+index 5e88e25882c4..5ea6c3303add 100644
+--- a/drivers/media/i2c/s5kgw1p.c
++++ b/drivers/media/i2c/s5kgw1p.c
+@@ -223,6 +223,7 @@ static int s5kgw1p_s_stream(struct v4l2_subdev *sd, int enable)
+ {
+ 	struct s5kgw1p *s = to_s5kgw1p(sd);
+ 	struct i2c_client *c = v4l2_get_subdevdata(sd);
++	unsigned int i;
+ 	int ret = 0;
+ 
+ 	mutex_lock(&s->lock);
+@@ -233,10 +234,32 @@ static int s5kgw1p_s_stream(struct v4l2_subdev *sd, int enable)
+ 		ret = pm_runtime_resume_and_get(&c->dev);
+ 		if (ret < 0)
+ 			goto out;
+-		ret = s5kgw1p_start(s);
+-		if (ret) {
+-			pm_runtime_put(&c->dev);
+-			goto out;
++		/*
++		 * The first I2C access after reset is released can NAK (CCI
++		 * queue timeout, -110), as in probe. start() begins with a
++		 * software reset, so retry it after power-cycling the sensor
++		 * through runtime PM (power_off, 5-6 ms, power_on), which keeps
++		 * the PM status and usage count consistent on every path.
++		 */
++		for (i = 0; ; i++) {
++			ret = s5kgw1p_start(s);
++			if (!ret)
++				break;
++			if (i >= S5KGW1P_ID_RETRIES) {
++				dev_err(&c->dev, "stream start failed: %d\n", ret);
++				pm_runtime_put(&c->dev);
++				goto out;
++			}
++			dev_dbg(&c->dev, "stream start failed (%d), retrying\n",
++				ret);
++			pm_runtime_put_sync_suspend(&c->dev);
++			usleep_range(5000, 6000);
++			ret = pm_runtime_resume_and_get(&c->dev);
++			if (ret < 0) {
++				dev_err(&c->dev, "stream start power-on failed: %d\n",
++					ret);
++				goto out;
++			}
+ 		}
+ 	} else {
+ 		cci_write(s->regmap, S5KGW1P_REG_MODE_SELECT, 0, NULL);
+-- 
+2.47.3
+

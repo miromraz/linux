@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Miroslav Mraz <mraz.miro@seznam.cz>
 Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 12)
-Build-Depends-Arch: bc, bison, flex,
+Build-Depends-Arch: patch, bc, bison, flex,
  gcc-aarch64-linux-gnu <!pkg.linux-a52q-mainline.nokernelheaders>,
  kmod, libdw-dev:native, libelf-dev:native,
  libssl-dev:native, libssl-dev <!pkg.linux-a52q-mainline.nokernelheaders>,

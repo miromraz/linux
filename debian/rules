@@ -52,6 +52,7 @@ define binary
 	$(Q)dh_testroot $(DH_OPTIONS)
 	$(Q)dh_prep $(DH_OPTIONS)
 	$(Q)+$(MAKE) $(make-opts) run-command KBUILD_RUN_COMMAND='+$$(srctree)/scripts/package/builddeb $(package)'
+	$(Q)if [ "$(package)" = "$(image-package)" ]; then install -Dm644 debian/camera-defaults.conf debian/$(package)/usr/lib/modprobe.d/90-a52q-camera.conf; fi
 	$(Q)dh_installdocs $(DH_OPTIONS)
 	$(Q)dh_installchangelogs $(DH_OPTIONS)
 	$(Q)dh_compress $(DH_OPTIONS)
@@ -75,7 +76,7 @@ binary-arch: $(binary-targets)
 .PHONY: build build-indep build-arch
 build: build-arch build-indep
 build-indep:
-build-arch:
+build-arch: debian/camera-patches/applied
 	$(Q)$(MAKE) $(make-opts) a52q_defconfig
 	$(Q)$(MAKE) $(make-opts) olddefconfig
 	$(Q)$(MAKE) $(make-opts) $(if $(filter um,$(ARCH)),,headers) all
@@ -96,3 +97,8 @@ debian/deb-env.vars:
 	$(Q)dpkg-architecture -a$$(cat debian/arch) --print-set --print-format=make > $@.tmp
 	$(Q)mv $@.tmp $@
 endif
+
+# Camera additions relative to the pinned dbgisp OBS baseline.
+debian/camera-patches/applied:
+	set -e; while read p; do patch -p1 --forward --fuzz=0 < debian/camera-patches/$$p; done < debian/camera-patches/series
+	touch $@

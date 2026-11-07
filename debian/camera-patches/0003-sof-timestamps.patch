@@ -1,0 +1,355 @@
+From dfea195cfc04237048a6031a35f860f49ccb2301 Mon Sep 17 00:00:00 2001
+From: miromraz <miroslav.mraz@techmania.cz>
+Date: Sat, 7 Nov 2026 13:25:43 +0000
+Subject: [PATCH] media: qcom: camss: vfe-17x: stamp PIX and RDI buffers at
+ their SOF
+
+The Titan 170 PIX and RDI buffers carried the host time of the
+composite or write-master done, 4-7 ms (2000x1128) or 33 ms
+(4624x3468) after the frame started, while userspace wants the
+exposure timing of the frame.
+
+Stamp each buffer with the host time of its frame's start of frame
+instead, still CLOCK_MONOTONIC. PIX already keeps it in the frame
+token (CAMIF SOF, the frame identity the completions are validated
+against). For RDI, record the RDI SOF IRQ (STATUS_0 bit 27 + n, as the
+downstream rdi sof_irq_mask; the dispatch already tested that bit) per
+line, after the write-master dones of the same snapshot: a frame's done
+can share a snapshot with the next SOF (0.03-0.16 ms apart at full
+resolution) but not with its own. The done time remains the fallback if
+no SOF was seen since the output was enabled.
+
+SOF follows the CSI-2 frame start packet, which the sensor sends as it
+reads out the first row, so the time is the end of that row's
+exposure; the queues keep the default TSTAMP_SRC_EOF flag, as V4L2 has
+no start-of-readout source and SOE would be early by the exposure.
+
+KUnit expectations follow the SOF timestamps; 115 CAMSS tests pass.
+---
+ .../platform/qcom/camss/camss-vfe-17x-test.c  | 53 +++++++++----------
+ .../media/platform/qcom/camss/camss-vfe-17x.c | 37 ++++++++-----
+ drivers/media/platform/qcom/camss/camss-vfe.c |  1 +
+ drivers/media/platform/qcom/camss/camss-vfe.h |  6 +--
+ 4 files changed, 53 insertions(+), 44 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-17x-test.c b/drivers/media/platform/qcom/camss/camss-vfe-17x-test.c
+index 3d273a02185c..2208ab545870 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe-17x-test.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe-17x-test.c
+@@ -1061,9 +1061,8 @@ static void pix_test_reset_unconfirmed(struct kunit *test)
+ }
+ 
+ /*
+- * Each delivered buffer carries its own SOF sequence and the done time;
+- * the token keeps the SOF time. Each restart is a new generation counting
+- * from 0.
++ * Each delivered buffer carries its own SOF sequence and SOF time, not the
++ * done time. Each restart is a new generation counting from 0.
+  */
+ static void pix_test_token_and_generation(struct kunit *test)
+ {
+@@ -1091,7 +1090,7 @@ static void pix_test_token_and_generation(struct kunit *test)
+ 		KUNIT_ASSERT_EQ(test, t->nreturned, 3);
+ 		for (n = 0; n < 3; n++) {
+ 			KUNIT_EXPECT_EQ(test, t->seq[n], n);
+-			KUNIT_EXPECT_EQ(test, t->ts[n], 1050 + 100 * n);
++			KUNIT_EXPECT_EQ(test, t->ts[n], 1000 + 100 * n);
+ 			KUNIT_EXPECT_EQ(test, t->state[n], VB2_BUF_STATE_DONE);
+ 		}
+ 		KUNIT_EXPECT_EQ(test, t->faults, 0);
+@@ -1571,12 +1570,12 @@ static void pix_queue2(struct pix_test *t, unsigned int i)
+  * Synthetic validated completion supplied by a second consumer, independent
+  * of image DONE. This does not model BHIST's token/IRQ association.
+  */
+-static void pix_ring2_done(struct pix_test *t, const struct vfe_pix_token *tok, u64 ts)
++static void pix_ring2_done(struct pix_test *t, const struct vfe_pix_token *tok)
+ {
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&t->vfe.output_lock, flags);
+-	vfe_pix_ring_retire(pix_ring2(t), tok, ts, false);
++	vfe_pix_ring_retire(pix_ring2(t), tok, false);
+ 	vfe_pix_ring_advance(&t->vfe, pix_ring2(t));
+ 	spin_unlock_irqrestore(&t->vfe.output_lock, flags);
+ }
+@@ -1584,7 +1583,7 @@ static void pix_ring2_done(struct pix_test *t, const struct vfe_pix_token *tok,
+ static void pix_two_frame(struct pix_test *t, u64 ts)
+ {
+ 	pix_snap(t, true, false, ts);
+-	pix_ring2_done(t, &pix_st(t)->tok, ts + 20);
++	pix_ring2_done(t, &pix_st(t)->tok);
+ 	pix_snap(t, false, true, ts + 10);
+ 	flush_work(&pix_img(t)->copy_work);
+ 	flush_work(&pix_ring2(t)->copy_work);
+@@ -1607,7 +1606,7 @@ static void pix_expect_return(struct kunit *test, struct pix_test *t,
+ 	KUNIT_EXPECT_EQ(test, matches, 1);
+ }
+ 
+-/* Each consumer has its own FIFO, vb2 starvation and completion timestamp. */
++/* Each consumer has its own FIFO and vb2 starvation; both stamp the SOF. */
+ static void pix_test_two_ring_consumers(struct kunit *test)
+ {
+ 	struct pix_test *t = test->priv;
+@@ -1638,12 +1637,12 @@ static void pix_test_two_ring_consumers(struct kunit *test)
+ 	pix_two_frame(t, 400);
+ 
+ 	KUNIT_ASSERT_EQ(test, t->nreturned, 6);
+-	pix_expect_return(test, t, &t->buf[0], 0, 110, VB2_BUF_STATE_DONE);
+-	pix_expect_return(test, t, &t->buf[1], 1, 210, VB2_BUF_STATE_DONE);
+-	pix_expect_return(test, t, &t->buf[2], 3, 410, VB2_BUF_STATE_DONE);
+-	pix_expect_return(test, t, &t->buf2[0], 1, 220, VB2_BUF_STATE_DONE);
+-	pix_expect_return(test, t, &t->buf2[1], 2, 320, VB2_BUF_STATE_DONE);
+-	pix_expect_return(test, t, &t->buf2[2], 3, 420, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf[0], 0, 100, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf[1], 1, 200, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf[2], 3, 400, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf2[0], 1, 200, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf2[1], 2, 300, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf2[2], 3, 400, VB2_BUF_STATE_DONE);
+ 	KUNIT_EXPECT_EQ(test, t->copied2[0], PIX_TEST_RING2_DMA(1));
+ 	KUNIT_EXPECT_EQ(test, t->copied2[1], PIX_TEST_RING2_DMA(2));
+ 	KUNIT_EXPECT_EQ(test, t->copied2[2], PIX_TEST_RING2_DMA(0));
+@@ -1670,7 +1669,7 @@ static void pix_test_two_ring_stats_copy_stalls(struct kunit *test)
+ 	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+ 	t->block_copy2 = true;
+ 	pix_sof(t);
+-	pix_ring2_done(t, &pix_st(t)->tok, 1);
++	pix_ring2_done(t, &pix_st(t)->tok);
+ 	pix_done(t);
+ 	flush_work(&pix_img(t)->copy_work);
+ 	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy2_entered, HZ));
+@@ -1678,7 +1677,7 @@ static void pix_test_two_ring_stats_copy_stalls(struct kunit *test)
+ 	for (i = 0; i < 6; i++) {
+ 		pix_queue(t, 0);
+ 		pix_sof(t);
+-		pix_ring2_done(t, &pix_st(t)->tok, 2 + i);
++		pix_ring2_done(t, &pix_st(t)->tok);
+ 		pix_done(t);
+ 		flush_work(&pix_img(t)->copy_work);
+ 		KUNIT_EXPECT_NE(test, ring->hw[0], 0);
+@@ -1703,7 +1702,7 @@ static void pix_test_two_ring_stats_copy_stalls(struct kunit *test)
+ 	/* Two in-flight drop slots must pass before a normal frame returns. */
+ 	for (i = 0; i < 3; i++)
+ 		pix_two_frame(t, 100 + i);
+-	pix_expect_return(test, t, &t->buf2[1], 9, 122, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf2[1], 9, 102, VB2_BUF_STATE_DONE);
+ 	KUNIT_EXPECT_EQ(test, t->bad_handoff, 0);
+ 	KUNIT_EXPECT_EQ(test, t->faults, 0);
+ 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+@@ -1724,14 +1723,14 @@ static void pix_test_two_ring_image_copy_stalls(struct kunit *test)
+ 	KUNIT_ASSERT_EQ(test, pix_ring2_start(t), 0);
+ 	t->block_copy = true;
+ 	pix_sof(t);
+-	pix_ring2_done(t, &pix_st(t)->tok, 1);
++	pix_ring2_done(t, &pix_st(t)->tok);
+ 	pix_done(t);
+ 	flush_work(&pix_ring2(t)->copy_work);
+ 	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy_entered, HZ));
+ 	for (i = 0; i < 6; i++) {
+ 		pix_queue2(t, 0);
+ 		pix_sof(t);
+-		pix_ring2_done(t, &pix_st(t)->tok, 2 + i);
++		pix_ring2_done(t, &pix_st(t)->tok);
+ 		pix_done(t);
+ 		flush_work(&pix_ring2(t)->copy_work);
+ 		KUNIT_EXPECT_NE(test, pix_img(t)->hw[0], 0);
+@@ -1768,12 +1767,12 @@ static void pix_two_ring_stop_copy(struct kunit *test, bool reset_ack)
+ 	t->block_copy = true;
+ 	t->block_copy2 = true;
+ 	pix_sof(t);
+-	pix_ring2_done(t, &pix_st(t)->tok, 20);
++	pix_ring2_done(t, &pix_st(t)->tok);
+ 	pix_done(t);
+ 	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy_entered, HZ));
+ 	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy2_entered, HZ));
+ 	pix_sof(t);
+-	pix_ring2_done(t, &pix_st(t)->tok, 30);
++	pix_ring2_done(t, &pix_st(t)->tok);
+ 	pix_done(t); /* one more ready in each ring, no copy may start at stop */
+ 
+ 	t->ack_reset = reset_ack;
+@@ -1877,10 +1876,10 @@ static void pix_test_two_ring_frame_error(struct kunit *test)
+ 	vfe_pix_error(&t->vfe, 0, STATUS_1_CAMIF_ERROR, 0);
+ 	pix_two_frame(t, 100);
+ 	pix_two_frame(t, 200);
+-	pix_expect_return(test, t, &t->buf[0], 0, 110, VB2_BUF_STATE_ERROR);
+-	pix_expect_return(test, t, &t->buf2[0], 0, 120, VB2_BUF_STATE_ERROR);
+-	pix_expect_return(test, t, &t->buf[1], 1, 210, VB2_BUF_STATE_DONE);
+-	pix_expect_return(test, t, &t->buf2[1], 1, 220, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf[0], 0, 100, VB2_BUF_STATE_ERROR);
++	pix_expect_return(test, t, &t->buf2[0], 0, 100, VB2_BUF_STATE_ERROR);
++	pix_expect_return(test, t, &t->buf[1], 1, 200, VB2_BUF_STATE_DONE);
++	pix_expect_return(test, t, &t->buf2[1], 1, 200, VB2_BUF_STATE_DONE);
+ 	KUNIT_EXPECT_EQ(test, pix_stop(t, pix_line(t)), 0);
+ }
+ 
+@@ -1900,12 +1899,12 @@ static void pix_test_two_ring_fault_fails_closed(struct kunit *test)
+ 	t->block_copy = true;
+ 	t->block_copy2 = true;
+ 	pix_sof(t);
+-	pix_ring2_done(t, &pix_st(t)->tok, 1);
++	pix_ring2_done(t, &pix_st(t)->tok);
+ 	pix_done(t);
+ 	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy_entered, HZ));
+ 	KUNIT_ASSERT_TRUE(test, wait_for_completion_timeout(&t->copy2_entered, HZ));
+ 	pix_sof(t);
+-	pix_ring2_done(t, &pix_st(t)->tok, 2);
++	pix_ring2_done(t, &pix_st(t)->tok);
+ 	pix_done(t);
+ 	KUNIT_EXPECT_EQ(test, pix_img(t)->nready, 1);
+ 	KUNIT_EXPECT_EQ(test, pix_ring2(t)->nready, 1);
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-17x.c b/drivers/media/platform/qcom/camss/camss-vfe-17x.c
+index 6ce6f8af9d61..7cd2d979f2ab 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe-17x.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe-17x.c
+@@ -1501,7 +1501,7 @@ static void vfe_pix_copy_work(struct work_struct *work)
+ 		if (buf) {
+ 			vfe_pix_frame_to_cpu(vfe, ring->size, f);
+ 			ret = ring->ops->copy(vfe, ring, f, buf);
+-			buf->vb.vb2_buf.timestamp = f->done_ts;
++			buf->vb.vb2_buf.timestamp = f->token.timestamp;
+ 			buf->vb.sequence = f->token.sequence;
+ 			vfe_pix_return_buf(buf, ret || f->error ? VB2_BUF_STATE_ERROR :
+ 							   VB2_BUF_STATE_DONE);
+@@ -1592,13 +1592,13 @@ static void vfe_pix_ring_start(struct vfe_device *vfe, struct vfe_pix_ring *ring
+ /*
+  * vfe_pix_ring_retire - The frame in hw[0] completed. Locked.
+  *
+- * Queue it for its copy with @tok and done time @ts, unless it is the drop
++ * Queue it for its copy with @tok, unless it is the drop
+  * frame or delivery stopped. Return whether it was queued. The caller must
+  * validate the consumer's completion/token association first and advance
+  * once afterwards. This helper establishes no hardware frame identity.
+  */
+ static bool vfe_pix_ring_retire(struct vfe_pix_ring *ring,
+-				const struct vfe_pix_token *tok, u64 ts, bool hold)
++				const struct vfe_pix_token *tok, bool hold)
+ {
+ 	u8 head = ring->hw[0];
+ 
+@@ -1606,7 +1606,6 @@ static bool vfe_pix_ring_retire(struct vfe_pix_ring *ring,
+ 		return false;
+ 
+ 	ring->frame[head].token = *tok;
+-	ring->frame[head].done_ts = ts;
+ 	ring->frame[head].error = ring->frame_error;
+ 	ring->ready[ring->nready++] = head;
+ 	/* Held until the next SOF proves the count belonged to this frame. */
+@@ -2043,9 +2042,9 @@ int vfe170_params_commit(struct vfe_line *line, const struct vfe_pix_params *con
+  * Every SOF gets the next sequence of the stream generation and a
+  * FRAME_SYNC event, and its token goes to the frame starting in hw[0].
+  * The composite done retires hw[0] with that token: the delivered buffer
+- * gets the token's sequence and the done snapshot time as its timestamp
+- * (the queue's default V4L2 end-of-frame meaning). The token's SOF time
+- * stays internal; FRAME_SYNC gets a later host notification timestamp.
++ * gets the token's sequence and SOF snapshot time as its timestamp. That is
++ * the CSI-2 frame start, sent as the first row's readout begins, i.e. the
++ * end of its exposure; FRAME_SYNC gets a later host notification timestamp.
+  *
+  * Strict alternation, fail closed otherwise: at most one frame is started
+  * and not retired. A SOF while the previous frame is unretired (its done
+@@ -2122,7 +2121,7 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done,
+ 		st->tok.valid = st->pending_rings != 0;
+ 
+ 		head = img->hw[0];
+-		deliver = vfe_pix_ring_retire(img, &tok, ts, next && !sof);
++		deliver = vfe_pix_ring_retire(img, &tok, next && !sof);
+ 		if (trace_camss_pix_done_enabled())
+ 			trace_camss_pix_done(vfe->id, tok.generation, tok.sequence,
+ 					     tok.valid, head, img->frame[head].dma,
+@@ -2146,7 +2145,7 @@ static void vfe_pix_frame_irq(struct vfe_device *vfe, bool sof, bool done,
+ 		st->tok.valid = st->pending_rings != 0;
+ 		if (stats->ops) {
+ 			head = stats->hw[0];
+-			deliver = vfe_pix_ring_retire(stats, &tok, ts, next && !sof);
++			deliver = vfe_pix_ring_retire(stats, &tok, next && !sof);
+ 			trace_camss_bhist_done(vfe->id, tok.generation, tok.sequence,
+ 					      tok.valid, stats->frame[head].dma,
+ 					      vfe_pix_wm_last(vfe, VFE_STATS_WM),
+@@ -2325,10 +2324,6 @@ static irqreturn_t vfe_isr(int irq, void *dev)
+ 		if (status0 & STATUS_0_RDI_REG_UPDATE(i))
+ 			vfe->isr_ops.reg_update(vfe, i);
+ 
+-	for (i = VFE_LINE_RDI0; i < rdi_num; i++)
+-		if (status0 & STATUS_1_RDI_SOF(i))
+-			vfe->isr_ops.sof(vfe, i);
+-
+ 	if (pix) {
+ 		if (status0 & STATUS_0_PIX_REG_UPDATE)
+ 			vfe->isr_ops.reg_update(vfe, VFE_LINE_PIX);
+@@ -2370,6 +2365,19 @@ static irqreturn_t vfe_isr(int irq, void *dev)
+ 				vfe->isr_ops.wm_done(vfe, wm);
+ 	}
+ 
++	/*
++	 * RDI SOF (STATUS_0 bit 27 + n, as the downstream rdi sof_irq_mask),
++	 * the time stamped on the line's next buffer done. After the dones: a
++	 * frame's done precedes the next SOF by as little as 0.03 ms at full
++	 * resolution and can share its snapshot, never its own SOF's (readout
++	 * takes most of the frame).
++	 */
++	for (i = VFE_LINE_RDI0; i < rdi_num; i++)
++		if (status0 & STATUS_1_RDI_SOF(i)) {
++			vfe->line[i].output.sof_ts = ts;
++			vfe->isr_ops.sof(vfe, i);
++		}
++
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -2580,7 +2588,8 @@ static void vfe_isr_wm_done(struct vfe_device *vfe, u8 wm)
+ 		goto out_unlock;
+ 	}
+ 
+-	ready_buf->vb.vb2_buf.timestamp = ts;
++	/* The frame's SOF, as on the PIX line; done time if none was seen */
++	ready_buf->vb.vb2_buf.timestamp = output->sof_ts ?: ts;
+ 	ready_buf->vb.sequence = output->sequence++;
+ 
+ 	index = 0;
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.c b/drivers/media/platform/qcom/camss/camss-vfe.c
+index 251d85ae70dc..30626a20db5c 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe.c
+@@ -579,6 +579,7 @@ int vfe_enable_output_v2(struct vfe_line *line)
+ 	output->state = VFE_OUTPUT_ON;
+ 
+ 	output->sequence = 0;
++	output->sof_ts = 0;
+ 	output->wait_reg_update = 0;
+ 	reinit_completion(&output->reg_update);
+ 
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.h b/drivers/media/platform/qcom/camss/camss-vfe.h
+index 17f3b60d11bf..e49e9a9a621a 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.h
++++ b/drivers/media/platform/qcom/camss/camss-vfe.h
+@@ -77,8 +77,8 @@ enum vfe_pix_ring_id {
+ 
+ /*
+  * Identity of a frame: stream generation, PIX SOF sequence and host SOF
+- * time. The SOF time is not an exposure start (rolling shutter, offset not
+- * calibrated) and is not the vb2 timestamp. FRAME_SYNC carries the same
++ * time. The SOF time is the vb2 timestamp; it is the end of the first row's
++ * exposure (CSI-2 frame start), not its start. FRAME_SYNC carries the same
+  * sequence with a later host notification timestamp.
+  */
+ struct vfe_pix_token {
+@@ -92,7 +92,6 @@ struct vfe_pix_frame {
+ 	void *cpu;
+ 	dma_addr_t dma;
+ 	struct vfe_pix_token token;
+-	u64 done_ts;		/* composite done: vb2 timestamp, V4L2 EOF meaning */
+ 	bool error;
+ };
+ 
+@@ -179,6 +178,7 @@ struct vfe_output {
+ 	};
+ 	enum vfe_output_state state;
+ 	unsigned int sequence;
++	u64 sof_ts;		/* Titan 170 RDI: host time of the latest SOF */
+ 
+ 	int wait_reg_update;
+ 	struct completion sof;
+-- 
+2.47.3
+
