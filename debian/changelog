@@ -1,3 +1,13 @@
+linux-sunfish (7.2.8-sm7150-20261107.1+git9a66fdc0d7fd) trixie; urgency=medium
+
+  * misc: fpc1020: shut the trustlet down on remove, through a new
+    qcom_scm_qseecom_app_shutdown(). QSEE kept the FPC trustlet running
+    after an unbind or rmmod and refused to load it again, so the sensor
+    stayed dead until a reboot. Hardware-tested on a +fpc1 test kernel.
+  * Otherwise identical to 20261106.3.
+
+ -- Miroslav Mraz <mraz.miro@seznam.cz>  Sat, 07 Nov 2026 00:00:00 +0000
+
 linux-sunfish (7.2.8-sm7150-20261106.3+git9a66fdc0d7fd) trixie; urgency=medium
 
   * net: qrtr: smd: queue packets that arrive before probe completes. A
